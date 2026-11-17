@@ -1,6 +1,23 @@
-[package]
-name = "interlaken"
+[workspace]
+resolver = "3"
+members = ["crates/storage"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
 
-[dependencies]
+[workspace.dependencies]
+interlaken-storage = { path = "crates/storage" }
+fjall = "3.1"
+thiserror = "2"
+proptest = "1"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

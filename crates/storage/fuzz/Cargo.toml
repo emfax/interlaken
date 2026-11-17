@@ -1,0 +1,29 @@
+[package]
+name = "interlaken-storage-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+interlaken-storage = { path = ".." }
+
+[[bin]]
+name = "decode_tuple"
+path = "fuzz_targets/decode_tuple.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "split_versioned_key"
+path = "fuzz_targets/split_versioned_key.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

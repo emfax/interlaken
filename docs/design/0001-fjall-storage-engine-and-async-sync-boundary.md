@@ -76,7 +76,7 @@ MVP scope: single node; no multi-process access to one database directory; no on
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Crate skeleton and keyspaces** - M1
+- [x] **Phase 1: Crate skeleton and keyspaces** - M1
 - [ ] **Phase 2: Storage pool, bounded queue and `Storage` trait** - M2
 
 ## Consequences

@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3cb478d6bd75f1829125ca962a4fb6f8958466a7ffef39312bde7a5ad24a0f21 # shrinks to (schema, values) = ([(Float8, SortOrder { direction: Asc, nulls: Last })], [Float8(-0.0)])
+cc 08f262b301c671d1f5ef3e8ba912ac25392873b5b58804e7cdaf3cbdeb40d539 # shrinks to (schema, values) = ([(Float8, SortOrder { direction: Asc, nulls: Last })], [Float8(-0.0)])
+cc bdd4e6fbbe8fe895d9095b1ade9857bc19b613c70f36931444ed17aa551fc9fc # shrinks to (schema, a, b) = ([(Float8, SortOrder { direction: Asc, nulls: Last })], [Float8(-0.0)], [Float8(0.0)])
+cc daac626f17e3145c917ed236deb2c9f70fe6c872c87b1d234a43f7ff99c066f4 # shrinks to (schema, values) = ([(Text, SortOrder { direction: Asc, nulls: Last })], [Text("\u{1}\0")]), op = 101, at = 11971536541406354893, value = 0
+cc e2adb257e9a7a204a83b3023da2593d19fe14f664e556abb3fb0e1fc5b572266 # shrinks to (schema, a, b) = ([(Text, SortOrder { direction: Asc, nulls: Last })], [Text("\0\0")], [Text("")])

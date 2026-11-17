@@ -58,7 +58,7 @@ The schema version lets a later `ALTER TABLE` read old rows without rewriting th
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Tuple encoding with property tests and fuzzing** - M1
+- [x] **Phase 1: Tuple encoding with property tests and fuzzing** - M1
 - [ ] **Phase 2: Row format in the row layer** - M4
 
 ## Consequences
