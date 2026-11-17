@@ -1,0 +1,77 @@
+---
+id: 0023
+title: Leaf Operators and Storage Pushdown
+status: proposal  # proposal | accepted | implemented | superseded
+tags: [executor, storage, pushdown]
+feature-flag:
+created: 2026-11-17
+accepted:
+implemented:
+spec-sections: ["executor-design.md#where-rows-become-columns", "executor-design.md#physical-operators", "executor-design.md#physical-planning-mvp"]
+superseded-by:
+---
+
+# ADR-0023: Leaf Operators and Storage Pushdown
+
+## Status
+
+Proposal
+
+## Summary
+
+Only leaf operators (`TableScan`, `IndexScan`, `IndexLookup`) call the storage layer, always one call per batch through the transaction's `Txn` handle. Filters, projections and limits are pushed into `ScanRequest` where allowed. In the MVP, encoded rows are decoded into Arrow on the async side; a later `BatchDecoder` extension to `ScanRequest` moves decode, filter and projection onto the storage thread.
+
+## Context
+
+The storage trait ([ADR-0006](0006-batched-async-storage-trait.md)) is coarse-grained: `scan(ScanRequest)` with range, filter, projection, limits and resume key, and `get_many` for point reads. It returns encoded rows ([ADR-0003](0003-order-preserving-tuple-encoding-and-row-format.md)), while the executor works on Arrow batches ([ADR-0022](0022-vectorized-arrow-stream-executor.md)). Two questions follow: which operators may touch storage, and where rows become columns. Every row copied across the sync/async boundary only to be filtered out is wasted work.
+
+## Decision
+
+**Leaves are the only storage callers.** Everything above them is CPU work on batches.
+
+| Leaf | Storage call | Notes |
+| --- | --- | --- |
+| `TableScan` | `scan` | Primary key range; pushed-down filter, projection and limit go into `ScanRequest`; follows `resume` keys until `None` |
+| `IndexScan` | `scan` | Secondary index range, yielding primary keys and index columns |
+| `IndexLookup` | `get_many` | Fetches rows by primary key, one call per input batch |
+
+- One storage call per batch, never per row.
+- All leaves read through the `Txn` handle, so results include the transaction's own buffered writes ([ADR-0026](0026-statement-atomicity-and-halloween-protection.md)).
+- Pushdown into `ScanRequest` is subject to the barrier rules: only leakproof predicates and the policy residual may run in the storage `RowFilter` ([ADR-0018](0018-policy-barrier-and-write-check-plan-constructs.md), [ADR-0025](0025-runtime-security-enforcement-in-executor.md)). Only the single-row part of a policy residual is pushed; conjuncts that need a join (foreign-key paths, `in` semi-joins on the closure table) stay in a `PolicyFilter` above that join.
+- **Row-level filter evaluation** *(recommended in review)*. Until `BatchDecoder` exists, pushed-down `RowFilter`s evaluate row at a time using the reference interpreter's expression evaluator ([ADR-0021](0021-ir-correctness-and-security-testing.md)). Differential tests check it against the vectorized kernels ([ADR-0024](0024-expression-evaluation-with-postgres-semantics.md)), so there is one row-level implementation of the semantics rather than a second hand-written one.
+
+**Where rows become columns.**
+
+1. **MVP:** the scan operator decodes rows into Arrow on the async side, then applies any filter that wasn't pushed into storage.
+2. **Later:** a `BatchDecoder` extension to `ScanRequest` decodes, filters and projects on the storage thread and returns Arrow directly, so rows that fail the filter are never copied across the boundary. This is a planned change to the storage trait ([ADR-0006](0006-batched-async-storage-trait.md)). Storage defines the `BatchDecoder` trait; the Arrow-based implementation lives in the executor crate, so the storage crate never depends on Arrow.
+
+## Implementation Phases
+
+- [ ] **Phase 1: TableScan with ScanRequest pushdown and async-side decode** - E1
+- [ ] **Phase 2: IndexScan and IndexLookup** - E4
+- [ ] **Phase 3: BatchDecoder on the storage thread** - post-MVP (sooner if decode shows up in profiles)
+
+## Consequences
+
+### Positive
+- A single, auditable boundary between the executor and storage.
+- Batched calls and pushdown keep cross-boundary traffic proportional to batches, not rows.
+- Pushing the single-row part of the policy residual into the scan means rows it rejects never leave the storage pool ([ADR-0018](0018-policy-barrier-and-write-check-plan-constructs.md)).
+
+### Negative
+- Phase 1 decodes on executor threads and copies rows that may then be filtered out. If this shows up in profiles, `BatchDecoder` must be brought forward.
+- `BatchDecoder` changes the storage trait, coupling it to Arrow.
+
+## Open Questions
+
+- None.
+
+## Future Work
+
+- `BatchDecoder` in `ScanRequest`.
+- Merge join exploiting index order.
+
+## References
+
+- `executor-design.md` — Where rows become columns, Physical operators, Physical planning
+- [ADR-0003](0003-order-preserving-tuple-encoding-and-row-format.md), [ADR-0006](0006-batched-async-storage-trait.md), [ADR-0007](0007-minimal-catalog-and-row-layer.md), [ADR-0018](0018-policy-barrier-and-write-check-plan-constructs.md), [ADR-0022](0022-vectorized-arrow-stream-executor.md), [ADR-0025](0025-runtime-security-enforcement-in-executor.md), [ADR-0028](0028-physical-operators-planning-and-explain.md)
