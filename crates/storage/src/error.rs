@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::encoding::{DecodeError, EncodeError};
+use crate::encoding::{DecodeError, EncodeError, RowFormatError};
 
 /// A specialized [`Result`](std::result::Result) for storage operations.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -75,6 +75,86 @@ pub enum Error {
     /// The savepoint was released, rolled back past, or belongs to another transaction.
     #[error("unknown savepoint")]
     UnknownSavepoint,
+
+    /// A row value could not be encoded, or a stored row could not be decoded.
+    #[error(transparent)]
+    Row(#[from] RowFormatError),
+
+    /// A DDL request or catalog lookup failed.
+    #[error(transparent)]
+    Catalog(#[from] CatalogError),
+
+    /// A row violates a table constraint.
+    #[error(transparent)]
+    Constraint(#[from] ConstraintViolation),
+}
+
+/// A DDL or catalog error (ADR-0007).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CatalogError {
+    /// A table with this name already exists (SQLSTATE `42P07`).
+    #[error("relation \"{0}\" already exists")]
+    TableExists(String),
+    /// No table has this name (SQLSTATE `42P01`).
+    #[error("relation \"{0}\" does not exist")]
+    NoSuchTable(String),
+    /// An index with this name already exists (SQLSTATE `42P07`).
+    #[error("index \"{0}\" already exists")]
+    IndexExists(String),
+    /// No index has this name (SQLSTATE `42704`).
+    #[error("index \"{0}\" does not exist")]
+    NoSuchIndex(String),
+    /// The table already has a column with this name (SQLSTATE `42701`).
+    #[error("column \"{column}\" of relation \"{table}\" already exists")]
+    ColumnExists {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
+    /// The table has no column with this name (SQLSTATE `42703`).
+    #[error("column \"{column}\" of relation \"{table}\" does not exist")]
+    NoSuchColumn {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
+    /// The definition is not allowed, for example a table without columns.
+    #[error("invalid definition: {0}")]
+    InvalidDefinition(String),
+    /// A system table holds a malformed entry.
+    #[error("corrupt catalog: {0}")]
+    Corrupt(&'static str),
+}
+
+/// A constraint a row violates (ADR-0007).
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConstraintViolation {
+    /// Another row has the same primary key (SQLSTATE `23505`).
+    #[error("duplicate key value violates the primary key of \"{table}\"")]
+    PrimaryKey {
+        /// Table name.
+        table: String,
+    },
+    /// Another row has the same values in a unique index (SQLSTATE `23505`).
+    #[error("duplicate key value violates unique constraint \"{index}\"")]
+    Unique {
+        /// Index name.
+        index: String,
+    },
+    /// A NOT NULL column was given NULL (SQLSTATE `23502`).
+    #[error(
+        "null value in column \"{column}\" of relation \"{table}\" violates not-null constraint"
+    )]
+    NotNull {
+        /// Table name.
+        table: String,
+        /// Column name.
+        column: String,
+    },
 }
 
 impl Error {
@@ -105,6 +185,11 @@ pub enum Conflict {
     /// A transaction that committed after this one's snapshot wrote a key, or
     /// a key inside a range, that this one read (SERIALIZABLE only).
     ReadWrite,
+    /// A transaction that committed after this one's snapshot wrote a key,
+    /// or a key inside a range, that this one registered as a dependency
+    /// (checked at every isolation level). The usual cause is concurrent DDL
+    /// on a table this transaction wrote to.
+    DependencyChanged,
     /// The snapshot is older than the commit history kept for validation.
     SnapshotTooOld,
 }
@@ -115,6 +200,7 @@ impl fmt::Display for Conflict {
         f.write_str(match self {
             Self::WriteWrite => "concurrent update to a key this transaction writes",
             Self::ReadWrite => "concurrent update to data this transaction read",
+            Self::DependencyChanged => "concurrent change to a definition this transaction used",
             Self::SnapshotTooOld => "snapshot is older than the retained commit history",
         })
     }

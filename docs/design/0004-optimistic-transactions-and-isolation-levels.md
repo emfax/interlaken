@@ -63,10 +63,13 @@ The sequencer keeps the write sets of recently committed transactions, ordered b
 | SERIALIZABLE | A key in its read set or inside a read range, or a key it also writes |
 | REPEATABLE READ (snapshot isolation) | A key it also writes (first committer wins) |
 | READ COMMITTED | A key it also writes; the snapshot refreshes at each statement boundary (`txn.next_statement()`) |
+| All levels | A key or range registered as a **dependency** |
 
 - Backward validation aborts on any read-write conflict with a later committer, not only on dangerous structures.
 - **Read-only transactions skip validation entirely:** a read-only snapshot is a consistent point in the commit order.
 - Range checks use an ordered set of committed write keys queried with a range lookup.
+- **Dependencies** (added in M4) are reads validated at every isolation level, registered with `register_dependency` / `register_dependency_range`. A conflict returns `Conflict::DependencyChanged`. The row layer needs them to keep indexes correct under weak isolation: DML depends on its table's catalog row, and DDL that reads table data (index backfill, drops) depends on the ranges it read ([ADR-0007](0007-minimal-catalog-and-row-layer.md)). Without them, a REPEATABLE READ insert using a stale table definition could commit a row that a concurrent `CREATE INDEX` backfill never saw.
+- READ COMMITTED validates each written key against the snapshot of the statement that first wrote it, so a write made after a snapshot refresh does not conflict with commits that statement already saw.
 
 **Known deviation from Postgres:** under READ COMMITTED, Postgres waits on a conflicting writer and re-checks the row (EvalPlanQual). The MVP aborts with SQLSTATE `40001` instead.
 

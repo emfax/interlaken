@@ -102,12 +102,20 @@ impl WriteBuffer {
         self.entries.get(key)?.visible_to(statement)
     }
 
+    /// Return the latest buffered write to `key`, including the current statement's.
+    pub(crate) fn latest(&self, key: &[u8]) -> Option<&WriteOp> {
+        self.entries.get(key).map(|entry| &entry.latest)
+    }
+
     /// Return the buffered writes in `range` visible to `statement`, in ascending
     /// key order, as `(key, value)` with `None` for deletes.
+    ///
+    /// With `statement` of `None`, return the latest write to each key,
+    /// including the current statement's.
     pub(crate) fn visible_range(
         &self,
         range: &KeyRange,
-        statement: u64,
+        statement: Option<u64>,
     ) -> Vec<(Key, Option<Bytes>)> {
         // `BTreeMap::range` panics on inverted bounds.
         if range.is_empty() {
@@ -116,9 +124,11 @@ impl WriteBuffer {
         self.entries
             .range::<[u8], _>(range.as_slice_bounds())
             .filter_map(|(key, entry)| {
-                entry
-                    .visible_to(statement)
-                    .map(|op| (key.clone(), op.value().cloned()))
+                let op = match statement {
+                    Some(statement) => entry.visible_to(statement),
+                    None => Some(&entry.latest),
+                };
+                op.map(|op| (key.clone(), op.value().cloned()))
             })
             .collect()
     }
@@ -214,13 +224,15 @@ mod tests {
         buf.write(key("a"), put("1"), 0, ts(0));
         buf.write(key("b"), WriteOp::Delete, 0, ts(0));
         buf.write(key("c"), put("3"), 1, ts(0));
-        let rows = buf.visible_range(&KeyRange::all(), 1);
+        let rows = buf.visible_range(&KeyRange::all(), Some(1));
         assert_eq!(
             rows,
             vec![(key("a"), Some(Bytes::from_static(b"1"))), (key("b"), None)]
         );
-        let rows = buf.visible_range(&KeyRange::prefix(b"c"), 2);
+        let rows = buf.visible_range(&KeyRange::prefix(b"c"), Some(2));
         assert_eq!(rows, vec![(key("c"), Some(Bytes::from_static(b"3")))]);
+        assert_eq!(buf.visible_range(&KeyRange::prefix(b"c"), Some(1)), vec![]);
+        assert_eq!(buf.visible_range(&KeyRange::all(), None).len(), 3);
     }
 
     #[test]

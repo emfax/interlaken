@@ -15,12 +15,18 @@
 //! - The commit sequencer: optimistic validation for READ COMMITTED,
 //!   REPEATABLE READ and SERIALIZABLE, group commit, and the
 //!   [`Durability`] modes (ADR-0004, ADR-0005).
+//! - [`catalog`]: table and index definitions in system tables, with
+//!   transactional DDL (ADR-0007).
+//! - [`rows`]: the row layer, with index maintenance and primary key,
+//!   unique and NOT NULL constraints (ADR-0003 row format, ADR-0007).
 
+pub mod catalog;
 mod commit;
 pub mod encoding;
 mod engine;
 mod error;
 mod pool;
+pub mod rows;
 mod scan;
 mod storage;
 mod timestamp;
@@ -28,7 +34,7 @@ mod txn;
 
 pub use commit::CommitStats;
 pub use engine::{Engine, FORMAT_VERSION};
-pub use error::{Conflict, Error, Result};
+pub use error::{CatalogError, Conflict, ConstraintViolation, Error, Result};
 pub use scan::{
     DEFAULT_SCAN_LIMIT_BYTES, DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, RowFilter, ScanBatch,
     ScanRequest,

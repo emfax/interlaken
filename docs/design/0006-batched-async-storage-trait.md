@@ -60,6 +60,9 @@ impl Txn {
     // (later: policy data loaded for Cedar).
     pub fn register_read(&self, key: Key);
     pub fn register_range(&self, range: KeyRange);
+    // Reads validated at every isolation level (ADR-0004, added in M4).
+    pub fn register_dependency(&self, key: Key);
+    pub fn register_dependency_range(&self, range: KeyRange);
 
     pub fn savepoint(&self) -> SavepointId;
     pub fn rollback_to(&self, sp: SavepointId) -> Result<()>;

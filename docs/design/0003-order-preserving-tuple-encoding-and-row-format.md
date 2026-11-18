@@ -56,10 +56,12 @@ Row values are not order-preserving:
 
 The schema version lets a later `ALTER TABLE` read old rows without rewriting them.
 
+As implemented in M4 (`encoding::encode_row` / `decode_row`): little-endian `u32` schema version, `u16` column count, null bitmap with zero padding bits, fixed-width values, then each variable-length value as a `u32` length and its bytes. The column count lets rows written before `ADD COLUMN` read the new trailing columns as NULL. Decoding accepts only canonical encodings and is fuzzed.
+
 ## Implementation Phases
 
 - [x] **Phase 1: Tuple encoding with property tests and fuzzing** - M1
-- [ ] **Phase 2: Row format in the row layer** - M4
+- [x] **Phase 2: Row format in the row layer** - M4
 
 ## Consequences
 

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::request::CommitRequest;
 use crate::scan::{Key, KeyRange};
+use crate::txn::ReadSet;
 use crate::{Conflict, Timestamp};
 
 /// Keys written by every commit after `floor`, indexed for point and range checks.
@@ -30,10 +31,10 @@ impl CommitHistory {
     /// Validate `request` against every commit after its snapshots.
     ///
     /// Writes conflict with a later commit to the same key (first committer
-    /// wins); reads conflict with a later commit to a read key or to any key
-    /// inside a read range.
+    /// wins); dependencies and reads conflict with a later commit to one of
+    /// their keys or to any key inside one of their ranges.
     pub(crate) fn validate(&self, request: &CommitRequest) -> Result<(), Conflict> {
-        let has_reads = !request.reads.is_empty();
+        let has_reads = !request.reads.is_empty() || !request.dependencies.is_empty();
         let oldest = request
             .writes
             .iter()
@@ -50,21 +51,25 @@ impl CommitHistory {
         {
             return Err(Conflict::WriteWrite);
         }
-        let snapshot = request.snapshot;
-        if request
-            .reads
-            .keys()
-            .iter()
-            .any(|key| self.key_changed_after(key, snapshot))
-            || request
-                .reads
-                .ranges()
-                .iter()
-                .any(|range| self.range_changed_after(range, snapshot))
-        {
+        if self.reads_changed_after(&request.dependencies, request.snapshot) {
+            return Err(Conflict::DependencyChanged);
+        }
+        if self.reads_changed_after(&request.reads, request.snapshot) {
             return Err(Conflict::ReadWrite);
         }
         Ok(())
+    }
+
+    /// Return `true` if a commit after `ts` wrote a key in `reads` or inside one of its ranges.
+    fn reads_changed_after(&self, reads: &ReadSet, ts: Timestamp) -> bool {
+        reads
+            .keys()
+            .iter()
+            .any(|key| self.key_changed_after(key, ts))
+            || reads
+                .ranges()
+                .iter()
+                .any(|range| self.range_changed_after(range, ts))
     }
 
     /// Record that the commit at `ts` wrote `keys`. Timestamps must increase.
@@ -118,7 +123,7 @@ mod tests {
 
     use super::*;
     use crate::commit::WriteIntent;
-    use crate::txn::{ReadSet, WriteOp};
+    use crate::txn::WriteOp;
 
     /// Construct a key from a static string.
     fn k(s: &'static str) -> Key {
@@ -135,6 +140,7 @@ mod tests {
         CommitRequest {
             snapshot: ts(snapshot),
             reads,
+            dependencies: ReadSet::default(),
             writes: writes
                 .iter()
                 .map(|w| WriteIntent {

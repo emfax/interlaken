@@ -55,6 +55,8 @@ struct TxnState {
     statement: u64,
     writes: WriteBuffer,
     reads: ReadSet,
+    /// Reads validated at every isolation level.
+    dependencies: ReadSet,
     /// Open savepoints, oldest first, with their undo-log positions.
     savepoints: Vec<(SavepointId, usize)>,
     next_savepoint: u64,
@@ -78,6 +80,7 @@ impl Txn {
                 statement: 0,
                 writes: WriteBuffer::default(),
                 reads: ReadSet::default(),
+                dependencies: ReadSet::default(),
                 savepoints: Vec::new(),
                 next_savepoint: 0,
             }),
@@ -106,16 +109,33 @@ impl Txn {
     ///
     /// Returns an error if the storage pool is unavailable or fjall fails.
     pub async fn get_many(&self, keys: Vec<Key>) -> Result<Vec<Option<Bytes>>> {
+        self.read_keys(keys, false).await
+    }
+
+    /// Read several keys like [`get_many`](Self::get_many), but also see
+    /// writes from the current statement.
+    ///
+    /// Constraint checks and index maintenance need the latest state: two
+    /// rows with the same key inserted by one statement must still collide.
+    pub(crate) async fn get_many_latest(&self, keys: Vec<Key>) -> Result<Vec<Option<Bytes>>> {
+        self.read_keys(keys, true).await
+    }
+
+    /// Read `keys` at the snapshot, overlaid with buffered writes from earlier
+    /// statements, or from every statement if `latest`.
+    async fn read_keys(&self, keys: Vec<Key>, latest: bool) -> Result<Vec<Option<Bytes>>> {
         let (snapshot, mut results, missing) = {
             let mut state = self.state();
             let statement = state.statement;
             let results: Vec<Option<Option<Bytes>>> = keys
                 .iter()
                 .map(|key| {
-                    state
-                        .writes
-                        .visible(key, statement)
-                        .map(|op| op.value().cloned())
+                    let buffered = if latest {
+                        state.writes.latest(key)
+                    } else {
+                        state.writes.visible(key, statement)
+                    };
+                    buffered.map(|op| op.value().cloned())
                 })
                 .collect();
             for key in &keys {
@@ -155,6 +175,18 @@ impl Txn {
     ///
     /// Returns an error if the storage pool is unavailable or fjall fails.
     pub async fn scan(&self, request: ScanRequest) -> Result<ScanBatch> {
+        self.scan_with(request, false).await
+    }
+
+    /// Read one batch of a range scan like [`scan`](Self::scan), but also see
+    /// writes from the current statement.
+    pub(crate) async fn scan_latest(&self, request: ScanRequest) -> Result<ScanBatch> {
+        self.scan_with(request, true).await
+    }
+
+    /// Read one batch of a range scan, merging buffered writes from earlier
+    /// statements, or from every statement if `latest`.
+    async fn scan_with(&self, request: ScanRequest, latest: bool) -> Result<ScanBatch> {
         let range = match (request.resume, request.reverse) {
             (None, _) => request.range,
             (Some(resume), false) => KeyRange::new(Bound::Excluded(resume), request.range.end),
@@ -168,8 +200,9 @@ impl Txn {
         }
         let job = {
             let state = self.state();
+            let statement = (!latest).then_some(state.statement);
             ScanJob {
-                buffered: state.writes.visible_range(&range, state.statement),
+                buffered: state.writes.visible_range(&range, statement),
                 range,
                 reverse: request.reverse,
                 limit_rows: request.limit_rows,
@@ -219,6 +252,25 @@ impl Txn {
     /// Register a range read outside [`get_many`](Self::get_many) and [`scan`](Self::scan).
     pub fn register_range(&self, range: KeyRange) {
         self.state().reads.record_range(range);
+    }
+
+    /// Register a key whose value this transaction depends on at every isolation level.
+    ///
+    /// Unlike [`register_read`](Self::register_read), which is validated
+    /// only under SERIALIZABLE, the commit fails with
+    /// [`Conflict::DependencyChanged`](crate::Conflict::DependencyChanged)
+    /// if a transaction that committed after this one's snapshot wrote the
+    /// key. The row layer uses this so that DML conflicts with concurrent
+    /// DDL on the same table (ADR-0007).
+    pub fn register_dependency(&self, key: Key) {
+        self.state().dependencies.record_key(key);
+    }
+
+    /// Register a range whose contents this transaction depends on at every isolation level.
+    ///
+    /// See [`register_dependency`](Self::register_dependency).
+    pub fn register_dependency_range(&self, range: KeyRange) {
+        self.state().dependencies.record_range(range);
     }
 
     /// Open a savepoint at the current state of the write buffer.
@@ -313,6 +365,7 @@ impl Txn {
         let request = CommitRequest {
             snapshot: state.snapshot,
             reads,
+            dependencies: state.dependencies,
             writes: state.writes.into_intents(),
         };
         // `inner` keeps the snapshot pin alive until validation is done.

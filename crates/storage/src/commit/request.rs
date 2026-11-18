@@ -24,6 +24,8 @@ pub(crate) struct CommitRequest {
     /// Reads to validate. The transaction leaves this empty unless it is
     /// SERIALIZABLE, so validation needs no isolation level.
     pub(crate) reads: ReadSet,
+    /// Dependencies, validated at every isolation level.
+    pub(crate) dependencies: ReadSet,
     /// Writes to validate and apply. Never empty.
     pub(crate) writes: Vec<WriteIntent>,
 }

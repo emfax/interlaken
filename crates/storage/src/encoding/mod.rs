@@ -27,17 +27,21 @@
 //! must therefore have the same columns, so that the version suffix of one
 //! key never interleaves with the columns of another (see [`versioned_key`]).
 
+mod column_type;
 mod datum;
 mod decode;
 mod encode;
 mod error;
 mod order;
+mod row;
 mod tags;
 mod versioned;
 
+pub use column_type::ColumnType;
 pub use datum::Datum;
 pub use decode::{TupleDecoder, decode_tuple};
 pub use encode::{DEFAULT_MAX_KEY_LEN, KeyBuilder, MAX_TUPLE_LEN, encode_tuple};
 pub use error::{DecodeError, EncodeError};
 pub use order::{Direction, NullOrder, SortOrder};
+pub use row::{RowFormatError, decode_row, encode_row};
 pub use versioned::{VERSION_SUFFIX_LEN, split_versioned_key, versioned_key};
