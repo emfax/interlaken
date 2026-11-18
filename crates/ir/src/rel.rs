@@ -459,6 +459,81 @@ impl Rel {
         }
     }
 
+    /// Return the expressions this operator evaluates directly, mutably, in
+    /// the same order as [`Rel::exprs`].
+    pub fn exprs_mut(&mut self) -> Vec<&mut Expr> {
+        match self {
+            Self::Get { .. } | Self::Distinct { .. } | Self::Apply { .. } | Self::SetOp { .. } => {
+                Vec::new()
+            }
+            Self::Filter { predicate: e, .. }
+            | Self::Join { on: e, .. }
+            | Self::Unnest { expr: e, .. }
+            | Self::PolicyFilter { residual: e, .. }
+            | Self::WriteCheck { check: e, .. } => vec![e],
+            Self::Project { exprs, .. } => exprs.iter_mut().map(|n| &mut n.expr).collect(),
+            Self::Aggregate { keys, aggs, .. } => keys
+                .iter_mut()
+                .map(|n| &mut n.expr)
+                .chain(
+                    aggs.iter_mut()
+                        .flat_map(|a| a.agg.args.iter_mut().chain(a.agg.filter.iter_mut())),
+                )
+                .collect(),
+            Self::Sort { keys, .. } => keys.iter_mut().map(|k| &mut k.expr).collect(),
+            Self::Limit { limit, offset, .. } => {
+                limit.iter_mut().chain(offset.iter_mut()).collect()
+            }
+            Self::Values { rows, .. } => rows.iter_mut().flatten().collect(),
+            Self::Nest { keys, fields, .. } => keys
+                .iter_mut()
+                .chain(fields.iter_mut())
+                .map(|n| &mut n.expr)
+                .collect(),
+            Self::Insert { returning, .. } | Self::Delete { returning, .. } => {
+                returning.iter_mut().map(|n| &mut n.expr).collect()
+            }
+            Self::Update {
+                assignments,
+                returning,
+                ..
+            } => assignments
+                .iter_mut()
+                .map(|a| &mut a.value)
+                .chain(returning.iter_mut().map(|n| &mut n.expr))
+                .collect(),
+        }
+    }
+
+    /// Return the bindings this operator introduces (none for pass-through operators).
+    #[must_use]
+    pub fn bindings(&self) -> Vec<BindingId> {
+        match self {
+            Self::Get { binding, .. }
+            | Self::Project { binding, .. }
+            | Self::Aggregate { binding, .. }
+            | Self::SetOp { binding, .. }
+            | Self::Values { binding, .. }
+            | Self::Nest { binding, .. }
+            | Self::Unnest { binding, .. } => binding.iter().copied().collect(),
+            Self::Insert {
+                target, binding, ..
+            }
+            | Self::Update {
+                target, binding, ..
+            }
+            | Self::Delete {
+                target, binding, ..
+            } => target
+                .binding
+                .iter()
+                .chain(binding.iter())
+                .copied()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Return `true` for operators only the engine's own passes may create.
     #[must_use]
     pub const fn is_privileged(&self) -> bool {

@@ -762,6 +762,7 @@ pub(crate) fn expr(sexp: &Sexp) -> Result<Expr> {
         "and" => Expr::And(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "or" => Expr::Or(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "coalesce" => Expr::Coalesce(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
+        "array" => Expr::Array(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "nullif" => Expr::NullIf {
             left: boxed(&mut form, "the value")?,
             right: boxed(&mut form, "the value compared against")?,

@@ -66,11 +66,31 @@ pub fn verify(plan: &Plan, catalog: &dyn Catalog, options: &VerifyOptions) -> Re
         options: *options,
         bindings: HashSet::new(),
         params: HashMap::new(),
+        types: HashMap::new(),
     };
     let schema = verifier.rel(&plan.root, &[])?;
     Ok(RelSchema {
         columns: schema.into_iter().map(|c| c.out).collect(),
     })
+}
+
+/// Return the type of every column a plan introduces, as far as the plan verifies.
+///
+/// Used by the optimizer, whose input is a verified plan; for a plan that
+/// fails verification the map covers the part checked before the failure.
+pub(crate) fn column_types(
+    plan: &Plan,
+    catalog: &dyn Catalog,
+) -> HashMap<(BindingId, ColumnId), Type> {
+    let mut verifier = Verifier {
+        catalog,
+        options: VerifyOptions { trusted: true },
+        bindings: HashSet::new(),
+        params: HashMap::new(),
+        types: HashMap::new(),
+    };
+    let _ = verifier.rel(&plan.root, &[]);
+    verifier.types
 }
 
 /// An output column plus the table it was read from, if any.
@@ -95,6 +115,8 @@ struct Verifier<'a> {
     bindings: HashSet<BindingId>,
     /// The type of each parameter seen so far.
     params: HashMap<u32, Type>,
+    /// The type of every column introduced so far.
+    types: HashMap<(BindingId, ColumnId), Type>,
 }
 
 /// Construct a type error.
@@ -279,9 +301,28 @@ impl Verifier<'_> {
         })
     }
 
+    /// Verify a relation and record the types of its output columns.
+    fn rel(&mut self, rel: &Rel, outer: &[&Schema]) -> Result<Schema> {
+        let schema = self.rel_inner(rel, outer)?;
+        for c in &schema {
+            self.types
+                .entry((c.out.binding, c.out.column))
+                .or_insert_with(|| c.out.ty.clone());
+        }
+        if let Rel::Insert { target, .. } | Rel::Update { target, .. } | Rel::Delete { target, .. } =
+            rel
+            && let (Some(binding), Ok(table)) = (target.binding, self.table(&target.table, false))
+        {
+            for c in Self::table_columns(&table, binding) {
+                self.types.insert((c.out.binding, c.out.column), c.out.ty);
+            }
+        }
+        Ok(schema)
+    }
+
     /// Verify a relation, with `outer` the columns of enclosing `Apply` outer sides.
     #[allow(clippy::too_many_lines)]
-    fn rel(&mut self, rel: &Rel, outer: &[&Schema]) -> Result<Schema> {
+    fn rel_inner(&mut self, rel: &Rel, outer: &[&Schema]) -> Result<Schema> {
         Ok(match rel {
             Rel::Get { table, binding, .. } => {
                 let def = self.table(table, false)?;
@@ -822,6 +863,19 @@ impl Verifier<'_> {
                     .ok_or_else(|| structure("COALESCE needs at least one argument"))?
                     .with_nullable(all_nullable)
             }
+            Expr::Array(items) => {
+                let mut element: Option<Type> = None;
+                for item in items {
+                    let ty = self.expr(item, env)?;
+                    element = Some(merge(element, ty).map_err(mismatch)?);
+                }
+                let element = element.ok_or_else(|| {
+                    VerifyError::Unresolved(
+                        "empty array; resolved IR writes (cast (array) TYPE)".into(),
+                    )
+                })?;
+                DataType::Array(Box::new(element)).not_null()
+            }
             Expr::NullIf { left, right } => {
                 let l = self.expr(left, env)?;
                 let r = self.expr(right, env)?;
@@ -833,6 +887,13 @@ impl Verifier<'_> {
                 }
                 expect_comparable(&l, "a NULLIF operand")?;
                 l.with_nullable(true)
+            }
+            Expr::Cast { expr: operand, to }
+                if matches!(&**operand, Expr::Array(items) if items.is_empty())
+                    && matches!(to, DataType::Array(_)) =>
+            {
+                // A typed empty array.
+                to.clone().not_null()
             }
             Expr::Cast { expr: operand, to } if matches!(**operand, Expr::Literal(Value::Null)) => {
                 // A typed NULL: the one place an untyped NULL may appear.

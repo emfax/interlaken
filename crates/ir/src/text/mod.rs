@@ -49,6 +49,7 @@
 //!          (+ E E) (- E E) (* E E) (/ E E) (% E E) (concat E E) (like E E)
 //!          (is-distinct-from E E) (is-not-distinct-from E E)
 //!          (case (when E E)... [(else E)] [:on E]) (coalesce E...) (nullif E E)
+//!          (array E...)
 //!          (scalar REL) (exists REL) (in E REL) (any OP E REL) (all OP E REL)
 //! FUNC     name | schema.name | (fid N)
 //! TYPE     DATATYPE | (not-null DATATYPE)
@@ -59,7 +60,7 @@
 mod api;
 mod catalog;
 mod error;
-mod literal;
+pub(crate) mod literal;
 mod pretty;
 mod read;
 mod sexp;

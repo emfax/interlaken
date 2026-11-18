@@ -2,7 +2,7 @@
 //!
 //! Every query language lowers into this IR, which is then resolved,
 //! verified, rewritten for security and optimized. This crate currently
-//! provides milestones I1 and I2:
+//! provides milestones I1 to I3:
 //!
 //! - The type system: [`ScalarType`], [`DataType`] and [`Type`], with
 //!   explicit nullability.
@@ -19,11 +19,17 @@
 //!   IR, lowering subqueries to `Apply`.
 //! - [`verify`]: the verifier every plan passes, which rejects privileged
 //!   operators and system-table writes from clients.
+//! - [`optimize`]: the rule-based optimizer: simplification, decorrelation,
+//!   pushdown under the security barrier, pruning and order (ADR-0014).
+//! - [`interp`]: the reference interpreter that defines what a plan means
+//!   and serves as the oracle for optimizer and executor tests.
 
 pub mod builder;
 pub mod catalog;
 mod expr;
+pub mod interp;
 mod names;
+pub mod optimize;
 mod rel;
 pub mod resolve;
 mod schema;

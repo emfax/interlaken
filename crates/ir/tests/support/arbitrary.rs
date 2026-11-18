@@ -251,6 +251,7 @@ pub fn deeper_expr(expr: BoxedStrategy<Expr>, rel: BoxedStrategy<Rel>) -> BoxedS
         )
             .prop_map(|(operand, branches, otherwise)| Expr::Case { operand, branches, otherwise }),
         1 => items().prop_map(Expr::Coalesce),
+        1 => items().prop_map(Expr::Array),
         1 => (b(), b()).prop_map(|(left, right)| Expr::NullIf { left, right }),
         1 => (b(), ty()).prop_map(|(expr, to)| Expr::Cast { expr, to: to.data }),
         1 => (subquery_kind, rel.prop_map(Box::new))

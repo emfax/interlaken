@@ -422,6 +422,19 @@ impl Resolver<'_> {
                     ty: Some(ty.with_nullable(all_nullable)),
                 }
             }
+            Expr::Array(items) => {
+                if items.is_empty() {
+                    return Err(ResolveError::Type(
+                        "an empty array needs a cast to its type: (cast (array) TYPE)".into(),
+                    ));
+                }
+                let typed = self.exprs(items, cx)?;
+                let (exprs, element) = unify(typed, ScalarType::Text)?;
+                Typed {
+                    expr: Expr::Array(exprs),
+                    ty: Some(DataType::Array(Box::new(element)).not_null()),
+                }
+            }
             Expr::NullIf { left, right } => {
                 let typed = vec![self.expr(left, cx)?, self.expr(right, cx)?];
                 let (mut exprs, ty) = unify(typed, ScalarType::Text)?;
@@ -439,6 +452,15 @@ impl Resolver<'_> {
                         right: Box::new(right),
                     },
                     ty: Some(ty.with_nullable(true)),
+                }
+            }
+            Expr::Cast { expr: operand, to }
+                if matches!(&**operand, Expr::Array(items) if items.is_empty())
+                    && matches!(to, DataType::Array(_)) =>
+            {
+                Typed {
+                    expr: expr.clone(),
+                    ty: Some(to.clone().not_null()),
                 }
             }
             Expr::Cast { expr: operand, to } => {

@@ -68,6 +68,20 @@ Entry format:
 - **Size:** About 2–4 days, depending on the conditional-branch design.
 - **Status:** open
 
+### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
+- **Origin:** ADR-0012 (decorrelation), I3
+- **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.
+- **When:** When a workload shows `NOT IN` or `ALL` over large subqueries, or with the executor's join operators (E3).
+- **Size:** About 3–5 days, including differential test coverage.
+- **Status:** open
+
+### interp-text-formats: Widen the reference interpreter's text input formats
+- **Origin:** ADR-0021 phase 3, I3
+- **Why:** Casts from text accept only ISO dates and timestamps, hex `bytea` and a basic set of booleans, and `jsonb` is stored unvalidated. Postgres accepts more. The executor's kernels will be tested against the interpreter, so the two must agree.
+- **When:** Executor milestone E2 (expression kernels).
+- **Size:** About 2 days.
+- **Status:** open
+
 ## Executor and IR open questions
 
 ### default-memory-budgets: Choose default per-query and per-node memory budgets

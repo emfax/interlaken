@@ -79,6 +79,12 @@ pub fn coalesce(items: impl IntoIterator<Item = Expr>) -> Expr {
     Expr::Coalesce(items.into_iter().collect())
 }
 
+/// Construct an array of `items`; an empty array needs a cast to its type.
+#[must_use]
+pub fn array(items: impl IntoIterator<Item = Expr>) -> Expr {
+    Expr::Array(items.into_iter().collect())
+}
+
 /// Start a searched `CASE WHEN ... THEN ...`.
 pub fn case() -> Case {
     Case {

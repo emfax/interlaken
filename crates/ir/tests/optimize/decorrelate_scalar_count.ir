@@ -1,0 +1,27 @@
+; A correlated scalar aggregate becomes a left join to a grouped aggregate;
+; count is wrapped in coalesce so users without posts get 0, not NULL.
+(plan
+  (project
+    (get users :as u)
+    u.name
+    (as (scalar (aggregate (filter (get posts :as p) (= p.author_id u.id)) (keys) (aggs (agg count)))) posts)
+    (as (scalar (aggregate (filter (get posts :as p) (= p.author_id u.id)) (keys) (aggs (agg max p.likes)))) best)))
+;; optimized
+(plan :schema-version 7
+  (project :bind 6
+    (join left
+      (join left
+        (get (tid 100) :as u :bind 1)
+        (aggregate :bind 7
+          (get (tid 101) :as p :bind 2)
+          (keys #2.1)
+          (aggs (as (agg (fid 12)) count)))
+        (= #7.0 #1.0))
+      (aggregate :bind 8
+        (get (tid 101) :as p :bind 4)
+        (keys #4.1)
+        (aggs (as (agg (fid 44) #4.3) max)))
+      (= #8.0 #1.0))
+    (as #1.1 name)
+    (as (coalesce #7.1 0) posts)
+    (as #8.1 best)))

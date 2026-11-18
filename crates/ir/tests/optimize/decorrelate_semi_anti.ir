@@ -1,0 +1,25 @@
+; EXISTS, NOT EXISTS, IN and ANY in a filter become semi and anti joins.
+(plan
+  (project
+    (filter
+      (get users :as u)
+      (and
+        (exists (filter (get posts :as p) (= p.author_id u.id)))
+        (not (exists (filter (get follows :as f) (= f.follower_id u.id))))
+        (in u.id (project (get posts :as q) q.author_id))
+        (> u.age 21)))
+    u.name))
+;; optimized
+(plan :schema-version 7
+  (project :bind 6
+    (join semi
+      (join anti
+        (join semi
+          (filter (get (tid 100) :as u :bind 1) (> #1.3 (int4 21)))
+          (get (tid 101) :as p :bind 2)
+          (= #2.1 #1.0))
+        (get (tid 102) :as f :bind 3)
+        (= #3.0 #1.0))
+      (project (get (tid 101) :as q :bind 4) (as #4.1 author_id) :bind 5)
+      (= #1.0 #5.0))
+    (as #1.1 name)))

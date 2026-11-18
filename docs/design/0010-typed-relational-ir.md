@@ -129,6 +129,7 @@ The IR lives in the `interlaken-ir` crate, which does not depend on storage.
 - **`Nest`** takes grouping keys, record fields and a column name. Its output is the keys followed by one `array(record(fields))` column.
 - **Literals.** `NULL` is untyped; resolved IR wraps a NULL that needs a type in an explicit cast. `date` is days since 1970-01-01 and `timestamptz` is microseconds since the Unix epoch, matching Arrow's `Date32` and `Timestamp(µs, UTC)`. IR equality compares floats by bit pattern but treats every NaN as one value, as Postgres does.
 - **IDs:** table, function, column and binding IDs are `u32`; schema versions are `u64`. The storage-backed catalog converts storage IDs.
+- **Array constructor (I3).** `(array e...)` builds an array from elements of one type. An empty array is written under a cast, `(cast (array) T)`, like a typed NULL. Decorrelated nesting uses it to give a parent with no children an empty array ([ADR-0012](0012-nesting-and-decorrelation-for-graphql.md)).
 
 ### MVP scope
 

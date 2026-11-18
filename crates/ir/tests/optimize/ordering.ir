@@ -1,0 +1,16 @@
+; A limit moves below a projection; a sort below another sort is dropped; a sort
+; of input already in that order is dropped.
+(plan
+  (limit
+    (project
+      (sort
+        (filter (sort (sort (get users :as u) (asc u.name)) (asc u.id)) (> u.karma 0))
+        (asc u.id))
+      u.name)
+    :count 2))
+;; optimized
+(plan :schema-version 7
+  (project :bind 2
+    (limit :count 2
+      (sort (filter (get (tid 100) :as u :bind 1) (> #1.4 0)) (asc #1.0)))
+    (as #1.1 name)))

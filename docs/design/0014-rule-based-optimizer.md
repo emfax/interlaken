@@ -37,9 +37,29 @@ Rewrites run in fixed phases:
 
 Function properties come from the catalog ([ADR-0011](0011-function-property-catalog.md)). Plan nodes carry physical properties (sort order now; distribution once ranges exist) in the style of Calcite's traits.
 
+### As implemented (I3)
+
+`interlaken_ir::optimize::optimize` takes a resolved, verified plan and returns one that verifies under the same options and returns the same rows as a bag. Like Postgres, it may raise an error the input would not have raised, when a moved predicate meets rows that earlier operators would have discarded. The phases:
+
+1. **Simplification.**
+   - Constant subexpressions over immutable functions are evaluated with the reference interpreter. Ones that would raise an error, such as `1/0`, are left for run time.
+   - `AND`/`OR` are flattened and their `true`/`false` operands absorbed, and `NOT NOT x` becomes `x`.
+   - Always-true filters are removed and stacked filters merged. A filter never merges into a `PolicyFilter`.
+   - This phase runs again after decorrelation and after pushdown.
+2. **Decorrelation**, run to a fixpoint (see [ADR-0012](0012-nesting-and-decorrelation-for-graphql.md)).
+3. **Predicate pushdown.** Conjuncts move:
+   - through projections (substituting the projected expressions), sorts and `DISTINCT`;
+   - to the outer side of applies, and to the sides of joins: only the preserved side of an outer join, and into the condition when they reference both sides of an inner join;
+   - below aggregate and nest grouping keys, into both inputs of set operations, and into the input of `UNNEST`.
+   Join conditions that reference one side move into it where the join kind allows. A conjunct moves below a `PolicyFilter` only if every function, operator and cast in it is leakproof (judged from the catalog and the operand types), nothing moves below a `WriteCheck`, and volatile conjuncts stay put.
+4. **Projection pruning.** Unread outputs are removed from projections, and unread aggregate calls from aggregates. Operators whose output is consumed positionally or as whole rows are left alone: the plan's output, set operation and insert inputs, and `DISTINCT` inputs. Which columns a scan reads is derived from the remaining references at physical planning.
+5. **Order.** Each relation's output order is derived from the plan: a sort defines it, and filters, limits and the security operators preserve it. A sort over input already in that order is removed, as is a sort directly below another sort, and a limit moves below a projection.
+
+Joins keep their written order: without statistics, reordering would be guesswork.
+
 ## Implementation Phases
 
-- [ ] **Phase 1: Optimizer rules and decorrelation** - I3
+- [x] **Phase 1: Optimizer rules and decorrelation** - I3
 
 ## Consequences
 

@@ -1,0 +1,8 @@
+; Array constructors: elements unify to one type; an empty array needs a cast.
+(plan (project (get users :as u) (as (array u.age 1 null) ages) (as (cast (array) (array (not-null text))) none)))
+;; resolved
+(plan :schema-version 7
+  (project :bind 2
+    (get (tid 100) :as u :bind 1)
+    (as (array #1.3 (int4 1) (cast null int4)) ages)
+    (as (cast (array) (array (not-null text))) none)))

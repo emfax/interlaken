@@ -1,0 +1,17 @@
+; Immutable constant expressions fold; volatile and failing ones are left for run time;
+; boolean structure is normalized.
+(plan
+  (project
+    (filter (get users :as u) (and true (or false (> u.karma (+ 1 2))) (not (not (is-not-null u.email)))))
+    (as (call lower "ABC") folded)
+    (as (* (+ 2 3) u.karma) partly)
+    (as (call random) volatile)
+    (as (/ 1 0) failing)))
+;; optimized
+(plan :schema-version 7
+  (project :bind 2
+    (filter (get (tid 100) :as u :bind 1) (and (> #1.4 3) (is-not-null #1.2)))
+    (as "abc" folded)
+    (as (* 5 #1.4) partly)
+    (as (call (fid 10)) volatile)
+    (as (/ 1 0) failing)))

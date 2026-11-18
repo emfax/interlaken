@@ -52,6 +52,18 @@ The IR is the single enforcement point for access control, so a bug in lowering 
     - random well-typed queries (joins, aggregates, nesting and every subquery form): whatever the resolver accepts, the verifier must accept, with at least 60% resolving so the property is not vacuous;
     - resolved plans with random subtrees swapped in must never panic the verifier and must be rejected if they contain names.
   - A planted resolver bug (dropping implicit casts) is caught by the fuzzer.
+- **Phase 3 as implemented (I3):**
+  - **The reference interpreter** is `interlaken_ir::interp`, the shared oracle for the optimizer now and for the executor later ([ADR-0022](0022-vectorized-arrow-stream-executor.md)). It evaluates resolved plans row by row over an in-memory database with Postgres semantics ([ADR-0024](0024-expression-evaluation-with-postgres-semantics.md)):
+    - three-valued logic;
+    - overflow, division-by-zero and cast errors, each with its SQLSTATE;
+    - left-to-right short-circuit `AND`/`OR`/`CASE`/`COALESCE`;
+    - `LIKE` with escapes;
+    - Postgres float, date and timestamp text output;
+    - every operator, including all-or-nothing DML with NOT NULL and primary-key checks.
+  - **Interpreter semantics tests** check hand-computed results for the classic traps: `NOT IN` against NULLs, `ALL` over an empty set, `count` versus `sum` over no rows, outer-join padding, scalar-subquery cardinality, short-circuiting, empty nested arrays and DML atomicity.
+  - **Optimizer golden files** in `crates/ir/tests/optimize/` show each rule. Each optimized plan is also run against its unoptimized plan on sample data.
+  - **Differential test:** 4,000 random queries over random data. Whenever the unoptimized plan succeeds, the optimized plan must succeed with the same rows (as a bag) and must verify. About 70% of cases compare, and correlated applies fall from about 1,450 to 200.
+  - **Planted bugs**, each caught: dropping the count-bug `coalesce`, pushing a predicate into the padded side of a left join, and dropping the empty-array fallback for nesting.
 
 ### MVP success criteria
 
@@ -76,7 +88,7 @@ Roughly 14 weeks for one engineer. I1–I3 start after storage milestone M2 and 
 
 - [x] **Phase 1: Golden tests and builder/text round-trip** - I1
 - [x] **Phase 2: Verifier fuzzing** - I2
-- [ ] **Phase 3: Reference interpreter and differential testing** - I3
+- [x] **Phase 3: Reference interpreter and differential testing** - I3
 - [ ] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4
 - [ ] **Phase 5: Oracle with Cedar, deployment gate tests** - I5
 

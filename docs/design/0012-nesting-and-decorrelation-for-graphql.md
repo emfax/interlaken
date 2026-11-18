@@ -35,10 +35,20 @@ GraphQL returns trees; relational algebra returns flat rows. A naive translation
 - `Unnest(input, expr)` expands an array into rows.
 - The GraphQL schema (types from tables, relationship fields from foreign keys, mutations from DML) belongs to the GraphQL front end and is not specified here.
 
+**Decorrelation as implemented (I3).** Rules run bottom-up, to a fixpoint:
+- **Uncorrelated.** An apply whose inner side does not reference the outer side becomes a join on `true`. A single apply does so only when the inner side yields at most one row.
+- **Correlated filters.** For semi, anti, inner and left applies, correlated conjuncts are pulled out of the inner side into the join condition. They pass through filters, projections (which expose the columns the conjuncts need) and sorts, and through `DISTINCT` where row counts do not matter (semi and anti).
+- **Scalar aggregates.** An apply over an aggregate without keys, correlated only by equalities, becomes a left join to the aggregate grouped by the correlated inner expressions. References to `count` become `coalesce(count, 0)`, which avoids the count bug.
+- **Nesting.** An apply over a keyless `Nest` becomes a left join to a `Nest` keyed by the correlation, with `coalesce(nested, (cast (array) T))`, so parents without children get an empty array. Element order follows the sorted input.
+- **EXISTS as a value.** The left apply of one marker row that the resolver produces becomes a left join to `DISTINCT` correlation keys.
+- **What stays an apply.** `NOT IN`, `ALL` and `ANY` outside filter conjuncts are lowered to aggregates over a comparison with the outer row, and those stay as applies (nested loops), as in Postgres. The same goes for correlation by non-equality, or through operators the rules do not cross (limits, keyed aggregates, joins).
+
+To express the empty array, the IR gained an array constructor expression, `(array e...)`. An empty one is written under a cast, `(cast (array) T)`, as a typed NULL is.
+
 ## Implementation Phases
 
 - [x] **Phase 1: Nest/Unnest/Apply operators** - I1
-- [ ] **Phase 2: Decorrelation rules** - I3
+- [x] **Phase 2: Decorrelation rules** - I3
 
 ## Consequences
 

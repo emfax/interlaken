@@ -1,0 +1,26 @@
+; Conjuncts move to the side they reference; one over both sides of an inner join
+; joins the condition; on a left join, a condition on the padded side stays above.
+(plan
+  (project
+    (filter
+      (join left
+        (join inner (get users :as u) (get posts :as p) true)
+        (get audit :as a)
+        (= a.user_id u.id))
+      (and (> u.karma 1) (> p.likes 2) (= p.author_id u.id) (is-null a.id)))
+    u.name
+    p.title))
+;; optimized
+(plan :schema-version 7
+  (project :bind 4
+    (filter
+      (join left
+        (join inner
+          (filter (get (tid 100) :as u :bind 1) (> #1.4 1))
+          (filter (get (tid 101) :as p :bind 2) (> #2.3 (int4 2)))
+          (= #2.1 #1.0))
+        (get (tid 103) :as a :bind 3)
+        (= #3.1 #1.0))
+      (is-null #3.0))
+    (as #1.1 name)
+    (as #2.2 title)))

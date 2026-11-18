@@ -1,0 +1,21 @@
+; Projection outputs nothing reads are removed, as are unread aggregates.
+(plan
+  (project
+    (filter
+      (project
+        (aggregate (get posts :as p) (keys p.author_id) (aggs (as (agg sum p.likes) total) (as (agg max p.title) top)))
+        author_id total top)
+      (> total 3))
+    author_id))
+;; optimized
+(plan :schema-version 7
+  (project :bind 4
+    (project :bind 3
+      (filter
+        (aggregate :bind 2
+          (get (tid 101) :as p :bind 1)
+          (keys (as #1.1 author_id))
+          (aggs (as (agg (fid 25) #1.3) total)))
+        (> #2.1 3))
+      (as #2.0 author_id))
+    (as #3.0 author_id)))

@@ -62,6 +62,10 @@ pub enum Expr {
     },
     /// `COALESCE`: the first non-NULL argument, evaluated left to right.
     Coalesce(Vec<Expr>),
+    /// An array of the elements, which share one type. An empty array has
+    /// no element type, so resolved IR writes it under a cast, as
+    /// `(cast (array) T)`, the way it writes a typed NULL.
+    Array(Vec<Expr>),
     /// `NULLIF(left, right)`.
     NullIf {
         /// The value returned unless it equals `right`.
@@ -217,7 +221,9 @@ impl Expr {
             Self::Call { args, .. } => args.iter().collect(),
             Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
-            Self::And(items) | Self::Or(items) | Self::Coalesce(items) => items.iter().collect(),
+            Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {
+                items.iter().collect()
+            }
             Self::Case {
                 operand,
                 branches,
@@ -244,7 +250,7 @@ impl Expr {
             Self::Call { args, .. } => args.iter_mut().collect(),
             Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
-            Self::And(items) | Self::Or(items) | Self::Coalesce(items) => {
+            Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {
                 items.iter_mut().collect()
             }
             Self::Case {

@@ -1,0 +1,31 @@
+; GraphQL: each user's posts. The correlated apply over a keyless nest becomes
+; a left join to a nest grouped by author; users without posts get an empty array.
+(plan
+  (project
+    (apply left
+      (get users :as u)
+      (nest
+        (sort (filter (get posts :as p) (= p.author_id u.id)) (desc p.id))
+        (keys)
+        (fields (as p.title title) (as p.likes likes))
+        :as posts))
+    u.name
+    posts))
+;; optimized
+(plan :schema-version 7
+  (project :bind 4
+    (join left
+      (get (tid 100) :as u :bind 1)
+      (nest :as posts :bind 5
+        (sort (get (tid 101) :as p :bind 2) (desc #2.0))
+        (keys #2.1)
+        (fields (as #2.2 title) (as #2.3 likes)))
+      (= #5.0 #1.0))
+    (as #1.1 name)
+    (as
+      (coalesce #5.1
+        (cast
+          (array)
+          (array
+            (not-null (record (title (not-null text)) (likes (not-null int4)))))))
+      posts)))
