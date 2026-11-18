@@ -15,6 +15,9 @@
 //! - The commit sequencer: optimistic validation for READ COMMITTED,
 //!   REPEATABLE READ and SERIALIZABLE, group commit, and the
 //!   [`Durability`] modes (ADR-0004, ADR-0005).
+//! - Version GC: a background task removes versions no snapshot can see,
+//!   bounded by the maximum transaction age (ADR-0008), with
+//!   [`StorageMetrics`] for observing it.
 //! - [`catalog`]: table and index definitions in system tables, with
 //!   transactional DDL (ADR-0007).
 //! - [`rows`]: the row layer, with index maintenance and primary key,
@@ -25,6 +28,7 @@ mod commit;
 pub mod encoding;
 mod engine;
 mod error;
+mod gc;
 mod pool;
 pub mod rows;
 mod scan;
@@ -35,10 +39,11 @@ mod txn;
 pub use commit::CommitStats;
 pub use engine::{Engine, FORMAT_VERSION};
 pub use error::{CatalogError, Conflict, ConstraintViolation, Error, Result};
+pub use gc::{GcReport, GcStats};
 pub use scan::{
     DEFAULT_SCAN_LIMIT_BYTES, DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, RowFilter, ScanBatch,
     ScanRequest,
 };
-pub use storage::{Durability, FjallStorage, Storage, StorageOptions};
+pub use storage::{Durability, FjallStorage, Storage, StorageMetrics, StorageOptions};
 pub use timestamp::Timestamp;
 pub use txn::{CommitInfo, Isolation, SavepointId, Txn, TxnOptions};

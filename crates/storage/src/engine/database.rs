@@ -136,6 +136,31 @@ impl Engine {
         Ok(())
     }
 
+    /// Physically remove versioned keys from `data` in one unsynced batch (ADR-0008).
+    pub(crate) fn remove_versions(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.db.batch();
+        for key in keys {
+            batch.remove(&self.data, key);
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Record the watermark of a completed GC pass in `meta`.
+    pub(crate) fn set_gc_watermark(&self, watermark: Timestamp) -> Result<()> {
+        self.meta
+            .insert(GC_WATERMARK_KEY, encode_timestamp(watermark))?;
+        Ok(())
+    }
+
+    /// Return the space the database uses on disk, in bytes.
+    pub(crate) fn disk_space(&self) -> Result<u64> {
+        Ok(self.db.disk_space()?)
+    }
+
     /// Validate an existing `meta` keyspace against this build.
     fn validate_meta(&self, format_value: &[u8]) -> Result<()> {
         let found = decode_format_version(format_value)?;

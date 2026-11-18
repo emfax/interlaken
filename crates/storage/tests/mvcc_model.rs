@@ -45,6 +45,8 @@ enum Step {
     OpenReader(Isolation),
     /// Run a read (or statement boundary) in a previously opened reader.
     ReaderOp(usize, Op),
+    /// Run a version GC pass, which must be invisible to every reader.
+    Gc,
 }
 
 /// Generate an isolation level.
@@ -92,6 +94,7 @@ fn step() -> impl Strategy<Value = Step> {
         4 => txn.prop_map(Step::Txn),
         1 => isolation().prop_map(Step::OpenReader),
         2 => (any::<usize>(), read_op()).prop_map(|(i, op)| Step::ReaderOp(i, op)),
+        1 => Just(Step::Gc),
     ]
 }
 
@@ -131,6 +134,8 @@ async fn run_script(steps: Vec<Step>) {
         pool_threads: 2,
         queue_capacity: 8,
         durability: Durability::Buffered,
+        gc_interval: None,
+        gc_chunk_versions: 3,
         ..StorageOptions::default()
     };
     let storage = FjallStorage::open(dir.path(), options).unwrap();
@@ -188,6 +193,9 @@ async fn run_script(steps: Vec<Step>) {
                 let n = readers.len();
                 let (txn, model_txn) = &mut readers[i % n];
                 run_read(txn, model_txn, &model, &op).await;
+            }
+            Step::Gc => {
+                storage.run_gc().await.unwrap();
             }
         }
     }

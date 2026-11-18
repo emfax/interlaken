@@ -47,7 +47,7 @@ The MVP's success criteria are that concurrent transactions show no anomalies un
 - [x] **Phase 2: Model-based tests for single transactions** - M2
 - [x] **Phase 3: Model-based tests with concurrency** - M3
 - [x] **Phase 4: Concurrent uniqueness tests** - M4
-- [ ] **Phase 5: Bounded-space test under sustained updates** - M5
+- [x] **Phase 5: Bounded-space test under sustained updates** - M5
 - [ ] **Phase 6: Elle checking, crash harness, hardening** - M6
 
 ## Consequences

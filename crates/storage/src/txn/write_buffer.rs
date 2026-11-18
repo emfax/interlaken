@@ -49,6 +49,11 @@ struct Entry {
 }
 
 impl Entry {
+    /// Return the bytes the final write to `key` adds to the write set.
+    fn size(&self, key: &[u8]) -> usize {
+        key.len() + self.latest.value().map_or(0, Bytes::len)
+    }
+
     /// Return the write visible to `statement`: the latest if it came from an
     /// earlier statement, otherwise whatever an earlier statement left.
     fn visible_to(&self, statement: u64) -> Option<&WriteOp> {
@@ -68,11 +73,14 @@ pub(crate) struct WriteBuffer {
     undo: Vec<(Key, Option<Entry>)>,
     /// Record undo entries; set while any savepoint is open.
     recording: bool,
+    /// Total size of the final writes: keys plus values.
+    bytes: usize,
 }
 
 impl WriteBuffer {
     /// Record a write to `key` made by `statement` reading at `snapshot`.
     pub(crate) fn write(&mut self, key: Key, op: WriteOp, statement: u64, snapshot: Timestamp) {
+        self.bytes = self.bytes_after(&key, &op);
         let previous = self.entries.get(&key).cloned();
         if self.recording {
             self.undo.push((key.clone(), previous.clone()));
@@ -95,6 +103,18 @@ impl WriteBuffer {
             },
         };
         self.entries.insert(key, entry);
+    }
+
+    /// Return the write set size, in bytes of keys plus values, after writing `op` to `key`.
+    pub(crate) fn bytes_after(&self, key: &[u8], op: &WriteOp) -> usize {
+        let old = self.entries.get(key).map_or(0, |e| e.size(key));
+        self.bytes - old + key.len() + op.value().map_or(0, Bytes::len)
+    }
+
+    /// Return the write set size in bytes of keys plus values.
+    #[cfg(test)]
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Return the buffered write to `key` visible to `statement`, if any.
@@ -143,10 +163,12 @@ impl WriteBuffer {
     pub(crate) fn rollback_to(&mut self, mark: usize) {
         while self.undo.len() > mark {
             let (key, previous) = self.undo.pop().expect("length checked");
-            match previous {
-                Some(entry) => self.entries.insert(key, entry),
+            let new_size = previous.as_ref().map_or(0, |e| e.size(&key));
+            let replaced = match previous {
+                Some(entry) => self.entries.insert(key.clone(), entry),
                 None => self.entries.remove(&key),
             };
+            self.bytes = self.bytes - replaced.map_or(0, |e| e.size(&key)) + new_size;
         }
     }
 
@@ -248,9 +270,11 @@ mod tests {
         assert_eq!(buf.visible(b"b", 9), None);
         assert_eq!(buf.visible(b"a", 9), Some(&put("2")));
         buf.write(key("b"), put("4"), 2, ts(3));
+        assert_eq!(buf.bytes(), 4);
         buf.rollback_to(outer);
         assert_eq!(buf.visible(b"a", 9), Some(&put("1")));
         assert_eq!(buf.visible(b"b", 9), None);
+        assert_eq!(buf.bytes(), 2, "only a=1 is left");
         buf.clear_undo();
         buf.write(key("c"), put("5"), 3, ts(3));
         assert!(buf.undo.is_empty());

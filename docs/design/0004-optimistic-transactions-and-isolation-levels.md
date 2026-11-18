@@ -87,13 +87,14 @@ The sequencer keeps the write sets of recently committed transactions, ordered b
 
 - Maximum write-set size per transaction: default 64 MB.
 - Maximum transaction age: default 5 minutes, so a forgotten transaction can't hold back version GC indefinitely.
+- As implemented (M5): both limits are `StorageOptions` fields. The write-set size counts the final buffered write per key (key plus value bytes); a write that would exceed it fails with `WriteSetTooLarge` (SQLSTATE `54000`). The age limit covers read-only transactions too, since they also hold back GC. An over-age transaction fails its next read, write or commit with `TransactionTooOld` (SQLSTATE `25P04`). See [ADR-0008](0008-version-garbage-collection.md).
 - Aborts return a typed `SerializationFailure` (`40001`) marked as retryable.
 
 ## Implementation Phases
 
 - [x] **Phase 1: Write buffer, read-your-writes, MVCC snapshot reads** - M2
 - [x] **Phase 2: Validation for all three isolation levels, savepoints** - M3
-- [ ] **Phase 3: Transaction limits** - M5
+- [x] **Phase 3: Transaction limits** - M5
 
 ## Consequences
 

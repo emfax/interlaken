@@ -48,6 +48,8 @@ enum Step {
     Commit(usize),
     /// Abort an open transaction.
     Abort(usize),
+    /// Run a version GC pass, which must be invisible to every open transaction.
+    Gc,
 }
 
 /// An open transaction with its model twin and savepoint handles.
@@ -88,6 +90,7 @@ fn step() -> impl Strategy<Value = Step> {
         12 => (any::<usize>(), op()).prop_map(|(i, op)| Step::Op(i, op)),
         2 => any::<usize>().prop_map(Step::Commit),
         1 => any::<usize>().prop_map(Step::Abort),
+        1 => Just(Step::Gc),
     ]
 }
 
@@ -166,6 +169,8 @@ async fn run_script(steps: Vec<Step>) {
         pool_threads: 2,
         queue_capacity: 8,
         durability: Durability::Buffered,
+        gc_interval: None,
+        gc_chunk_versions: 3,
         ..StorageOptions::default()
     };
     let storage = FjallStorage::open(dir.path(), options).unwrap();
@@ -190,6 +195,9 @@ async fn run_script(steps: Vec<Step>) {
                     model: ModelTxn::begin(&model, isolation, read_only),
                     savepoints: Vec::new(),
                 });
+            }
+            Step::Gc => {
+                storage.run_gc().await.unwrap();
             }
             Step::Op(_, _) | Step::Commit(_) | Step::Abort(_) if open.is_empty() => {}
             Step::Op(i, op) => {

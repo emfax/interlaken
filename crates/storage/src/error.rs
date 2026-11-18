@@ -76,6 +76,22 @@ pub enum Error {
     #[error("unknown savepoint")]
     UnknownSavepoint,
 
+    /// The transaction has been open longer than the maximum age (SQLSTATE
+    /// `25P04`). Versions it needs may have been garbage-collected, so it
+    /// can't continue; begin a new transaction.
+    #[error("transaction exceeded the maximum age of {max_age:?}")]
+    TransactionTooOld {
+        /// The configured maximum age.
+        max_age: std::time::Duration,
+    },
+
+    /// The transaction's buffered writes exceed the limit (SQLSTATE `54000`).
+    #[error("transaction write set exceeds {limit} bytes")]
+    WriteSetTooLarge {
+        /// The configured limit in bytes.
+        limit: usize,
+    },
+
     /// A row value could not be encoded, or a stored row could not be decoded.
     #[error(transparent)]
     Row(#[from] RowFormatError),

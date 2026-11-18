@@ -3,8 +3,10 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::commit::{CommitClock, CommitStats, Sequencer, SequencerConfig, SequencerStats};
+use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
 use crate::{Engine, Result, Timestamp, Txn, TxnOptions};
 
@@ -39,10 +41,24 @@ pub struct StorageOptions {
     pub max_commit_group: usize,
     /// Bounded commit queue length. Defaults to 1,024.
     pub commit_queue_capacity: usize,
+    /// Most bytes of keys plus values one transaction may buffer. Defaults to 64 MiB.
+    pub max_write_set_bytes: usize,
+    /// Longest a transaction may stay open. Defaults to 5 minutes.
+    ///
+    /// An older transaction fails its next operation with
+    /// [`Error::TransactionTooOld`](crate::Error::TransactionTooOld) and no
+    /// longer holds back version GC (ADR-0004, ADR-0008).
+    pub max_transaction_age: Duration,
+    /// How often the background GC pass runs, or `None` to run GC only
+    /// through [`FjallStorage::run_gc`]. Defaults to 10 seconds.
+    pub gc_interval: Option<Duration>,
+    /// Versions one GC chunk examines before yielding the storage thread.
+    /// Defaults to 4,096.
+    pub gc_chunk_versions: usize,
 }
 
 impl Default for StorageOptions {
-    /// Return the ADR-0001 and ADR-0005 defaults.
+    /// Return the defaults from ADR-0001, ADR-0004, ADR-0005 and ADR-0008.
     fn default() -> Self {
         let cores = std::thread::available_parallelism().map_or(2, usize::from);
         Self {
@@ -51,20 +67,59 @@ impl Default for StorageOptions {
             durability: Durability::Sync,
             max_commit_group: 256,
             commit_queue_capacity: 1024,
+            max_write_set_bytes: 64 * 1024 * 1024,
+            max_transaction_age: Duration::from_secs(5 * 60),
+            gc_interval: Some(Duration::from_secs(10)),
+            gc_chunk_versions: 4096,
         }
     }
 }
 
+/// Per-transaction limits (ADR-0004).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Limits {
+    pub(crate) max_write_set_bytes: usize,
+    pub(crate) max_transaction_age: Duration,
+}
+
+/// A point-in-time view of the storage layer's state and counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StorageMetrics {
+    /// The timestamp new snapshots read at.
+    pub visible_ts: Timestamp,
+    /// Open transactions within the maximum age.
+    pub active_transactions: usize,
+    /// The oldest snapshot an open transaction holds, if any.
+    pub oldest_snapshot: Option<Timestamp>,
+    /// Transactions that exceeded the maximum age since the database was opened.
+    pub expired_transactions: u64,
+    /// Commit pipeline counters.
+    pub commit: CommitStats,
+    /// Version GC counters.
+    pub gc: GcStats,
+    /// Space the database uses on disk, in bytes.
+    pub disk_space_bytes: u64,
+}
+
 /// State shared by the storage handle and every transaction.
+///
+/// Fields drop in order: the GC thread stops before the pool it uses.
 pub(crate) struct Shared {
-    /// Threads that run all fjall reads.
-    pub(crate) pool: StoragePool,
+    /// The background GC thread, if enabled.
+    pub(crate) _gc_task: Option<GcTask>,
+    /// What a GC pass needs.
+    pub(crate) gc: GcContext,
+    /// Threads that run all fjall reads and GC chunks.
+    pub(crate) pool: Arc<StoragePool>,
     /// The visibility watermark and pinned snapshots.
     pub(crate) clock: Arc<CommitClock>,
     /// The thread that validates and writes commits.
     pub(crate) sequencer: Sequencer,
     /// Counters the sequencer updates.
     pub(crate) stats: Arc<SequencerStats>,
+    /// Per-transaction limits.
+    pub(crate) limits: Limits,
 }
 
 /// [`Storage`] backed by fjall, with all fjall calls on a dedicated pool.
@@ -84,8 +139,8 @@ impl FjallStorage {
     /// # Errors
     ///
     /// Returns any error from [`Engine::open`], or
-    /// [`Error::PoolUnavailable`](crate::Error::PoolUnavailable) if the pool
-    /// or sequencer threads can't be spawned.
+    /// [`Error::PoolUnavailable`](crate::Error::PoolUnavailable) if the pool,
+    /// sequencer or GC threads can't be spawned.
     ///
     /// # Examples
     ///
@@ -112,7 +167,11 @@ impl FjallStorage {
         let engine = Engine::open(path)?;
         let last = engine.last_commit_ts()?;
         let clock = Arc::new(CommitClock::new(last));
-        let pool = StoragePool::start(&engine, options.pool_threads, options.queue_capacity)?;
+        let pool = Arc::new(StoragePool::start(
+            &engine,
+            options.pool_threads,
+            options.queue_capacity,
+        )?);
         let config = SequencerConfig {
             durability: options.durability,
             max_group: options.max_commit_group,
@@ -121,12 +180,28 @@ impl FjallStorage {
         let stats = Arc::new(SequencerStats::default());
         let sequencer =
             Sequencer::start(engine, Arc::clone(&clock), last, config, Arc::clone(&stats))?;
+        let gc = GcContext {
+            pool: Arc::clone(&pool),
+            clock: Arc::clone(&clock),
+            counters: Arc::new(GcCounters::default()),
+            chunk_versions: options.gc_chunk_versions.max(1),
+        };
+        let gc_task = options
+            .gc_interval
+            .map(|interval| GcTask::start(gc.clone(), interval))
+            .transpose()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                _gc_task: gc_task,
+                gc,
                 pool,
                 clock,
                 sequencer,
                 stats,
+                limits: Limits {
+                    max_write_set_bytes: options.max_write_set_bytes,
+                    max_transaction_age: options.max_transaction_age,
+                },
             }),
         })
     }
@@ -141,6 +216,38 @@ impl FjallStorage {
     #[must_use]
     pub fn commit_stats(&self) -> CommitStats {
         self.shared.stats.snapshot()
+    }
+
+    /// Run one version GC pass now and wait for it (ADR-0008).
+    ///
+    /// The background task runs passes on its own schedule; this is for
+    /// tests, tools and operators. Transactions past the maximum age stop
+    /// holding back the watermark.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if a chunk or the watermark write fails.
+    pub async fn run_gc(&self) -> Result<GcReport> {
+        self.shared.gc.pass().await
+    }
+
+    /// Return a snapshot of the storage layer's state and counters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the disk usage can't be read.
+    pub async fn metrics(&self) -> Result<StorageMetrics> {
+        let disk_space_bytes = self.shared.pool.run(Engine::disk_space).await??;
+        let (active_transactions, oldest_snapshot) = self.shared.clock.active();
+        Ok(StorageMetrics {
+            visible_ts: self.visible_ts(),
+            active_transactions,
+            oldest_snapshot,
+            expired_transactions: self.shared.clock.expired_count(),
+            commit: self.commit_stats(),
+            gc: self.shared.gc.counters.snapshot(),
+            disk_space_bytes,
+        })
     }
 }
 

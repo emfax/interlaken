@@ -43,9 +43,9 @@ pub struct Txn(Arc<TxnInner>);
 struct TxnInner {
     shared: Arc<Shared>,
     options: TxnOptions,
-    /// Keeps validation history from being trimmed past the first snapshot.
-    /// Read-only transactions never validate, so they hold no pin.
-    _pin: Option<SnapshotPin>,
+    /// Keeps validation history and old versions alive for the first
+    /// snapshot, until the maximum transaction age.
+    pin: SnapshotPin,
     state: Mutex<TxnState>,
 }
 
@@ -65,16 +65,12 @@ struct TxnState {
 impl Txn {
     /// Construct a transaction reading at the current visible timestamp.
     pub(crate) fn begin(shared: Arc<Shared>, options: TxnOptions) -> Self {
-        let (snapshot, pin) = if options.read_only {
-            (shared.clock.visible_ts(), None)
-        } else {
-            let pin = shared.clock.pin();
-            (pin.ts(), Some(pin))
-        };
+        let pin = shared.clock.pin(shared.limits.max_transaction_age);
+        let snapshot = pin.ts();
         Self(Arc::new(TxnInner {
             shared,
             options,
-            _pin: pin,
+            pin,
             state: Mutex::new(TxnState {
                 snapshot,
                 statement: 0,
@@ -124,6 +120,7 @@ impl Txn {
     /// Read `keys` at the snapshot, overlaid with buffered writes from earlier
     /// statements, or from every statement if `latest`.
     async fn read_keys(&self, keys: Vec<Key>, latest: bool) -> Result<Vec<Option<Bytes>>> {
+        self.check_age()?;
         let (snapshot, mut results, missing) = {
             let mut state = self.state();
             let statement = state.statement;
@@ -158,6 +155,8 @@ impl Txn {
                 .pool
                 .run(move |engine| mvcc::read_many(engine.data(), &missing_keys, snapshot))
                 .await??;
+            // GC may have removed versions this read needed once the pin expired.
+            self.check_age()?;
             for (i, value) in indices.into_iter().zip(fetched) {
                 results[i] = Some(value);
             }
@@ -187,6 +186,7 @@ impl Txn {
     /// Read one batch of a range scan, merging buffered writes from earlier
     /// statements, or from every statement if `latest`.
     async fn scan_with(&self, request: ScanRequest, latest: bool) -> Result<ScanBatch> {
+        self.check_age()?;
         let range = match (request.resume, request.reverse) {
             (None, _) => request.range,
             (Some(resume), false) => KeyRange::new(Bound::Excluded(resume), request.range.end),
@@ -217,6 +217,8 @@ impl Txn {
             .pool
             .run(move |engine| mvcc::scan(engine.data(), job))
             .await??;
+        // GC may have removed versions this scan needed once the pin expired.
+        self.check_age()?;
         self.state().reads.record_range(output.covered);
         Ok(ScanBatch {
             rows: output.rows,
@@ -350,6 +352,11 @@ impl Txn {
     ///   database can no longer accept commits.
     pub async fn commit(self) -> Result<CommitInfo> {
         let inner = Arc::try_unwrap(self.0).map_err(|_| Error::TransactionShared)?;
+        if inner.pin.is_expired() {
+            return Err(Error::TransactionTooOld {
+                max_age: inner.shared.limits.max_transaction_age,
+            });
+        }
         let state = inner
             .state
             .into_inner()
@@ -385,6 +392,7 @@ impl Txn {
         if self.0.options.read_only {
             return Err(Error::ReadOnlyTransaction);
         }
+        self.check_age()?;
         if key.len() > MAX_TUPLE_LEN {
             return Err(EncodeError::KeyTooLong {
                 len: key.len(),
@@ -393,8 +401,22 @@ impl Txn {
             .into());
         }
         let mut state = self.state();
+        let limit = self.0.shared.limits.max_write_set_bytes;
+        if state.writes.bytes_after(&key, &op) > limit {
+            return Err(Error::WriteSetTooLarge { limit });
+        }
         let (statement, snapshot) = (state.statement, state.snapshot);
         state.writes.write(key, op, statement, snapshot);
+        Ok(())
+    }
+
+    /// Fail if the transaction has exceeded the maximum age.
+    fn check_age(&self) -> Result<()> {
+        if self.0.pin.is_expired() {
+            return Err(Error::TransactionTooOld {
+                max_age: self.0.shared.limits.max_transaction_age,
+            });
+        }
         Ok(())
     }
 

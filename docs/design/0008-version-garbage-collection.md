@@ -38,9 +38,17 @@ Alternative considered: **fjall custom compaction filters**. A filter sees one S
 - **Scheduling:** GC shares the single storage pool with reads ([ADR-0001](0001-fjall-storage-engine-and-async-sync-boundary.md)). Its chunks are queued at low priority, with a cap on GC tasks in flight. A dedicated GC pool is added only if metrics show GC hurting read latency.
 - **Pressure valve:** the maximum transaction age (default 5 minutes, [ADR-0004](0004-optimistic-transactions-and-isolation-levels.md)) caps how far one transaction can hold back the watermark.
 
+### As implemented (M5)
+
+- **Every transaction pins its snapshot,** read-only ones included, in a registry on the commit clock. The watermark is the oldest pin, or `visible_ts` with none. A snapshot is taken under the registry lock, so a new snapshot is never older than a watermark already computed.
+- **Expiry revokes pins.** Computing the watermark revokes pins past the maximum age, so they stop holding GC back. A revoked transaction fails its next operation with `TransactionTooOld`. Reads check again after the storage call returns, so a read that raced GC throws away its result rather than returning partial data: revocation happens before any deletion that relies on it. The same watermark trims the sequencer's validation history.
+- **Low priority without a second pool.** GC chunks go in a separate low-priority queue, and each one sends a wake-up token through the normal queue. The worker that takes the token first runs the normal jobs already waiting (up to the queue length at that moment, so GC can't be starved), then the GC chunk. The GC driver keeps one chunk in flight. Chunks end on key boundaries, after `gc_chunk_versions` versions (default 4,096).
+- **Schedule.** A background thread runs a pass every `gc_interval` (default 10 s, `None` disables it). `FjallStorage::run_gc` runs a pass on demand and returns a `GcReport`. Each completed pass writes its watermark to `meta`.
+- **Metrics.** `FjallStorage::metrics()` returns `StorageMetrics`: visible timestamp, active transactions, oldest snapshot, expired-transaction count, commit pipeline counters, GC counters (passes, failures, versions examined and removed, last pass) and disk usage.
+
 ## Implementation Phases
 
-- [ ] **Phase 1: Watermark tracking and background GC scanner** - M5
+- [x] **Phase 1: Watermark tracking and background GC scanner** - M5
 
 ## Consequences
 
