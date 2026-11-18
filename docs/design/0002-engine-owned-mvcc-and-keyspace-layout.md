@@ -69,7 +69,7 @@ data key = tuple(table_id, index_id, key columns...) ++ !commit_ts
 ## Implementation Phases
 
 - [x] **Phase 1: Keyspaces and `meta`** - M1
-- [ ] **Phase 2: MVCC reads and versioned scans** - M2
+- [x] **Phase 2: MVCC reads and versioned scans** - M2
 
 ## Consequences
 

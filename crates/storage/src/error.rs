@@ -33,4 +33,24 @@ pub enum Error {
     /// A key could not be decoded.
     #[error(transparent)]
     Decode(#[from] DecodeError),
+
+    /// A value in the `data` keyspace has an unknown record tag.
+    #[error("corrupt stored value: unknown record tag {0:#04x}")]
+    CorruptValue(u8),
+
+    /// The storage pool has shut down, or a storage task panicked.
+    #[error("storage pool is unavailable: {0}")]
+    PoolUnavailable(&'static str),
+
+    /// A write was attempted in a read-only transaction.
+    #[error("cannot write in a read-only transaction")]
+    ReadOnlyTransaction,
+
+    /// `commit` was called while other clones of the transaction handle are alive.
+    #[error("cannot commit while other clones of the transaction handle are alive")]
+    TransactionShared,
+
+    /// The logical commit timestamp space is exhausted.
+    #[error("commit timestamp space exhausted")]
+    TimestampExhausted,
 }

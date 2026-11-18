@@ -36,6 +36,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
+name = "bytes"
+version = "1.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
+
+[[package]]
 name = "byteview"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -149,6 +155,8 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
+ "futures-core",
+ "futures-sink",
  "spin",
 ]
 
@@ -157,6 +165,18 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "futures-core"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-sink"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
 name = "getrandom"
@@ -197,10 +217,13 @@ checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 name = "interlaken-storage"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "fjall",
+ "flume",
  "proptest",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -246,6 +269,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5498808f4d41cf785079d3ef3f28716f1b4364af1b512f3097bfb651bded1b3e"
 dependencies = [
  "byteorder-lite",
+ "bytes",
  "byteview",
  "crossbeam-skiplist",
  "enum_dispatch",
@@ -297,6 +321,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "pin-project-lite"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "ppv-lite86"
@@ -543,6 +573,27 @@ name = "thiserror-impl"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "tokio"
+version = "1.54.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
+dependencies = [
+ "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
 dependencies = [
  "proc-macro2",
  "quote",

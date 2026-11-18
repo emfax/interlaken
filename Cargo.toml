@@ -10,10 +10,13 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 interlaken-storage = { path = "crates/storage" }
-fjall = "3.1"
+fjall = { version = "3.1", features = ["bytes_1"] }
+bytes = "1"
+flume = { version = "0.12", default-features = false, features = ["async"] }
 thiserror = "2"
 proptest = "1"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

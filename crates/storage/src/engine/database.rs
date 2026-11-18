@@ -8,6 +8,8 @@ use super::meta::{
     FORMAT_VERSION, FORMAT_VERSION_KEY, GC_WATERMARK_KEY, LAST_COMMIT_TS_KEY,
     decode_format_version, decode_timestamp, encode_format_version, encode_timestamp,
 };
+use super::stored::encode_stored;
+use crate::encoding::versioned_key;
 use crate::{Error, Result, Timestamp};
 
 /// Name of the versioned keyspace holding rows, index entries and the catalog.
@@ -97,16 +99,36 @@ impl Engine {
         decode_timestamp(&value, "gc_watermark is not 8 bytes")
     }
 
-    /// Return the fjall database, for building cross-keyspace write batches.
-    #[allow(dead_code, reason = "used by the commit sequencer in M3")]
+    /// Return the fjall database.
+    #[cfg(test)]
     pub(crate) fn database(&self) -> &Database {
         &self.db
     }
 
     /// Return the versioned `data` keyspace.
-    #[allow(dead_code, reason = "used by MVCC reads in M2")]
     pub(crate) fn data(&self) -> &Keyspace {
         &self.data
+    }
+
+    /// Write one commit as a single atomic fjall batch.
+    ///
+    /// Each write becomes a version of its key at `ts` (a tombstone when the
+    /// value is `None`), and `last_commit_ts` in `meta` is set to `ts` in the
+    /// same batch, so recovery never sees a partial commit or a timestamp
+    /// whose data is missing. Durability modes arrive with the sequencer in M3;
+    /// until then the batch reaches fjall's journal without an explicit sync.
+    pub(crate) fn commit_batch<'a>(
+        &self,
+        ts: Timestamp,
+        writes: impl IntoIterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+    ) -> Result<()> {
+        let mut batch = self.db.batch();
+        for (key, value) in writes {
+            batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
+        }
+        batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(ts));
+        batch.commit()?;
+        Ok(())
     }
 
     /// Validate an existing `meta` keyspace against this build.

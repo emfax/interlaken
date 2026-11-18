@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9cf8aa76db12d8ede7ea1f11c08b4538948e9797b34a1ce1b82095f6f6901877 # shrinks to steps = [Txn(TxnScript { isolation: ReadCommitted, read_only: false, ops: [Put(0, []), Scan(ScanSpec { start: Included(2), end: Included(0), reverse: false, limit_rows: 1, limit_bytes: 1, parity: None })], commit: false })]
+cc 2346dd5f0f68af0ec952ac41e80375ad8f9b7708a7e94961f0507d9a363ba0aa # shrinks to steps = [Txn(TxnScript { isolation: ReadCommitted, read_only: false, ops: [Delete(2)], commit: true }), Txn(TxnScript { isolation: ReadCommitted, read_only: false, ops: [Put(2, [5])], commit: true }), Txn(TxnScript { isolation: ReadCommitted, read_only: false, ops: [Scan(ScanSpec { start: Unbounded, end: Unbounded, reverse: true, limit_rows: 1, limit_bytes: 1, parity: None })], commit: false })]

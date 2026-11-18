@@ -39,6 +39,17 @@ impl Timestamp {
     pub const fn into_raw(self) -> u64 {
         self.0
     }
+
+    /// Return the next logical timestamp, or `None` if the space is exhausted.
+    ///
+    /// Only the timestamp source (the commit path) may call this; everywhere
+    /// else timestamps are opaque and only compared.
+    pub(crate) const fn successor(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(raw) => Some(Self(raw)),
+            None => None,
+        }
+    }
 }
 
 impl fmt::Display for Timestamp {
