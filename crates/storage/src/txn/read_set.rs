@@ -1,6 +1,6 @@
 //! The transaction's read set: point keys and key ranges (ADR-0004).
 //!
-//! Recorded now and checked by commit validation in milestone M3.
+//! Checked by commit validation under SERIALIZABLE.
 
 use std::collections::BTreeSet;
 
@@ -25,20 +25,17 @@ impl ReadSet {
     }
 
     /// Return the registered point keys.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "read by commit validation in M3")
-    )]
     pub(crate) fn keys(&self) -> &BTreeSet<Key> {
         &self.keys
     }
 
     /// Return the registered ranges, in registration order.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "read by commit validation in M3")
-    )]
     pub(crate) fn ranges(&self) -> &[KeyRange] {
         &self.ranges
+    }
+
+    /// Return `true` if nothing has been read.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.ranges.is_empty()
     }
 }

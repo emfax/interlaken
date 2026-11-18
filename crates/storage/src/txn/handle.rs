@@ -8,11 +8,12 @@ use bytes::Bytes;
 use super::read_set::ReadSet;
 use super::write_buffer::{WriteBuffer, WriteOp};
 use super::{Isolation, TxnOptions};
+use crate::commit::{CommitRequest, SnapshotPin};
 use crate::encoding::{EncodeError, MAX_TUPLE_LEN};
 use crate::engine::mvcc::{self, ScanJob};
 use crate::scan::{Key, KeyRange, ScanBatch, ScanRequest};
 use crate::storage::Shared;
-use crate::{Error, Result, Timestamp, commit};
+use crate::{Error, Result, Timestamp};
 
 /// Outcome of a successful commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +21,10 @@ pub struct CommitInfo {
     /// The commit timestamp, or `None` if the transaction wrote nothing.
     pub commit_ts: Option<Timestamp>,
 }
+
+/// Identifies a savepoint within one transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SavepointId(u64);
 
 /// A transaction.
 ///
@@ -38,6 +43,9 @@ pub struct Txn(Arc<TxnInner>);
 struct TxnInner {
     shared: Arc<Shared>,
     options: TxnOptions,
+    /// Keeps validation history from being trimmed past the first snapshot.
+    /// Read-only transactions never validate, so they hold no pin.
+    _pin: Option<SnapshotPin>,
     state: Mutex<TxnState>,
 }
 
@@ -47,20 +55,31 @@ struct TxnState {
     statement: u64,
     writes: WriteBuffer,
     reads: ReadSet,
+    /// Open savepoints, oldest first, with their undo-log positions.
+    savepoints: Vec<(SavepointId, usize)>,
+    next_savepoint: u64,
 }
 
 impl Txn {
     /// Construct a transaction reading at the current visible timestamp.
     pub(crate) fn begin(shared: Arc<Shared>, options: TxnOptions) -> Self {
-        let snapshot = shared.clock.visible_ts();
+        let (snapshot, pin) = if options.read_only {
+            (shared.clock.visible_ts(), None)
+        } else {
+            let pin = shared.clock.pin();
+            (pin.ts(), Some(pin))
+        };
         Self(Arc::new(TxnInner {
             shared,
             options,
+            _pin: pin,
             state: Mutex::new(TxnState {
                 snapshot,
                 statement: 0,
                 writes: WriteBuffer::default(),
                 reads: ReadSet::default(),
+                savepoints: Vec::new(),
+                next_savepoint: 0,
             }),
         }))
     }
@@ -202,6 +221,50 @@ impl Txn {
         self.state().reads.record_range(range);
     }
 
+    /// Open a savepoint at the current state of the write buffer.
+    #[must_use]
+    pub fn savepoint(&self) -> SavepointId {
+        let mut state = self.state();
+        let id = SavepointId(state.next_savepoint);
+        state.next_savepoint += 1;
+        let mark = state.writes.mark();
+        state.savepoints.push((id, mark));
+        id
+    }
+
+    /// Undo every write made since `savepoint` was opened.
+    ///
+    /// The savepoint stays open, so it can be rolled back to again; savepoints
+    /// opened after it are released. Reads made since then stay in the read
+    /// set, because the transaction may already have acted on them (ADR-0004).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownSavepoint`] if the savepoint is not open.
+    pub fn rollback_to(&self, savepoint: SavepointId) -> Result<()> {
+        let mut state = self.state();
+        let index = state.savepoint_index(savepoint)?;
+        let mark = state.savepoints[index].1;
+        state.savepoints.truncate(index + 1);
+        state.writes.rollback_to(mark);
+        Ok(())
+    }
+
+    /// Release `savepoint` and every savepoint opened after it, keeping their writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownSavepoint`] if the savepoint is not open.
+    pub fn release_savepoint(&self, savepoint: SavepointId) -> Result<()> {
+        let mut state = self.state();
+        let index = state.savepoint_index(savepoint)?;
+        state.savepoints.truncate(index);
+        if state.savepoints.is_empty() {
+            state.writes.clear_undo();
+        }
+        Ok(())
+    }
+
     /// Mark a statement boundary.
     ///
     /// Writes from the statement just finished become visible to reads.
@@ -218,12 +281,21 @@ impl Txn {
 
     /// Commit the transaction.
     ///
+    /// A transaction that wrote nothing commits without validation: its
+    /// snapshot is already a consistent point in the commit order. Otherwise
+    /// the commit sequencer validates it (ADR-0004) and returns once its
+    /// commit group is written with the configured
+    /// [`Durability`](crate::Durability).
+    ///
     /// # Errors
     ///
     /// - [`Error::TransactionShared`] if other clones of this handle are still
     ///   alive. This handle is consumed; a remaining clone can commit later.
-    /// - [`Error::TimestampExhausted`], [`Error::Fjall`] or
-    ///   [`Error::PoolUnavailable`] if the commit can't be written.
+    /// - [`Error::SerializationFailure`] if validation fails; retry the
+    ///   transaction.
+    /// - [`Error::CommitOutcomeUnknown`] if writing the commit group failed.
+    /// - [`Error::SequencerStopped`] or [`Error::TimestampExhausted`] if the
+    ///   database can no longer accept commits.
     pub async fn commit(self) -> Result<CommitInfo> {
         let inner = Arc::try_unwrap(self.0).map_err(|_| Error::TransactionShared)?;
         let state = inner
@@ -233,13 +305,18 @@ impl Txn {
         if state.writes.is_empty() {
             return Ok(CommitInfo { commit_ts: None });
         }
-        let writes = state.writes.into_final_writes();
-        let clock = inner.shared.clock.clone();
-        let ts = inner
-            .shared
-            .pool
-            .run(move |engine| commit::apply(engine, &clock, &writes))
-            .await??;
+        let reads = if inner.options.isolation == Isolation::Serializable {
+            state.reads
+        } else {
+            ReadSet::default()
+        };
+        let request = CommitRequest {
+            snapshot: state.snapshot,
+            reads,
+            writes: state.writes.into_intents(),
+        };
+        // `inner` keeps the snapshot pin alive until validation is done.
+        let ts = inner.shared.sequencer.submit(request).await?;
         Ok(CommitInfo {
             commit_ts: Some(ts),
         })
@@ -263,8 +340,8 @@ impl Txn {
             .into());
         }
         let mut state = self.state();
-        let statement = state.statement;
-        state.writes.write(key, op, statement);
+        let (statement, snapshot) = (state.statement, state.snapshot);
+        state.writes.write(key, op, statement, snapshot);
         Ok(())
     }
 
@@ -279,6 +356,16 @@ impl Txn {
     #[cfg(test)]
     pub(crate) fn read_set(&self) -> ReadSet {
         self.state().reads.clone()
+    }
+}
+
+impl TxnState {
+    /// Return the stack position of an open savepoint.
+    fn savepoint_index(&self, savepoint: SavepointId) -> Result<usize> {
+        self.savepoints
+            .iter()
+            .position(|(id, _)| *id == savepoint)
+            .ok_or(Error::UnknownSavepoint)
     }
 }
 
@@ -303,6 +390,8 @@ mod tests {
         let options = StorageOptions {
             pool_threads: 2,
             queue_capacity: 16,
+            durability: crate::Durability::Buffered,
+            ..StorageOptions::default()
         };
         let storage = FjallStorage::open(dir.path(), options).unwrap();
         (dir, storage)
@@ -478,5 +567,216 @@ mod tests {
             txn.get_many(vec![k("a")]).await.unwrap(),
             vec![Some(k("2"))]
         );
+    }
+
+    /// Begin a read-write transaction at `isolation`.
+    async fn begin(storage: &FjallStorage, isolation: Isolation) -> Txn {
+        storage.begin(TxnOptions::new(isolation)).await.unwrap()
+    }
+
+    /// Return the conflict a commit failed with.
+    async fn conflict_of(txn: Txn) -> Option<crate::Conflict> {
+        match txn.commit().await {
+            Ok(_) => None,
+            Err(Error::SerializationFailure(conflict)) => Some(conflict),
+            Err(other) => panic!("unexpected error {other}"),
+        }
+    }
+
+    #[tokio::test]
+    /// Assert concurrent writes to one key abort the second committer at every level.
+    async fn first_committer_wins_at_every_level() {
+        for isolation in [
+            Isolation::ReadCommitted,
+            Isolation::RepeatableRead,
+            Isolation::Serializable,
+        ] {
+            let (_dir, storage) = open();
+            let a = begin(&storage, isolation).await;
+            let b = begin(&storage, isolation).await;
+            a.put(k("x"), k("a")).unwrap();
+            b.put(k("x"), k("b")).unwrap();
+            assert_eq!(conflict_of(a).await, None);
+            assert_eq!(
+                conflict_of(b).await,
+                Some(crate::Conflict::WriteWrite),
+                "{isolation:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    /// Assert a READ COMMITTED write after a snapshot refresh doesn't conflict with what it saw.
+    async fn read_committed_write_after_refresh() {
+        let (_dir, storage) = open();
+        let rc = begin(&storage, Isolation::ReadCommitted).await;
+        seed(&storage, &[("x", "other")]).await;
+        rc.next_statement();
+        rc.put(k("x"), k("rc")).unwrap();
+        assert_eq!(conflict_of(rc).await, None);
+
+        // A write made before the refresh still conflicts.
+        let rc = begin(&storage, Isolation::ReadCommitted).await;
+        rc.put(k("x"), k("rc")).unwrap();
+        seed(&storage, &[("x", "other")]).await;
+        rc.next_statement();
+        rc.put(k("x"), k("rc2")).unwrap();
+        assert_eq!(conflict_of(rc).await, Some(crate::Conflict::WriteWrite));
+    }
+
+    #[tokio::test]
+    /// Assert write skew commits under REPEATABLE READ but aborts under SERIALIZABLE.
+    async fn write_skew() {
+        for (isolation, expected) in [
+            (Isolation::RepeatableRead, None),
+            (Isolation::Serializable, Some(crate::Conflict::ReadWrite)),
+        ] {
+            let (_dir, storage) = open();
+            seed(&storage, &[("x", "1"), ("y", "1")]).await;
+            let a = begin(&storage, isolation).await;
+            let b = begin(&storage, isolation).await;
+            a.get_many(vec![k("x"), k("y")]).await.unwrap();
+            b.get_many(vec![k("x"), k("y")]).await.unwrap();
+            a.put(k("x"), k("0")).unwrap();
+            b.put(k("y"), k("0")).unwrap();
+            assert_eq!(conflict_of(a).await, None);
+            assert_eq!(conflict_of(b).await, expected, "{isolation:?}");
+        }
+    }
+
+    #[tokio::test]
+    /// Assert an insert into a scanned range aborts a SERIALIZABLE reader that writes.
+    async fn phantom_insert_conflicts() {
+        let (_dir, storage) = open();
+        let reader = begin(&storage, Isolation::Serializable).await;
+        let rows = reader
+            .scan(ScanRequest::new(KeyRange::prefix(b"p")))
+            .await
+            .unwrap()
+            .rows;
+        assert!(rows.is_empty());
+        seed(&storage, &[("p1", "new")]).await;
+        reader.put(k("summary"), k("0")).unwrap();
+        assert_eq!(conflict_of(reader).await, Some(crate::Conflict::ReadWrite));
+
+        // An insert outside the covered range doesn't conflict.
+        let reader = begin(&storage, Isolation::Serializable).await;
+        reader
+            .scan(ScanRequest::new(KeyRange::prefix(b"p")))
+            .await
+            .unwrap();
+        seed(&storage, &[("q1", "new")]).await;
+        reader.put(k("summary"), k("0")).unwrap();
+        assert_eq!(conflict_of(reader).await, None);
+    }
+
+    #[tokio::test]
+    /// Assert transactions that only read never abort.
+    async fn readers_never_abort() {
+        let (_dir, storage) = open();
+        let read_write = begin(&storage, Isolation::Serializable).await;
+        let read_only = storage
+            .begin(TxnOptions::default().read_only())
+            .await
+            .unwrap();
+        read_write.get_many(vec![k("x")]).await.unwrap();
+        read_only.get_many(vec![k("x")]).await.unwrap();
+        seed(&storage, &[("x", "1")]).await;
+        assert_eq!(read_write.commit().await.unwrap().commit_ts, None);
+        assert_eq!(read_only.commit().await.unwrap().commit_ts, None);
+    }
+
+    #[tokio::test]
+    /// Assert rollback undoes writes but keeps reads, and nested savepoints are released.
+    async fn savepoints() {
+        let (_dir, storage) = open();
+        seed(&storage, &[("r", "1")]).await;
+        let txn = begin(&storage, Isolation::Serializable).await;
+        txn.put(k("a"), k("1")).unwrap();
+        let outer = txn.savepoint();
+        txn.put(k("a"), k("2")).unwrap();
+        txn.next_statement();
+        let inner = txn.savepoint();
+        txn.get_many(vec![k("r")]).await.unwrap();
+        txn.put(k("b"), k("3")).unwrap();
+
+        txn.rollback_to(outer).unwrap();
+        assert!(matches!(
+            txn.rollback_to(inner),
+            Err(Error::UnknownSavepoint)
+        ));
+        txn.next_statement();
+        assert_eq!(
+            txn.get_many(vec![k("a"), k("b")]).await.unwrap(),
+            vec![Some(k("1")), None]
+        );
+        assert!(
+            txn.read_set().keys().contains(&k("r")),
+            "reads survive rollback"
+        );
+
+        // The savepoint stays open after a rollback.
+        txn.put(k("c"), k("4")).unwrap();
+        txn.rollback_to(outer).unwrap();
+        txn.release_savepoint(outer).unwrap();
+        assert!(matches!(
+            txn.release_savepoint(outer),
+            Err(Error::UnknownSavepoint)
+        ));
+        txn.commit().await.unwrap();
+
+        let check = storage
+            .begin(TxnOptions::default().read_only())
+            .await
+            .unwrap();
+        assert_eq!(
+            check.get_many(vec![k("a"), k("b"), k("c")]).await.unwrap(),
+            vec![Some(k("1")), None, None]
+        );
+    }
+
+    #[tokio::test]
+    /// Assert a rolled-back write no longer conflicts.
+    async fn rolled_back_write_does_not_conflict() {
+        let (_dir, storage) = open();
+        let txn = begin(&storage, Isolation::RepeatableRead).await;
+        txn.put(k("keep"), k("1")).unwrap();
+        let sp = txn.savepoint();
+        txn.put(k("x"), k("1")).unwrap();
+        txn.rollback_to(sp).unwrap();
+        seed(&storage, &[("x", "other")]).await;
+        assert_eq!(conflict_of(txn).await, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    /// Assert concurrent commits get distinct consecutive timestamps under both durability modes.
+    async fn concurrent_commits_get_consecutive_timestamps() {
+        for durability in [crate::Durability::Sync, crate::Durability::Buffered] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = StorageOptions {
+                durability,
+                max_commit_group: 8,
+                ..StorageOptions::default()
+            };
+            let storage = FjallStorage::open(dir.path(), options).unwrap();
+            let tasks: Vec<_> = (0..64u32)
+                .map(|i| {
+                    let storage = storage.clone();
+                    tokio::spawn(async move {
+                        let txn = storage.begin(TxnOptions::default()).await.unwrap();
+                        txn.put(Bytes::from(i.to_be_bytes().to_vec()), Bytes::new())
+                            .unwrap();
+                        txn.commit().await.unwrap().commit_ts.unwrap().into_raw()
+                    })
+                })
+                .collect();
+            let mut stamps = Vec::new();
+            for task in tasks {
+                stamps.push(task.await.unwrap());
+            }
+            stamps.sort_unstable();
+            assert_eq!(stamps, (1..=64).collect::<Vec<_>>());
+            assert_eq!(storage.visible_ts(), Timestamp::from_raw(64));
+        }
     }
 }

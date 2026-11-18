@@ -10,7 +10,7 @@ use super::meta::{
 };
 use super::stored::encode_stored;
 use crate::encoding::versioned_key;
-use crate::{Error, Result, Timestamp};
+use crate::{Durability, Error, Result, Timestamp};
 
 /// Name of the versioned keyspace holding rows, index entries and the catalog.
 const DATA_KEYSPACE: &str = "data";
@@ -110,23 +110,28 @@ impl Engine {
         &self.data
     }
 
-    /// Write one commit as a single atomic fjall batch.
+    /// Write a group of commits as a single atomic fjall batch (ADR-0005).
     ///
-    /// Each write becomes a version of its key at `ts` (a tombstone when the
-    /// value is `None`), and `last_commit_ts` in `meta` is set to `ts` in the
-    /// same batch, so recovery never sees a partial commit or a timestamp
-    /// whose data is missing. Durability modes arrive with the sequencer in M3;
-    /// until then the batch reaches fjall's journal without an explicit sync.
-    pub(crate) fn commit_batch<'a>(
+    /// Each write `(ts, key, value)` becomes a version of `key` at `ts` (a
+    /// tombstone when the value is `None`), and `last_commit_ts` in `meta` is
+    /// set to `last` in the same batch, so recovery never sees a partial group
+    /// or a timestamp whose data is missing. Under [`Durability::Sync`] the
+    /// journal is synced with `SyncAll` before this returns.
+    pub(crate) fn commit_group<'a>(
         &self,
-        ts: Timestamp,
-        writes: impl IntoIterator<Item = (&'a [u8], Option<&'a [u8]>)>,
+        last: Timestamp,
+        writes: impl IntoIterator<Item = (Timestamp, &'a [u8], Option<&'a [u8]>)>,
+        durability: Durability,
     ) -> Result<()> {
-        let mut batch = self.db.batch();
-        for (key, value) in writes {
+        let mode = match durability {
+            Durability::Sync => Some(PersistMode::SyncAll),
+            Durability::Buffered => None,
+        };
+        let mut batch = self.db.batch().durability(mode);
+        for (ts, key, value) in writes {
             batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
         }
-        batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(ts));
+        batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
         batch.commit()?;
         Ok(())
     }

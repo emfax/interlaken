@@ -51,7 +51,7 @@ The sequencer becomes the leader's proposal path; an apply thread writes the sam
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Sequencer, group commit, durability modes** - M3
+- [x] **Phase 1: Sequencer, group commit, durability modes** - M3
 - [ ] **Phase 2: Crash harness verification** - M6
 
 ## Consequences
@@ -65,6 +65,22 @@ The sequencer becomes the leader's proposal path; an apply thread writes the sam
 ### Negative
 - One validating thread caps commit rate. Fine at target scale; measure in M3 before optimizing.
 - Correctness depends on calling `persist(SyncAll)` and on fjall's fsync discipline for new files.
+
+### Measured (M3)
+
+`crates/storage/benches/commit_throughput.rs`, 22-core machine, NVMe disk, 2 s runs. "blind" is one write per REPEATABLE READ transaction. "rw" is SERIALIZABLE with four point reads, a 16-row scan and one write.
+
+| Workload | Durability | 1 client | 16 clients | 256 clients | Mean group at 256 |
+| --- | --- | --- | --- | --- | --- |
+| blind | `Sync` | 4.1k/s | 26.6k/s | 225k/s | ~245 |
+| blind | `Buffered` | 95k/s | 306k/s | 307k/s | ~242 |
+| rw | `Sync` | 3.0k/s | 25.1k/s | 87k/s | ~177 |
+| rw | `Buffered` | 16k/s | 106k/s | 93k/s | ~143 |
+
+- **`Sync`:** fsync-bound, not CPU-bound. The sequencer spends almost all its time in the group sync (about 230–970 µs per group); validation costs 1.5–6 µs per transaction. Group commit scales throughput with concurrency. Validating the next group while the current one syncs would help at moderate concurrency.
+- **`Buffered`:** here the single thread is the limit: about 300k blind commits/s and 100k SERIALIZABLE read-write commits/s. Validation, history trimming and acknowledgement take 1.5–7 µs per transaction. The cost grows with concurrency because open transactions hold back history trimming.
+- Rare commit stalls of 0.2–2 s match raw fsync stalls measured on the same disk (up to 354 ms with plain `fsync`). They come from the disk, not the sequencer; the M6 crash and hardening work should re-check them on other hardware.
+- Conclusion: one sequencer is ample for the MVP's target scale. No optimization is needed now.
 
 ## Open Questions
 

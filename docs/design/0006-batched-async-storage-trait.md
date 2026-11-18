@@ -102,7 +102,7 @@ Rules:
 ## Implementation Phases
 
 - [x] **Phase 1: `Storage` trait, `get_many`, scans with resume, write buffer** - M2
-- [ ] **Phase 2: Savepoints, `next_statement`, commit wiring** - M3
+- [x] **Phase 2: Savepoints, `next_statement`, commit wiring** - M3
 
 ## Consequences
 

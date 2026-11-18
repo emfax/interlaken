@@ -89,7 +89,7 @@ The sequencer keeps the write sets of recently committed transactions, ordered b
 ## Implementation Phases
 
 - [x] **Phase 1: Write buffer, read-your-writes, MVCC snapshot reads** - M2
-- [ ] **Phase 2: Validation for all three isolation levels, savepoints** - M3
+- [x] **Phase 2: Validation for all three isolation levels, savepoints** - M3
 - [ ] **Phase 3: Transaction limits** - M5
 
 ## Consequences

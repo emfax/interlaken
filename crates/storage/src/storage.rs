@@ -4,7 +4,7 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::commit::CommitClock;
+use crate::commit::{CommitClock, CommitStats, Sequencer, SequencerConfig, SequencerStats};
 use crate::pool::StoragePool;
 use crate::{Engine, Result, Timestamp, Txn, TxnOptions};
 
@@ -14,32 +14,57 @@ pub trait Storage: Send + Sync + 'static {
     fn begin(&self, options: TxnOptions) -> impl Future<Output = Result<Txn>> + Send;
 }
 
+/// When a commit is acknowledged (ADR-0005).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Durability {
+    /// Sync the journal (`persist(SyncAll)`) once per commit group before
+    /// acknowledging. Acknowledged commits survive power loss.
+    #[default]
+    Sync,
+    /// Acknowledge once the group reaches OS buffers. Commits survive a
+    /// process crash but not power loss. For development and tests.
+    Buffered,
+}
+
 /// Configuration for [`FjallStorage::open`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageOptions {
     /// Storage pool threads. Defaults to the number of cores, at least 2.
     pub pool_threads: usize,
-    /// Bounded request queue length. Defaults to 1,024.
+    /// Bounded storage pool queue length. Defaults to 1,024.
     pub queue_capacity: usize,
+    /// When commits are acknowledged. Defaults to [`Durability::Sync`].
+    pub durability: Durability,
+    /// Most transactions the sequencer writes in one group. Defaults to 256.
+    pub max_commit_group: usize,
+    /// Bounded commit queue length. Defaults to 1,024.
+    pub commit_queue_capacity: usize,
 }
 
 impl Default for StorageOptions {
-    /// Return the ADR-0001 defaults.
+    /// Return the ADR-0001 and ADR-0005 defaults.
     fn default() -> Self {
         let cores = std::thread::available_parallelism().map_or(2, usize::from);
         Self {
             pool_threads: cores.max(2),
             queue_capacity: 1024,
+            durability: Durability::Sync,
+            max_commit_group: 256,
+            commit_queue_capacity: 1024,
         }
     }
 }
 
 /// State shared by the storage handle and every transaction.
 pub(crate) struct Shared {
-    /// Threads that run all fjall work.
+    /// Threads that run all fjall reads.
     pub(crate) pool: StoragePool,
-    /// Commit timestamps and the visibility watermark.
+    /// The visibility watermark and pinned snapshots.
     pub(crate) clock: Arc<CommitClock>,
+    /// The thread that validates and writes commits.
+    pub(crate) sequencer: Sequencer,
+    /// Counters the sequencer updates.
+    pub(crate) stats: Arc<SequencerStats>,
 }
 
 /// [`Storage`] backed by fjall, with all fjall calls on a dedicated pool.
@@ -60,7 +85,7 @@ impl FjallStorage {
     ///
     /// Returns any error from [`Engine::open`], or
     /// [`Error::PoolUnavailable`](crate::Error::PoolUnavailable) if the pool
-    /// threads can't be spawned.
+    /// or sequencer threads can't be spawned.
     ///
     /// # Examples
     ///
@@ -85,10 +110,24 @@ impl FjallStorage {
     /// ```
     pub fn open(path: impl AsRef<Path>, options: StorageOptions) -> Result<Self> {
         let engine = Engine::open(path)?;
-        let clock = Arc::new(CommitClock::new(engine.last_commit_ts()?));
+        let last = engine.last_commit_ts()?;
+        let clock = Arc::new(CommitClock::new(last));
         let pool = StoragePool::start(&engine, options.pool_threads, options.queue_capacity)?;
+        let config = SequencerConfig {
+            durability: options.durability,
+            max_group: options.max_commit_group,
+            queue_capacity: options.commit_queue_capacity,
+        };
+        let stats = Arc::new(SequencerStats::default());
+        let sequencer =
+            Sequencer::start(engine, Arc::clone(&clock), last, config, Arc::clone(&stats))?;
         Ok(Self {
-            shared: Arc::new(Shared { pool, clock }),
+            shared: Arc::new(Shared {
+                pool,
+                clock,
+                sequencer,
+                stats,
+            }),
         })
     }
 
@@ -96,6 +135,12 @@ impl FjallStorage {
     #[must_use]
     pub fn visible_ts(&self) -> Timestamp {
         self.shared.clock.visible_ts()
+    }
+
+    /// Return the commit pipeline counters accumulated since the database was opened.
+    #[must_use]
+    pub fn commit_stats(&self) -> CommitStats {
+        self.shared.stats.snapshot()
     }
 }
 

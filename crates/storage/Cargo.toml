@@ -17,5 +17,9 @@ proptest.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
+[[bench]]
+name = "commit_throughput"
+harness = false
+
 [lints]
 workspace = true
