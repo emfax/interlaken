@@ -52,7 +52,7 @@ The sequencer becomes the leader's proposal path; an apply thread writes the sam
 ## Implementation Phases
 
 - [x] **Phase 1: Sequencer, group commit, durability modes** - M3
-- [ ] **Phase 2: Crash harness verification** - M6
+- [x] **Phase 2: Crash harness verification** - M6
 
 ## Consequences
 
@@ -81,6 +81,10 @@ The sequencer becomes the leader's proposal path; an apply thread writes the sam
 - **`Buffered`:** here the single thread is the limit: about 300k blind commits/s and 100k SERIALIZABLE read-write commits/s. Validation, history trimming and acknowledgement take 1.5–7 µs per transaction. The cost grows with concurrency because open transactions hold back history trimming.
 - Rare commit stalls of 0.2–2 s match raw fsync stalls measured on the same disk (up to 354 ms with plain `fsync`). They come from the disk, not the sequencer; the M6 crash and hardening work should re-check them on other hardware.
 - Conclusion: one sequencer is ample for the MVP's target scale. No optimization is needed now.
+
+### Crash harness (M6)
+
+300 random `SIGKILL`s during `Sync` commits with GC running ([ADR-0009](0009-storage-correctness-testing-strategy.md)) lost no acknowledged commit and tore no group, and the commit clock always resumed after the last durable timestamp. Deliberately acknowledging before the group was written, or restarting the clock at zero, failed the harness at once. Power loss (unsynced data in OS buffers) is not simulated; verifying `persist(SyncAll)` needs a fault-injecting filesystem such as LazyFS, left as future work. The fsync stalls noted above were not re-checked on other hardware.
 
 ## Open Questions
 

@@ -47,7 +47,8 @@ pub struct StorageOptions {
     ///
     /// An older transaction fails its next operation with
     /// [`Error::TransactionTooOld`](crate::Error::TransactionTooOld) and no
-    /// longer holds back version GC (ADR-0004, ADR-0008).
+    /// longer holds back version GC (ADR-0004, ADR-0008). `Duration::MAX`
+    /// disables the limit.
     pub max_transaction_age: Duration,
     /// How often the background GC pass runs, or `None` to run GC only
     /// through [`FjallStorage::run_gc`]. Defaults to 10 seconds.

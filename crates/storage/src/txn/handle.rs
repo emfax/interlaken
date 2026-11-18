@@ -57,6 +57,9 @@ struct TxnState {
     reads: ReadSet,
     /// Reads validated at every isolation level.
     dependencies: ReadSet,
+    /// Snapshot at which the first dependency was registered (the oldest,
+    /// since snapshots only move forward).
+    dependency_snapshot: Option<Timestamp>,
     /// Open savepoints, oldest first, with their undo-log positions.
     savepoints: Vec<(SavepointId, usize)>,
     next_savepoint: u64,
@@ -77,6 +80,7 @@ impl Txn {
                 writes: WriteBuffer::default(),
                 reads: ReadSet::default(),
                 dependencies: ReadSet::default(),
+                dependency_snapshot: None,
                 savepoints: Vec::new(),
                 next_savepoint: 0,
             }),
@@ -228,6 +232,11 @@ impl Txn {
 
     /// Buffer a write setting `key` to `value`.
     ///
+    /// Keys must follow the arity rule (see [`encoding`](crate::encoding)):
+    /// no stored key may be a byte prefix of another stored key, which
+    /// encoded tuples of one arity guarantee. The row layer always does;
+    /// callers writing raw keys must too, or scans can skip keys.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::ReadOnlyTransaction`] in a read-only transaction, or
@@ -265,14 +274,20 @@ impl Txn {
     /// key. The row layer uses this so that DML conflicts with concurrent
     /// DDL on the same table (ADR-0007).
     pub fn register_dependency(&self, key: Key) {
-        self.state().dependencies.record_key(key);
+        let mut state = self.state();
+        let snapshot = state.snapshot;
+        state.dependency_snapshot.get_or_insert(snapshot);
+        state.dependencies.record_key(key);
     }
 
     /// Register a range whose contents this transaction depends on at every isolation level.
     ///
     /// See [`register_dependency`](Self::register_dependency).
     pub fn register_dependency_range(&self, range: KeyRange) {
-        self.state().dependencies.record_range(range);
+        let mut state = self.state();
+        let snapshot = state.snapshot;
+        state.dependency_snapshot.get_or_insert(snapshot);
+        state.dependencies.record_range(range);
     }
 
     /// Open a savepoint at the current state of the write buffer.
@@ -373,6 +388,7 @@ impl Txn {
             snapshot: state.snapshot,
             reads,
             dependencies: state.dependencies,
+            dependency_snapshot: state.dependency_snapshot.unwrap_or(state.snapshot),
             writes: state.writes.into_intents(),
         };
         // `inner` keeps the snapshot pin alive until validation is done.

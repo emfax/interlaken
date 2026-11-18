@@ -5,12 +5,11 @@
 //! the backpressure ADR-0001 asks for. If a caller stops waiting, its closure
 //! still runs to completion and the result is discarded.
 //!
-//! Background work (version GC) goes through a second, low-priority queue
-//! (ADR-0001, ADR-0008). Workers block only on the normal queue, which wakes
-//! them reliably on shutdown; submitting a low-priority job also sends a
-//! wake-up token through the normal queue. The worker that takes the token
-//! first runs the normal jobs that were already waiting, then the
-//! low-priority job.
+//! Background work (version GC) is submitted as low priority (ADR-0001,
+//! ADR-0008). It travels through the same queue, so workers block on one
+//! receiver that always wakes on shutdown, and a cancelled submission
+//! leaves nothing behind. A worker that takes a low-priority job first runs
+//! the normal jobs already waiting behind it, then the low-priority job.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread::{self, JoinHandle, ThreadId};
@@ -24,14 +23,13 @@ type Job = Box<dyn FnOnce(&Engine) + Send>;
 enum Message {
     /// Run this job.
     Run(Job),
-    /// A low-priority job is waiting in the low queue.
-    Low,
+    /// Run this job after the normal jobs already queued.
+    Low(Job),
 }
 
 /// A fixed set of storage threads behind a bounded queue and a low-priority queue.
 pub(crate) struct StoragePool {
     sender: Option<flume::Sender<Message>>,
-    low: Option<flume::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
 }
 
@@ -39,21 +37,18 @@ impl StoragePool {
     /// Start `threads` workers sharing `engine`, with a queue of `capacity` jobs.
     pub(crate) fn start(engine: &Engine, threads: usize, capacity: usize) -> Result<Self> {
         let (sender, receiver) = flume::bounded::<Message>(capacity.max(1));
-        let (low, low_receiver) = flume::unbounded::<Job>();
         let workers = (0..threads.max(1))
             .map(|i| {
                 let receiver = receiver.clone();
-                let low_receiver = low_receiver.clone();
                 let engine = engine.clone();
                 thread::Builder::new()
                     .name(format!("interlaken-storage-{i}"))
-                    .spawn(move || run_worker(&engine, &receiver, &low_receiver))
+                    .spawn(move || run_worker(&engine, &receiver))
             })
             .collect::<std::io::Result<Vec<_>>>()
             .map_err(|_| Error::PoolUnavailable("failed to spawn storage threads"))?;
         Ok(Self {
             sender: Some(sender),
-            low: Some(low),
             workers,
         })
     }
@@ -68,12 +63,8 @@ impl StoragePool {
         T: Send + 'static,
         F: FnOnce(&Engine) -> T + Send + 'static,
     {
-        let sender = self
-            .sender
-            .as_ref()
-            .ok_or(Error::PoolUnavailable("shut down"))?;
         let (job, response) = Self::job(f);
-        sender
+        self.sender()?
             .send_async(Message::Run(job))
             .await
             .map_err(|_| Error::PoolUnavailable("shut down"))?;
@@ -90,12 +81,9 @@ impl StoragePool {
         T: Send + 'static,
         F: FnOnce(&Engine) -> T + Send + 'static,
     {
-        let (sender, low) = self.senders()?;
         let (job, response) = Self::job(f);
-        low.send(job)
-            .map_err(|_| Error::PoolUnavailable("shut down"))?;
-        sender
-            .send_async(Message::Low)
+        self.sender()?
+            .send_async(Message::Low(job))
             .await
             .map_err(|_| Error::PoolUnavailable("shut down"))?;
         Self::await_reply(response).await
@@ -111,24 +99,20 @@ impl StoragePool {
         T: Send + 'static,
         F: FnOnce(&Engine) -> T + Send + 'static,
     {
-        let (sender, low) = self.senders()?;
         let (job, response) = Self::job(f);
-        low.send(job)
-            .map_err(|_| Error::PoolUnavailable("shut down"))?;
-        sender
-            .send(Message::Low)
+        self.sender()?
+            .send(Message::Low(job))
             .map_err(|_| Error::PoolUnavailable("shut down"))?;
         response
             .recv()
             .map_err(|_| Error::PoolUnavailable("storage task panicked"))
     }
 
-    /// Return both queue senders, or an error after shutdown.
-    fn senders(&self) -> Result<(&flume::Sender<Message>, &flume::Sender<Job>)> {
-        match (&self.sender, &self.low) {
-            (Some(sender), Some(low)) => Ok((sender, low)),
-            _ => Err(Error::PoolUnavailable("shut down")),
-        }
+    /// Return the queue sender, or an error after shutdown.
+    fn sender(&self) -> Result<&flume::Sender<Message>> {
+        self.sender
+            .as_ref()
+            .ok_or(Error::PoolUnavailable("shut down"))
     }
 
     /// Await a job's result.
@@ -168,7 +152,6 @@ impl Drop for StoragePool {
     fn drop(&mut self) {
         let ids = self.worker_ids();
         self.sender = None;
-        self.low = None;
         let current = thread::current().id();
         for (worker, id) in self.workers.drain(..).zip(ids) {
             if id != current {
@@ -178,26 +161,24 @@ impl Drop for StoragePool {
     }
 }
 
-/// Run jobs until the normal queue closes.
-fn run_worker(engine: &Engine, normal: &flume::Receiver<Message>, low: &flume::Receiver<Job>) {
-    while let Ok(message) = normal.recv() {
+/// Run jobs until the queue closes.
+fn run_worker(engine: &Engine, queue: &flume::Receiver<Message>) {
+    while let Ok(message) = queue.recv() {
         match message {
             Message::Run(job) => run_job(engine, job),
-            Message::Low => {
+            Message::Low(first) => {
                 // Normal jobs already waiting go first. The drain is bounded
                 // by the current queue length so a busy pool can't starve GC.
-                let mut low_jobs = 1;
-                for _ in 0..normal.len() {
-                    match normal.try_recv() {
+                let mut low = vec![first];
+                for _ in 0..queue.len() {
+                    match queue.try_recv() {
                         Ok(Message::Run(job)) => run_job(engine, job),
-                        Ok(Message::Low) => low_jobs += 1,
+                        Ok(Message::Low(job)) => low.push(job),
                         Err(_) => break,
                     }
                 }
-                for _ in 0..low_jobs {
-                    if let Ok(job) = low.try_recv() {
-                        run_job(engine, job);
-                    }
+                for job in low {
+                    run_job(engine, job);
                 }
             }
         }
@@ -260,23 +241,60 @@ mod tests {
         assert_eq!(value, 4);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// Assert cancelled low-priority submissions leave no stranded work behind.
+    async fn cancelled_low_priority_submissions_are_harmless() {
+        let (_dir, engine) = engine();
+        let pool = std::sync::Arc::new(StoragePool::start(&engine, 1, 1).unwrap());
+        // Block the only worker, then fill the one-slot queue.
+        let (release, blocked) = flume::bounded::<()>(0);
+        let blocker = pool.clone();
+        let busy = tokio::spawn(async move { blocker.run(move |_| blocked.recv().ok()).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let filler = pool.clone();
+        let queued = tokio::spawn(async move { filler.run(|_| 1).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // These submissions can't get into the full queue and are cancelled.
+        for _ in 0..3 {
+            let attempt = pool.run_low(|_| 2);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(5), attempt)
+                    .await
+                    .is_err()
+            );
+        }
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        assert_eq!(queued.await.unwrap().unwrap(), 1);
+        // Later low-priority work still completes, and the pool shuts down.
+        let blocking = pool.clone();
+        let value = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || blocking.run_low_blocking(|_| 3)),
+        )
+        .await
+        .expect("low-priority job stranded")
+        .unwrap()
+        .unwrap();
+        assert_eq!(value, 3);
+        drop(pool);
+    }
+
     #[test]
     /// Assert a worker prefers normal jobs over waiting low-priority ones.
     fn normal_jobs_go_first() {
-        let (normal_tx, normal) = flume::unbounded::<Message>();
-        let (low_tx, low) = flume::unbounded::<Job>();
+        let (tx, queue) = flume::unbounded::<Message>();
         let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let record = |tag: &'static str| -> Job {
             let order = order.clone();
             Box::new(move |_| order.lock().unwrap().push(tag))
         };
         // The low job is submitted first, but the normal job was already waiting.
-        low_tx.send(record("low")).unwrap();
-        normal_tx.send(Message::Low).unwrap();
-        normal_tx.send(Message::Run(record("normal"))).unwrap();
-        drop((normal_tx, low_tx));
+        tx.send(Message::Low(record("low"))).unwrap();
+        tx.send(Message::Run(record("normal"))).unwrap();
+        drop(tx);
         let (_dir, engine) = engine();
-        run_worker(&engine, &normal, &low);
+        run_worker(&engine, &queue);
         assert_eq!(*order.lock().unwrap(), ["normal", "low"]);
     }
 

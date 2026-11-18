@@ -65,7 +65,7 @@ Components:
 - **Commit sequencer:** one dedicated thread that validates, assigns commit timestamps and writes groups of transactions as single fjall batches ([ADR-0005](0005-commit-sequencer-group-commit-and-durability.md)).
 - **GC task:** removes versions no snapshot can see, in chunks, on the storage pool at low priority ([ADR-0008](0008-version-garbage-collection.md)).
 
-**Pool sizing:** reads, scans and GC share one storage pool. GC chunks are queued at low priority, with a cap on GC tasks in flight. A separate GC pool is added only if metrics show GC hurting read latency. (M5: the low-priority queue signals workers through the normal queue rather than a multi-queue select, so workers always wake on shutdown; see [ADR-0008](0008-version-garbage-collection.md).)
+**Pool sizing:** reads, scans and GC share one storage pool. GC chunks are queued at low priority, with a cap on GC tasks in flight. A separate GC pool is added only if metrics show GC hurting read latency. (As implemented: low-priority jobs travel in the same queue, tagged low priority; the worker that takes one first runs the normal jobs already waiting behind it. One receiver means workers always wake on shutdown, and a cancelled submission leaves nothing queued. An M5 design with a separate low queue and wake-up tokens could strand a job if a submission was cancelled between the two sends; review in M6 found it. See [ADR-0008](0008-version-garbage-collection.md).)
 
 Rules:
 

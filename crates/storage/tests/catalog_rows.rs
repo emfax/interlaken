@@ -552,3 +552,61 @@ async fn concurrent_create_same_name() {
         Err(Error::SerializationFailure(Conflict::WriteWrite))
     ));
 }
+
+#[tokio::test]
+/// Assert READ COMMITTED DML still conflicts with DDL that committed before a snapshot refresh.
+///
+/// The insert's dependency on the table definition was registered at the
+/// first statement's snapshot; refreshing the snapshot must not hide the
+/// `CREATE INDEX` that committed in between.
+async fn read_committed_dml_dependency_survives_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = open(&dir);
+    let txn = begin(&storage, Isolation::Serializable).await;
+    catalog::create_table(&txn, users_spec()).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let dml = begin(&storage, Isolation::ReadCommitted).await;
+    let def = users(&dml).await;
+    rows::insert(&dml, &def, user(1, Some("a@x"), 1))
+        .await
+        .unwrap();
+    let ddl = begin(&storage, Isolation::Serializable).await;
+    catalog::create_index(&ddl, index("users_email", "email", true))
+        .await
+        .unwrap();
+    ddl.commit().await.unwrap();
+    dml.next_statement();
+    assert!(matches!(
+        dml.commit().await,
+        Err(Error::SerializationFailure(Conflict::DependencyChanged))
+    ));
+    let check = begin(&storage, Isolation::Serializable).await;
+    assert_consistent(&check, &users(&check).await).await;
+}
+
+#[tokio::test]
+/// Assert a READ COMMITTED backfill still conflicts with DML that committed before a snapshot refresh.
+async fn read_committed_ddl_dependency_survives_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = open(&dir);
+    let txn = begin(&storage, Isolation::Serializable).await;
+    catalog::create_table(&txn, users_spec()).await.unwrap();
+    txn.commit().await.unwrap();
+
+    let ddl = begin(&storage, Isolation::ReadCommitted).await;
+    catalog::create_index(&ddl, index("users_email", "email", true))
+        .await
+        .unwrap();
+    let dml = begin(&storage, Isolation::Serializable).await;
+    let def = users(&dml).await;
+    rows::insert(&dml, &def, user(1, Some("a@x"), 1))
+        .await
+        .unwrap();
+    dml.commit().await.unwrap();
+    ddl.next_statement();
+    assert!(matches!(
+        ddl.commit().await,
+        Err(Error::SerializationFailure(Conflict::DependencyChanged))
+    ));
+}

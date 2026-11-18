@@ -34,12 +34,12 @@ impl CommitHistory {
     /// wins); dependencies and reads conflict with a later commit to one of
     /// their keys or to any key inside one of their ranges.
     pub(crate) fn validate(&self, request: &CommitRequest) -> Result<(), Conflict> {
-        let has_reads = !request.reads.is_empty() || !request.dependencies.is_empty();
         let oldest = request
             .writes
             .iter()
             .map(|w| w.snapshot)
-            .chain(has_reads.then_some(request.snapshot))
+            .chain((!request.reads.is_empty()).then_some(request.snapshot))
+            .chain((!request.dependencies.is_empty()).then_some(request.dependency_snapshot))
             .min();
         if oldest.is_some_and(|ts| ts < self.floor) {
             return Err(Conflict::SnapshotTooOld);
@@ -51,7 +51,7 @@ impl CommitHistory {
         {
             return Err(Conflict::WriteWrite);
         }
-        if self.reads_changed_after(&request.dependencies, request.snapshot) {
+        if self.reads_changed_after(&request.dependencies, request.dependency_snapshot) {
             return Err(Conflict::DependencyChanged);
         }
         if self.reads_changed_after(&request.reads, request.snapshot) {
@@ -141,6 +141,7 @@ mod tests {
             snapshot: ts(snapshot),
             reads,
             dependencies: ReadSet::default(),
+            dependency_snapshot: ts(snapshot),
             writes: writes
                 .iter()
                 .map(|w| WriteIntent {

@@ -26,6 +26,10 @@ pub(crate) struct CommitRequest {
     pub(crate) reads: ReadSet,
     /// Dependencies, validated at every isolation level.
     pub(crate) dependencies: ReadSet,
+    /// Snapshot at which the first dependency was registered. Under READ
+    /// COMMITTED the snapshot moves forward afterwards, so dependencies are
+    /// validated against this, not `snapshot`.
+    pub(crate) dependency_snapshot: Timestamp,
     /// Writes to validate and apply. Never empty.
     pub(crate) writes: Vec<WriteIntent>,
 }

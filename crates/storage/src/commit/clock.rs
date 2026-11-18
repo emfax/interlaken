@@ -34,7 +34,8 @@ struct Pins {
 /// State shared between a pin and the registry.
 #[derive(Debug)]
 pub(crate) struct PinState {
-    deadline: Instant,
+    /// When the pin expires; `None` if the maximum age is too large to represent.
+    deadline: Option<Instant>,
     revoked: AtomicBool,
 }
 
@@ -64,7 +65,7 @@ impl CommitClock {
         let id = pins.next_id;
         pins.next_id += 1;
         let state = Arc::new(PinState {
-            deadline: Instant::now() + max_age,
+            deadline: Instant::now().checked_add(max_age),
             revoked: AtomicBool::new(false),
         });
         pins.by_snapshot.insert((ts, id), Arc::clone(&state));
@@ -94,7 +95,7 @@ impl CommitClock {
         let expired: Vec<(Timestamp, u64)> = pins
             .by_snapshot
             .iter()
-            .filter(|(_, state)| state.deadline <= now)
+            .filter(|(_, state)| state.deadline.is_some_and(|d| d <= now))
             .map(|(key, _)| *key)
             .collect();
         for key in expired {
@@ -152,7 +153,8 @@ impl SnapshotPin {
     /// After this returns `true`, GC may have removed versions the snapshot
     /// needs, so results read since the pin was taken can't be trusted.
     pub(crate) fn is_expired(&self) -> bool {
-        self.state.revoked.load(Ordering::Acquire) || Instant::now() >= self.state.deadline
+        self.state.revoked.load(Ordering::Acquire)
+            || self.state.deadline.is_some_and(|d| Instant::now() >= d)
     }
 }
 
@@ -192,6 +194,16 @@ mod tests {
         drop(c);
         clock.publish(Timestamp::from_raw(9));
         assert_eq!(clock.horizon(), Timestamp::from_raw(9));
+    }
+
+    #[test]
+    /// Assert a maximum age too large for `Instant` means no expiry rather than a panic.
+    fn unbounded_age_never_expires() {
+        let clock = Arc::new(CommitClock::new(Timestamp::ZERO));
+        let pin = clock.pin(Duration::MAX);
+        assert!(!pin.is_expired());
+        assert_eq!(clock.horizon(), Timestamp::ZERO);
+        assert_eq!(clock.expired_count(), 0);
     }
 
     #[test]

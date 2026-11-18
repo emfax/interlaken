@@ -39,6 +39,11 @@ The MVP's success criteria are that concurrent transactions show no anomalies un
 | Upper layers (later) | A deterministic in-memory `Storage` implementation behind the same trait, for `madsim`/`turmoil` simulation | Bugs above storage, replayable from a seed |
 
 - **Negative isolation tests:** under REPEATABLE READ, the checker should *find* write skew (G2-item), proving the harness can detect anomalies.
+- **As implemented (M6):**
+  - `tests/elle.rs` records list-append histories and checks them with `elle-cli` (found via `ELLE_CLI` or `target/elle-cli.jar`). SERIALIZABLE must be strict-serializable, REPEATABLE READ must satisfy snapshot isolation, and READ COMMITTED must satisfy read-committed. REPEATABLE READ is also checked as serializable, where Elle must find G2-item: that is the negative test. Without Java or the jar, histories are saved and the check is skipped.
+  - `tests/crash.rs` re-runs its own binary as a child committing under `Sync` with GC running, kills it with `SIGKILL` at random times, and verifies after recovery that no acknowledged commit is lost, no transaction is torn and the commit clock resumes correctly; it repeats on the same directory. `SIGKILL` does not simulate power loss, so fsync behaviour is not covered.
+  - The exit run: 1,200 Elle histories, 300 crash cycles, 200 runs each of the serializability, uniqueness, GC and catalog suites, and 13,000 model-test cases, with no anomalies, lost commits or hangs. `ELLE_RUNS`, `CRASH_CYCLES` and `PROPTEST_CASES` scale each part.
+  - An independent code review during hardening found two bugs, both fixed with regression tests: READ COMMITTED dependency validation against a refreshed snapshot ([ADR-0004](0004-optimistic-transactions-and-isolation-levels.md)), and a stranded low-priority pool job after a cancelled submission ([ADR-0001](0001-fjall-storage-engine-and-async-sync-boundary.md)).
 - **Benchmarks:** baseline benchmarks (point reads, scans, commit throughput by group size) run in CI to catch regressions. They are not optimization targets for the MVP.
 
 ## Implementation Phases
@@ -48,7 +53,7 @@ The MVP's success criteria are that concurrent transactions show no anomalies un
 - [x] **Phase 3: Model-based tests with concurrency** - M3
 - [x] **Phase 4: Concurrent uniqueness tests** - M4
 - [x] **Phase 5: Bounded-space test under sustained updates** - M5
-- [ ] **Phase 6: Elle checking, crash harness, hardening** - M6
+- [x] **Phase 6: Elle checking, crash harness, hardening** - M6
 
 ## Consequences
 
