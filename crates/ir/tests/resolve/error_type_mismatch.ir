@@ -1,0 +1,2 @@
+(plan (filter (get users) (= name 1)))
+;; error: type error: no common type for text, int2

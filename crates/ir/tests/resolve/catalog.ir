@@ -1,0 +1,35 @@
+; The fixture catalog every resolver golden test runs against.
+(catalog :schema-version 7
+  (builtins)
+  (table users :id 100
+    (column id (not-null int8))
+    (column name (not-null text))
+    (column email text)
+    (column age int4)
+    (column karma (not-null int8))
+    (column born date)
+    (column seen_at timestamptz)
+    (column tags (array (not-null text)))
+    (primary-key id))
+  (table posts :id 101
+    (column id (not-null int8))
+    (column author_id (not-null int8))
+    (column title (not-null text))
+    (column likes (not-null int4))
+    (column score float8)
+    (column created_at (not-null timestamptz))
+    (primary-key id))
+  (table follows :id 102
+    (column follower_id (not-null int8))
+    (column followee_id (not-null int8))
+    (primary-key follower_id followee_id))
+  (table audit :id 103
+    (column id (not-null int8))
+    (column user_id int8)
+    (column action (not-null text))
+    (column level int2)
+    (primary-key id))
+  (table sys_roles :id 1 :system true
+    (column id (not-null int8))
+    (column name (not-null text))
+    (primary-key id)))

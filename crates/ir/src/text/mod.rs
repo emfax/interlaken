@@ -57,6 +57,7 @@
 //! ```
 
 mod api;
+mod catalog;
 mod error;
 mod literal;
 mod pretty;
@@ -67,4 +68,6 @@ mod write;
 pub use api::{
     parse_expr, parse_plan, parse_rel, parse_type, print_expr, print_plan, print_rel, print_type,
 };
+pub use catalog::parse_catalog;
 pub use error::ParseError;
+pub(crate) use write::binary_name as binary_op_name;

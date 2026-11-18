@@ -1,0 +1,17 @@
+; Privileged operators resolve like filters; only trusted verification accepts them.
+(plan
+  (update users
+    (write-check
+      (policy-filter (get users :as u) (= u.id (param 1 (not-null int8))))
+      (> u.karma 0))
+    (set name (param 2 (not-null text)))))
+;; resolved
+(plan :schema-version 7
+  (update :target 2 :bind 3
+    (tid 100)
+    (write-check
+      (policy-filter
+        (get (tid 100) :as u :bind 1)
+        (= #1.0 (param 1 (not-null int8))))
+      (> #1.4 0))
+    (set (cid 1) (param 2 (not-null text)))))

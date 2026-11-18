@@ -1,0 +1,14 @@
+; Names resolve to bindings; a column reference keeps its name; a bare
+; integer literal takes the column's type (int4 here); the table name
+; qualifies columns when there is no alias.
+(plan
+  (project
+    (filter (get users) (and (> users.age 18) (is-not-null email)))
+    name
+    (as (+ age 1) next_age)))
+;; resolved
+(plan :schema-version 7
+  (project :bind 2
+    (filter (get (tid 100) :bind 1) (and (> #1.3 (int4 18)) (is-not-null #1.2)))
+    (as #1.1 name)
+    (as (+ #1.3 (int4 1)) next_age)))

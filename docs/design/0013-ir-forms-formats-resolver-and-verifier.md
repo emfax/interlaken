@@ -94,6 +94,32 @@ Runs on every IR from every source, after resolution:
 - Types check; aggregates appear only inside Aggregate; correlated references are bound by an enclosing Apply.
 - **No privileged nodes from clients.** `PolicyFilter`, `WriteCheck`, security context overrides and system-catalog writes are rejected unless the engine's own passes produced them. Clients cannot claim a function is leakproof ([ADR-0011](0011-function-property-catalog.md)).
 
+### Resolver and verifier (I2)
+
+The resolver's full rules are in the `interlaken_ir::resolve` module docs. In outline:
+- **Names.** A name is looked up in the operator's input first, then in enclosing scopes (an `Apply`'s outer side, or the query around a subquery). A name matching two visible columns in the same scope is an error.
+- **Bindings.** Bindings are numbered in resolution order, and bound references in the input are remapped.
+- **Implicit conversions.** Integers widen, integers convert to `float8`, and `date` converts to `timestamptz`. A bare integer literal takes the smallest type that holds it, so `int4_col = 5` compares as `int4` and stays usable by an index. Stored values also allow Postgres-style assignment conversions. An untyped NULL takes its context's type (default `text`) as `(cast null T)`.
+- **Overloads.** The overload needing the fewest conversions wins; a tie is an error.
+- **Subqueries** are lowered to `Apply`:
+  - as a top-level filter conjunct, `EXISTS`, `NOT EXISTS`, `IN` and `op ANY` become semi or anti applies;
+  - elsewhere, a scalar subquery becomes a single apply and `EXISTS` a left apply of one marker row;
+  - `IN`, `ANY` and `ALL` elsewhere become a single apply over an aggregate (`bool_or`, `count(*)`, `count(comparison)`) that computes the three-valued result;
+  - subqueries are rejected where eager evaluation would be wrong (`CASE` and `COALESCE` branches, outer join conditions) or where there is no input to apply to (`VALUES`, `LIMIT`, `RETURNING`).
+- **Stable output.** Resolving a resolved plan gives the same plan.
+
+The verifier (`interlaken_ir::verify`):
+- re-derives every type with strict rules shared with the resolver, accepting no implicit conversions;
+- requires the plan's schema version to equal the catalog's;
+- requires every binding to be introduced once and every column reference to be in scope, where correlation is visible only through an `Apply`'s outer side;
+- requires `LIMIT` and `OFFSET` to be column-free `int8` values;
+- requires an update or delete to read its target table exactly once;
+- requires an insert to cover every NOT NULL column.
+
+`VerifyOptions::trusted` is false for client plans, which rejects `PolicyFilter`, `WriteCheck` and writes to system tables (`TableDef::system`). Security context overrides arrive with the security core (I4).
+
+`parse_catalog` reads in-memory catalogs from text for test fixtures.
+
 ### Compilation pipeline
 
 ```mermaid
@@ -112,7 +138,7 @@ flowchart TB
 ## Implementation Phases
 
 - [x] **Phase 1: Builder, text format, `Catalog` trait and in-memory implementation** - I1
-- [ ] **Phase 2: Resolver and verifier against the in-memory catalog** - I2
+- [x] **Phase 2: Resolver and verifier against the in-memory catalog** - I2
 - [ ] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - after storage M4
 
 ## Consequences

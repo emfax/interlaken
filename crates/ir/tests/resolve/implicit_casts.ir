@@ -1,0 +1,27 @@
+; Mixed operand types meet at their common type with explicit casts;
+; untyped NULL takes its context's type; date + integer needs int4.
+(plan
+  (project
+    (get users :as u)
+    (as (+ u.age u.karma) widened)
+    (as (> u.age 3000000000) big_literal)
+    (as (= u.born u.seen_at) date_to_timestamptz)
+    (as (+ u.born 7) next_week)
+    (as (- u.born (date "2026-01-01")) days)
+    (as (coalesce u.email null "none") contact)
+    (as (case (when (> u.karma 10) 1.5) (else u.age)) mixed_case)
+    (as null nothing)
+    (as (is-null null) null_is_null)))
+;; resolved
+(plan :schema-version 7
+  (project :bind 2
+    (get (tid 100) :as u :bind 1)
+    (as (+ (cast #1.3 int8) #1.4) widened)
+    (as (> (cast #1.3 int8) 3000000000) big_literal)
+    (as (= (cast #1.5 timestamptz) #1.6) date_to_timestamptz)
+    (as (+ #1.5 (int4 7)) next_week)
+    (as (- #1.5 (date "2026-01-01")) days)
+    (as (coalesce #1.2 (cast null text) "none") contact)
+    (as (case (when (> #1.4 10) 1.5) (else (cast #1.3 float8))) mixed_case)
+    (as (cast null text) nothing)
+    (as (is-null (cast null text)) null_is_null)))

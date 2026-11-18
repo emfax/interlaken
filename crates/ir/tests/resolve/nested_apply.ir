@@ -1,0 +1,23 @@
+; A GraphQL-shaped query: each user's posts nested into an array of records.
+(plan
+  (project
+    (apply left
+      (limit (sort (get users :as u) (asc u.id)) :count 10)
+      (nest
+        (sort (filter (get posts :as p) (= p.author_id u.id)) (desc p.created_at))
+        (keys)
+        (fields p.title (as p.likes likes))
+        :as posts))
+    u.name
+    posts))
+;; resolved
+(plan :schema-version 7
+  (project :bind 4
+    (apply left
+      (limit (sort (get (tid 100) :as u :bind 1) (asc #1.0)) :count 10)
+      (nest :as posts :bind 3
+        (sort (filter (get (tid 101) :as p :bind 2) (= #2.1 #1.0)) (desc #2.5))
+        (keys)
+        (fields (as #2.2 title) (as #2.3 likes))))
+    (as #1.1 name)
+    (as #3.0 posts)))

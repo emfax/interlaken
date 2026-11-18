@@ -48,6 +48,26 @@ Entry format:
 - **Size:** About 3–5 days, including model and crash-test updates.
 - **Status:** open (low priority)
 
+## IR
+
+### leakproof-admin-only: Enforce that only administrators mark functions leakproof
+- **Origin:** ADR-0011, I2
+- **Why:** Leakproofness decides whether a predicate may move below a security barrier. The in-memory catalog accepts any `FunctionDef`. The rule belongs with catalog DDL and roles, which do not exist yet.
+- **When:** With the storage-backed catalog (ADR-0013 phase 3), or when user-defined functions arrive, whichever is first.
+- **Size:** About 1 day once roles exist.
+- **Status:** open
+
+### subquery-positions: Lower subqueries in the positions the resolver rejects
+- **Origin:** ADR-0013 (resolver), I2
+- **Why:** The resolver rejects subqueries:
+  - in `CASE` and `COALESCE` branches, where eager lowering would evaluate them, and possibly raise errors, for rows whose branch is not taken;
+  - in outer, semi and anti join conditions;
+  - in `VALUES`, `LIMIT`/`OFFSET` and `RETURNING`.
+  Postgres accepts all of these. Conditional branches need a lazy form of `Apply` or a guarded lowering.
+- **When:** When the SQL front end meets them in real queries.
+- **Size:** About 2–4 days, depending on the conditional-branch design.
+- **Status:** open
+
 ## Executor and IR open questions
 
 ### default-memory-budgets: Choose default per-query and per-node memory budgets

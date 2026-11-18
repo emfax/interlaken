@@ -1,0 +1,54 @@
+; INSERT stores int8 values into an int2 column by assignment conversion
+; and may omit nullable columns; UPDATE converts assigned values; the
+; target row is visible to RETURNING by alias.
+(plan
+  (delete audit
+    (filter
+      (get audit :as old)
+      (in old.user_id
+        (update users
+          (filter
+            (get users :as u)
+            (in u.id
+              (insert audit
+                (values (columns id action level) (row 1 "login" 3) (row 2 "logout" null))
+                (columns id action level)
+                (returning user_id))))
+          (set karma (+ karma 1))
+          (set age 40)
+          (set email null)
+          (returning u.id)
+          :as u)))
+    (returning (as old.id deleted))
+    :as old))
+;; resolved
+(plan :schema-version 7
+  (delete :as old :target 9 :bind 10
+    (tid 103)
+    (apply semi
+      (get (tid 103) :as old :bind 1)
+      (filter
+        (update :as u :target 7 :bind 8
+          (tid 100)
+          (apply semi
+            (get (tid 100) :as u :bind 2)
+            (filter
+              (insert :target 5 :bind 6
+                (tid 103)
+                (project :bind 4
+                  (values :bind 3
+                    (columns id action level)
+                    (row 1 "login" 3)
+                    (row 2 "logout" (cast null int8)))
+                  (as #3.0 id)
+                  (as #3.1 action)
+                  (as (cast #3.2 int2) level))
+                (columns (cid 0) (cid 2) (cid 3))
+                (returning (as #5.1 user_id)))
+              (= #2.0 #6.0)))
+          (set (cid 4) (+ #2.4 1))
+          (set (cid 3) (int4 40))
+          (set (cid 2) (cast null text))
+          (returning (as #7.0 id)))
+        (= #1.1 #8.0)))
+    (returning (as #9.0 deleted))))

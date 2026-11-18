@@ -1,0 +1,2 @@
+(plan (project (join inner (get users) (get posts) true) id))
+;; error: column reference id is ambiguous

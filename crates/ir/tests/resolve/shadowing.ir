@@ -1,0 +1,7 @@
+; An inner alias shadows an outer one: u.id here is the post id.
+(plan (filter (get users :as u) (exists (filter (get posts :as u) (= u.id 1)))))
+;; resolved
+(plan :schema-version 7
+  (apply semi
+    (get (tid 100) :as u :bind 1)
+    (filter (get (tid 101) :as u :bind 2) (= #2.0 1))))

@@ -215,7 +215,7 @@ mod tests {
             name: name.into(),
             kind: FunctionKind::Scalar,
             args: args.iter().map(|a| DataType::from(*a)).collect(),
-            returns: ScalarType::Text.into(),
+            returns: DataType::from(ScalarType::Text).nullable(),
             properties: FunctionProperties::default(),
         }
     }

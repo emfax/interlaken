@@ -1,0 +1,13 @@
+; Partly resolved input: bound references are remapped to fresh bindings.
+(plan
+  (project
+    (filter (get users :as u :bind 50) (> #50.4 10))
+    #50.1
+    (as (+ #50.3 1) next_age)
+    :bind 60))
+;; resolved
+(plan :schema-version 7
+  (project :bind 2
+    (filter (get (tid 100) :as u :bind 1) (> #1.4 10))
+    (as #1.1 name)
+    (as (+ #1.3 (int4 1)) next_age)))

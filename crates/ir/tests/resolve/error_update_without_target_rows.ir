@@ -1,0 +1,2 @@
+(plan (update users (get posts) (set karma 1)))
+;; error: invalid plan: the input of an update or delete must read the target table users

@@ -44,6 +44,14 @@ The IR is the single enforcement point for access control, so a bug in lowering 
   - Each golden file has a matching query built independently with the Rust builder, and the two must be equal both as IR and as text.
   - Property tests generate random IR covering every operator, expression, type and literal, including awkward identifiers and special floats. Printing then parsing must give equal IR, and the printed text must be a fixed point.
   - Damaged and arbitrary text must never panic the reader.
+- **Phase 2 as implemented (I2):**
+  - Resolver golden files in `crates/ir/tests/resolve/` check names, bindings, conversions, overloads, every subquery lowering, DML and ten error cases against a fixture catalog. Each resolved plan must also verify and must resolve again to itself.
+  - Targeted tests reject each class of bad plan, including privileged operators and system-table writes from clients.
+  - Fuzzing has three parts:
+    - random IR whose IDs hit the fixture catalog must never panic the resolver or the verifier;
+    - random well-typed queries (joins, aggregates, nesting and every subquery form): whatever the resolver accepts, the verifier must accept, with at least 60% resolving so the property is not vacuous;
+    - resolved plans with random subtrees swapped in must never panic the verifier and must be rejected if they contain names.
+  - A planted resolver bug (dropping implicit casts) is caught by the fuzzer.
 
 ### MVP success criteria
 
@@ -67,7 +75,7 @@ Roughly 14 weeks for one engineer. I1–I3 start after storage milestone M2 and 
 ## Implementation Phases
 
 - [x] **Phase 1: Golden tests and builder/text round-trip** - I1
-- [ ] **Phase 2: Verifier fuzzing** - I2
+- [x] **Phase 2: Verifier fuzzing** - I2
 - [ ] **Phase 3: Reference interpreter and differential testing** - I3
 - [ ] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4
 - [ ] **Phase 5: Oracle with Cedar, deployment gate tests** - I5

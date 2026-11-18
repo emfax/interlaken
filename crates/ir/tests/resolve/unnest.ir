@@ -1,0 +1,13 @@
+; UNNEST of an array column, with DISTINCT and explicit NULL placement.
+(plan
+  (sort
+    (distinct (project (unnest (get users :as u) u.tags (columns tag)) tag))
+    (asc tag :nulls first)))
+;; resolved
+(plan :schema-version 7
+  (sort
+    (distinct
+      (project :bind 3
+        (unnest (get (tid 100) :as u :bind 1) #1.7 (columns tag) :bind 2)
+        (as #2.0 tag)))
+    (asc #3.0 :nulls first)))

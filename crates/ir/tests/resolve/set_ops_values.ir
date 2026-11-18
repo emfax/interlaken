@@ -1,0 +1,20 @@
+; Set operations and VALUES unify column types; an all-NULL column is text.
+(plan
+  (union
+    (values (columns id note) (row 1 null) (row 2 null))
+    (project (get audit :as a) a.level a.action)
+    :all true))
+;; resolved
+(plan :schema-version 7
+  (union :all true :bind 5
+    (values :bind 1
+      (columns id note)
+      (row 1 (cast null text))
+      (row 2 (cast null text)))
+    (project :bind 4
+      (project :bind 3
+        (get (tid 103) :as a :bind 2)
+        (as #2.3 level)
+        (as #2.2 action))
+      (as (cast #3.0 int8) level)
+      (as #3.1 action))))

@@ -41,9 +41,21 @@ The optimizer needs to know which functions can be folded, reordered or cached. 
 - Built-in comparison and arithmetic operators on scalar types are leakproof only where they cannot raise data-dependent errors. Integer equality is leakproof; division is not.
 - WASM UDFs are not implemented in the MVP, but the properties are modelled now so they slot in unchanged ([ADR-0029](0029-wasm-udf-interface.md)).
 
+**As implemented (I2):**
+- `FunctionDef` carries the properties above, plus a kind (scalar or aggregate) and a result type with nullability. A strict function's result is also NULL whenever an argument is. `count` cannot return NULL; `sum` over no rows can.
+- Built-in functions take IDs below 1000, assigned in a fixed order so plans and golden files stay stable:
+  - scalar: `lower`, `upper`, `length`, `substr`, `abs` (per numeric type), `now`, `random`, `gen_random_uuid`;
+  - aggregate: `count` (no argument for `count(*)`, or one per scalar type), `sum`, `avg`, `min`, `max`, `bool_and`, `bool_or`.
+- `now`, `random` and `gen_random_uuid` are marked non-deterministic.
+- No built-in function is marked leakproof until it has been audited.
+- Operators and casts are expression nodes rather than catalog functions, so their properties come from functions keyed by operator and operand type:
+  - leakproof: comparisons, `IS [NOT] DISTINCT FROM`, `IS [NOT] NULL`, `NOT`, identity casts and integer or `date` widening casts;
+  - not leakproof (each can raise an error on some value): arithmetic, negation, `LIKE`, concatenation and narrowing or parsing casts.
+- The rule that only administrators may set leakproof is not enforced by the in-memory catalog. It belongs with catalog DDL and roles (see `docs/backlog.md`).
+
 ## Implementation Phases
 
-- [ ] **Phase 1: Function catalog with properties** - I2
+- [x] **Phase 1: Function catalog with properties** - I2
 
 ## Consequences
 

@@ -1,0 +1,28 @@
+; Join, aggregate over the join, a filter over the aggregate output, sort and limit.
+(plan
+  (limit
+    (sort
+      (filter
+        (aggregate
+          (join left (get users :as u) (get posts :as p) (= p.author_id u.id))
+          (keys u.id u.name)
+          (aggs (as (agg count p.id) posts) (as (agg sum p.likes) likes)))
+        (> posts 2))
+      (desc likes)
+      (asc name))
+    :count 10))
+;; resolved
+(plan :schema-version 7
+  (limit :count 10
+    (sort
+      (filter
+        (aggregate :bind 3
+          (join left
+            (get (tid 100) :as u :bind 1)
+            (get (tid 101) :as p :bind 2)
+            (= #2.1 #1.0))
+          (keys (as #1.0 id) (as #1.1 name))
+          (aggs (as (agg (fid 16) #2.0) posts) (as (agg (fid 25) #2.3) likes)))
+        (> #3.2 2))
+      (desc #3.3)
+      (asc #3.1))))

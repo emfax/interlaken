@@ -1,0 +1,2 @@
+(plan (project (get users :as u) u.nope))
+;; error: unknown column u.nope

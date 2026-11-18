@@ -1,0 +1,3 @@
+; A join input is not lateral: the right side cannot see the left side's columns.
+(plan (join inner (get users :as u) (filter (get posts :as p) (= p.author_id u.id)) true))
+;; error: unknown column u.id

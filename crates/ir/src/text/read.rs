@@ -70,9 +70,9 @@ fn error(sexp: &Sexp, message: impl Into<String>) -> ParseError {
 }
 
 /// A list being taken apart: its head word, positional items and keyword arguments.
-struct Form<'a> {
+pub(super) struct Form<'a> {
     /// The head word.
-    head: &'a str,
+    pub(super) head: &'a str,
     /// Where the list starts.
     pos: Pos,
     /// Positional items not yet consumed, in reverse order.
@@ -83,7 +83,7 @@ struct Form<'a> {
 
 impl<'a> Form<'a> {
     /// Split `sexp`, which must be a list headed by a bare word, into a form.
-    fn open(sexp: &'a Sexp) -> Result<Self> {
+    pub(super) fn open(sexp: &'a Sexp) -> Result<Self> {
         let SexpKind::List(items) = &sexp.kind else {
             return Err(error(
                 sexp,
@@ -122,7 +122,7 @@ impl<'a> Form<'a> {
     }
 
     /// Open `sexp` as a form that must have head `head`.
-    fn expect(sexp: &'a Sexp, head: &str) -> Result<Self> {
+    pub(super) fn expect(sexp: &'a Sexp, head: &str) -> Result<Self> {
         let form = Self::open(sexp)?;
         if form.head != head {
             return Err(ParseError::at(
@@ -134,13 +134,13 @@ impl<'a> Form<'a> {
     }
 
     /// Remove and return keyword argument `name`, if present.
-    fn keyword(&mut self, name: &str) -> Option<&'a Sexp> {
+    pub(super) fn keyword(&mut self, name: &str) -> Option<&'a Sexp> {
         let index = self.keywords.iter().position(|(k, _)| *k == name)?;
         Some(self.keywords.remove(index).1)
     }
 
     /// Remove and return the next positional item, which must exist.
-    fn next(&mut self, what: &str) -> Result<&'a Sexp> {
+    pub(super) fn next(&mut self, what: &str) -> Result<&'a Sexp> {
         self.positional.pop().ok_or_else(|| {
             ParseError::at(self.pos, format!("({} ...) is missing {what}", self.head))
         })
@@ -156,14 +156,14 @@ impl<'a> Form<'a> {
     }
 
     /// Remove and return every remaining positional item.
-    fn rest(&mut self) -> Vec<&'a Sexp> {
+    pub(super) fn rest(&mut self) -> Vec<&'a Sexp> {
         let mut rest = std::mem::take(&mut self.positional);
         rest.reverse();
         rest
     }
 
     /// Fail if any positional item or keyword argument was not consumed.
-    fn finish(self) -> Result<()> {
+    pub(super) fn finish(self) -> Result<()> {
         if let Some(extra) = self.positional.last() {
             return Err(error(
                 extra,
@@ -181,7 +181,7 @@ impl<'a> Form<'a> {
 }
 
 /// Read an unsigned integer that fits in `T`.
-fn uint<T: TryFrom<i128>>(sexp: &Sexp, what: &str) -> Result<T> {
+pub(super) fn uint<T: TryFrom<i128>>(sexp: &Sexp, what: &str) -> Result<T> {
     match sexp.kind {
         SexpKind::Int(v) if v >= 0 => {
             T::try_from(v).map_err(|_| error(sexp, format!("{what} out of range")))
@@ -210,7 +210,7 @@ fn string<'a>(sexp: &'a Sexp, what: &str) -> Result<&'a str> {
 }
 
 /// Read `true` or `false`.
-fn boolean(sexp: &Sexp) -> Result<bool> {
+pub(super) fn boolean(sexp: &Sexp) -> Result<bool> {
     match sexp.as_word() {
         Some("true") => Ok(true),
         Some("false") => Ok(false),
@@ -240,7 +240,7 @@ fn choice<T: Copy>(
 }
 
 /// Read a single-segment symbol as an identifier.
-fn ident(sexp: &Sexp) -> Result<Ident> {
+pub(super) fn ident(sexp: &Sexp) -> Result<Ident> {
     match &sexp.kind {
         SexpKind::Symbol(segments) if segments.len() == 1 => Ok(Ident::new(&segments[0].text)),
         _ => Err(error(
@@ -251,7 +251,7 @@ fn ident(sexp: &Sexp) -> Result<Ident> {
 }
 
 /// Read a symbol of any number of segments as a dotted name.
-fn qualified(sexp: &Sexp) -> Result<QualifiedName> {
+pub(super) fn qualified(sexp: &Sexp) -> Result<QualifiedName> {
     match &sexp.kind {
         SexpKind::Symbol(segments) => Ok(QualifiedName::new(
             segments.iter().map(|s| Ident::new(&s.text)).collect(),
@@ -264,7 +264,11 @@ fn qualified(sexp: &Sexp) -> Result<QualifiedName> {
 }
 
 /// Read every item of `(head item...)` with `read`.
-fn list_of<T>(sexp: &Sexp, head: &str, read: impl Fn(&Sexp) -> Result<T>) -> Result<Vec<T>> {
+pub(super) fn list_of<T>(
+    sexp: &Sexp,
+    head: &str,
+    read: impl Fn(&Sexp) -> Result<T>,
+) -> Result<Vec<T>> {
     let mut form = Form::expect(sexp, head)?;
     let items = form.rest().into_iter().map(read).collect::<Result<_>>()?;
     form.finish()?;

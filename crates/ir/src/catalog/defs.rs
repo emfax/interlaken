@@ -25,6 +25,8 @@ pub struct TableDef {
     pub columns: Vec<ColumnDef>,
     /// The primary key columns, in key order.
     pub primary_key: Vec<ColumnId>,
+    /// Whether this is a system table, which clients may not write.
+    pub system: bool,
 }
 
 impl TableDef {
@@ -49,7 +51,15 @@ impl TableDef {
             name: name.into(),
             columns: Vec::new(),
             primary_key: Vec::new(),
+            system: false,
         }
+    }
+
+    /// Mark the table as a system table, which clients may not write.
+    #[must_use]
+    pub fn system(mut self) -> Self {
+        self.system = true;
+        self
     }
 
     /// Append a column, numbered after the existing ones.
@@ -165,8 +175,10 @@ pub struct FunctionDef {
     pub kind: FunctionKind,
     /// The argument types.
     pub args: Vec<DataType>,
-    /// The result type.
-    pub returns: DataType,
+    /// The result type. For a strict function the result is also NULL
+    /// whenever an argument is; an aggregate's result type says whether it
+    /// can be NULL (`count` cannot, `sum` over no rows is).
+    pub returns: Type,
     /// The declared properties.
     pub properties: FunctionProperties,
 }
