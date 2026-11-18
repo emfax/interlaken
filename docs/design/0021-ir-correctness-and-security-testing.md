@@ -39,6 +39,11 @@ The IR is the single enforcement point for access control, so a bug in lowering 
 
 - The naive reference interpreter is shared with the executor's differential tests ([ADR-0022](0022-vectorized-arrow-stream-executor.md)); the oracle and leak suite also run end to end through the executor ([ADR-0025](0025-runtime-security-enforcement-in-executor.md)).
 - An RLS-style provider is used in I4 so the oracle and leak suite pass before Cedar exists; I5 re-runs them with Cedar.
+- **Phase 1 as implemented (I1):**
+  - Golden files in `crates/ir/tests/golden/` must print back byte for byte (`UPDATE_GOLDEN=1` rewrites them in canonical form).
+  - Each golden file has a matching query built independently with the Rust builder, and the two must be equal both as IR and as text.
+  - Property tests generate random IR covering every operator, expression, type and literal, including awkward identifiers and special floats. Printing then parsing must give equal IR, and the printed text must be a fixed point.
+  - Damaged and arbitrary text must never panic the reader.
 
 ### MVP success criteria
 
@@ -61,7 +66,7 @@ Roughly 14 weeks for one engineer. I1–I3 start after storage milestone M2 and 
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Golden tests and builder/text round-trip** - I1
+- [x] **Phase 1: Golden tests and builder/text round-trip** - I1
 - [ ] **Phase 2: Verifier fuzzing** - I2
 - [ ] **Phase 3: Reference interpreter and differential testing** - I3
 - [ ] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4

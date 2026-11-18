@@ -1,0 +1,25 @@
+; SELECT c.region, count(*) AS orders, sum(o.total) FILTER (WHERE o.status = 'paid') AS paid,
+;        count(DISTINCT o.customer_id) AS customers
+; FROM orders o JOIN customers c ON o.customer_id = c.id
+; WHERE o.placed_at >= '2026-01-01T00:00:00Z'
+; GROUP BY c.region HAVING count(*) > 10
+; ORDER BY paid DESC NULLS LAST, c.region LIMIT 20 OFFSET 40
+(plan
+  (limit :count 20 :offset 40
+    (sort
+      (filter
+        (aggregate
+          (filter
+            (join inner
+              (get orders :as o)
+              (get customers :as c)
+              (= o.customer_id c.id))
+            (>= o.placed_at (timestamptz "2026-01-01T00:00:00Z")))
+          (keys (as c.region region))
+          (aggs
+            (as (agg count) orders)
+            (as (agg sum o.total :filter (= o.status "paid")) paid)
+            (as (agg count o.customer_id :distinct true) customers)))
+        (> orders 10))
+      (desc paid :nulls last)
+      (asc region))))

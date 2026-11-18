@@ -37,7 +37,7 @@ GraphQL returns trees; relational algebra returns flat rows. A naive translation
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Nest/Unnest/Apply operators** - I1
+- [x] **Phase 1: Nest/Unnest/Apply operators** - I1
 - [ ] **Phase 2: Decorrelation rules** - I3
 
 ## Consequences

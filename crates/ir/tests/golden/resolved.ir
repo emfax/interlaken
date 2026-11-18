@@ -1,0 +1,13 @@
+; Resolved form: catalog IDs, bindings and bound column references, pinned to schema version 42.
+; SELECT lower(u.name), count(*) FROM users u JOIN orders o ON o.user_id = u.id
+; WHERE u.id > $1::int8 GROUP BY 1
+(plan :schema-version 42
+  (aggregate :bind 3
+    (filter
+      (join inner
+        (get (tid 100) :as u :bind 1)
+        (get (tid 101) :as o :bind 2)
+        (= #2.1 #1.0))
+      (> #1.0 (param 1 (not-null int8))))
+    (keys (as (call (fid 7) #1.1) name))
+    (aggs (as (agg (fid 2001)) n))))

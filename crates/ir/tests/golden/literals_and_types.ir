@@ -1,0 +1,46 @@
+; Every literal form, casts to every scalar type, parameter types, CASE, COALESCE and NULLIF.
+(plan
+  (project
+    (values
+      (columns |true| |odd name| |a.b|)
+      (row true false null)
+      (row (int2 -32768) (int4 2147483647) -9223372036854775808)
+      (row 1.5 -0.0 (float8 nan))
+      (row (float8 inf) (float8 -inf) 1e-7)
+      (row "tab\tquote\"backslash\\" "snow ☃" (bytea "00ff10"))
+      (row
+        (date "2026-11-19")
+        (date "-0044-03-15")
+        (timestamptz "1969-12-31T23:59:59.999999Z"))
+      (row (uuid "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11") (bytea "") ""))
+    (as (cast |true| bool) c_bool)
+    (as (cast |odd name| int2) c_int2)
+    (as (cast |odd name| int4) c_int4)
+    (as (cast |odd name| int8) c_int8)
+    (as (cast |odd name| float8) c_float8)
+    (as (cast |a.b| text) c_text)
+    (as (cast |a.b| bytea) c_bytea)
+    (as (cast |a.b| date) c_date)
+    (as (cast |a.b| timestamptz) c_timestamptz)
+    (as (cast |a.b| uuid) c_uuid)
+    (as (cast |a.b| jsonb) c_jsonb)
+    (as (param 1 (not-null (array (not-null text)))) tags)
+    (as (param 2 (record (id (not-null int8)) (label text))) rec)
+    (as (param 3 (entity User)) principal)
+    (as
+      (case
+        (when (is-null |true|) "none")
+        (when (= |odd name| 1) "one")
+        (else "many"))
+      searched)
+    (as (case (when 1 "a") (when 2 "b") :on |odd name|) simple)
+    (as (coalesce |a.b| (nullif |odd name| 0) "default") fallback)
+    (as (neg (* (- (/ |odd name| 2) (% |odd name| 3)) 4)) arithmetic)
+    (as (concat |a.b| "!") shout)
+    (as
+      (or
+        (is-distinct-from |true| null)
+        (is-not-distinct-from |a.b| "x")
+        (is-not-null |a.b|))
+      logic)
+    (as (call public.my_func (call pg_catalog.lower |a.b|)) qualified_calls)))

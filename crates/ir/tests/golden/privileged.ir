@@ -1,0 +1,9 @@
+; Privileged nodes as security lowering would emit them; the verifier rejects them from clients.
+(plan
+  (update documents
+    (write-check
+      (policy-filter
+        (get documents :as d)
+        (or (= d.owner_id (param 1 (not-null int8))) (= d.public true)))
+      (= d.owner_id (param 1 (not-null int8))))
+    (set title (param 2 text))))

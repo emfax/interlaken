@@ -1,0 +1,8 @@
+; SELECT u.name, u.age + 1 AS next_age FROM users u WHERE u.age >= 18 AND u.email LIKE '%@example.com'
+(plan
+  (project
+    (filter
+      (get users :as u)
+      (and (>= u.age 18) (like u.email "%@example.com")))
+    u.name
+    (as (+ u.age 1) next_age)))

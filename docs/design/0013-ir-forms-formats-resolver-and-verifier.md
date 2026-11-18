@@ -44,6 +44,17 @@ The SQL and GraphQL binders use the same resolver.
 - **Text format** (S-expressions): golden tests, debugging, and `EXPLAIN` output that can be pasted back in and run.
 - **Wire format** (later): Substrait plus our own extensions, versioned, translated into the internal IR. The internal IR stays free to change.
 
+**Text format (I1).** The full grammar is in the `interlaken_ir::text` module docs. In outline:
+- Every operator and expression is a list headed by its name, such as `(filter REL EXPR)` or `(+ a b)`. `:name value` keyword arguments carry optional parts (`:as`, `:bind`, `:schema-version`) and may appear anywhere in a list.
+- Atoms:
+  - integers are `int8` literals and floats are `float8`;
+  - `#b.c` is a bound column;
+  - dotted symbols are names, with `|...|` quoting any segment that is not a plain identifier;
+  - `true`, `false` and `null` are literals, so they must be quoted to be used as names.
+- Other literal types use typed forms, such as `(date "2026-11-19")` and `(int4 5)`.
+- Printing is canonical. A list that fits in 80 columns stays on one line; otherwise its head, leading atoms and keywords stay on the first line and each remaining argument is indented on its own line.
+- Parsing printed text always gives equal IR. Errors carry line and column, and nesting deeper than 200 levels is rejected rather than overflowing the stack.
+
 ### Catalog trait
 
 The resolver, verifier, security lowering, optimizer and reference interpreter ([ADR-0021](0021-ir-correctness-and-security-testing.md)) read catalog metadata only through a `Catalog` trait:
@@ -67,6 +78,13 @@ pub trait Catalog: Send + Sync {
 - **In-memory implementation:** built from Rust or the text format, used by IR milestones I1–I3, golden tests and the reference interpreter. IR work proceeds before storage M4.
 - **Storage-backed implementation:** reads `sys_tables`, `sys_columns`, `sys_indexes` and `sys_entities` from the transaction's snapshot ([ADR-0007](0007-minimal-catalog-and-row-layer.md), [ADR-0017](0017-entities-and-hierarchy-closure-table.md)). Arrives with storage M4.
 - Signatures above are indicative; the exact shape is settled in I2.
+- **As implemented (I1):**
+  - Lookups return shared `Arc` definitions.
+  - `functions_by_name` returns every overload, because the resolver needs all the candidates to apply implicit casts. `function_by_name` is a provided method that matches argument types exactly.
+  - `TableDef` carries columns (with nullable types) and the primary key; indexes join when the optimizer needs them.
+  - `InMemoryCatalog` is built from Rust and rejects duplicate IDs and names, and nullable primary key columns.
+  - Entity lookups arrive with the security core in I4.
+  - A text form for catalogs arrives in I2, with the resolver's golden tests.
 
 ### Verifier
 
@@ -93,7 +111,7 @@ flowchart TB
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Builder, text format, `Catalog` trait and in-memory implementation** - I1
+- [x] **Phase 1: Builder, text format, `Catalog` trait and in-memory implementation** - I1
 - [ ] **Phase 2: Resolver and verifier against the in-memory catalog** - I2
 - [ ] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - after storage M4
 

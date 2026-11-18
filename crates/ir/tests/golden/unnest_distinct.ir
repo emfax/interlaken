@@ -1,0 +1,5 @@
+; SELECT DISTINCT t.tag FROM posts p, unnest(p.tags) AS t(tag) ORDER BY t.tag NULLS FIRST
+(plan
+  (sort
+    (distinct (project (unnest (get posts :as p) p.tags (columns tag)) tag))
+    (asc tag :nulls first)))

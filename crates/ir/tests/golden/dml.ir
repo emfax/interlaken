@@ -1,0 +1,25 @@
+; All three DML operators nested into one plan for coverage:
+; DELETE FROM public.sessions s WHERE s.user_id IN (
+;   UPDATE users u SET karma = karma + 1, seen_at = $2
+;   WHERE u.id IN (INSERT INTO audit (user_id, action) VALUES ($1, 'login') RETURNING user_id)
+;   RETURNING u.id)
+; RETURNING s.id AS deleted
+(plan
+  (delete public.sessions :as s
+    (filter
+      (get public.sessions :as s)
+      (in s.user_id
+        (update users :as u
+          (filter
+            (get users :as u)
+            (in u.id
+              (insert audit
+                (values
+                  (columns user_id action)
+                  (row (param 1 (not-null int8)) "login"))
+                (columns user_id action)
+                (returning user_id))))
+          (set karma (+ karma 1))
+          (set seen_at (param 2 timestamptz))
+          (returning u.id))))
+    (returning (as s.id deleted))))

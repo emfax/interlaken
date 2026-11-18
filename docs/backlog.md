@@ -50,13 +50,6 @@ Entry format:
 
 ## Executor and IR open questions
 
-### nest-output-format: Decide `Nest` output: jsonb or Arrow list/struct
-- **Origin:** `executor-design.md` open questions, ADR-0012
-- **Why:** jsonb is simpler. Arrow list/struct columns keep types and are cheaper for the GraphQL serializer. The choice shapes the `Nest` operator and the serializer interface.
-- **When:** Before executor milestone E5.
-- **Size:** A decision, plus an ADR update.
-- **Status:** open
-
 ### default-memory-budgets: Choose default per-query and per-node memory budgets
 - **Origin:** ADR-0027 open questions, `executor-design.md`
 - **Why:** Queries that exceed the budget fail rather than spill, so the defaults decide which real queries succeed. They need numbers for the container sizes we expect.
@@ -80,4 +73,9 @@ Entry format:
 
 ## Done
 
-(None yet.)
+### nest-output-format: Decide `Nest` output: jsonb or Arrow list/struct
+- **Origin:** `executor-design.md` open questions, ADR-0012
+- **Why:** jsonb is simpler. Arrow list/struct columns keep types and are cheaper for the GraphQL serializer. The choice shapes the `Nest` operator and the serializer interface.
+- **When:** Before executor milestone E5.
+- **Size:** A decision, plus an ADR update.
+- **Status:** dropped: already decided in ADR-0012 (typed `array(record(...))`, Arrow list-of-struct at run time, JSON only at serialization). The open question in `executor-design.md` predates that ADR.

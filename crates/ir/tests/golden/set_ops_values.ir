@@ -1,0 +1,11 @@
+; (VALUES (1, 'a'), (2, 'b') UNION ALL SELECT id, code FROM legacy)
+; EXCEPT
+; (SELECT id, code FROM retired UNION (SELECT id FROM a INTERSECT ALL SELECT id FROM b))
+(plan
+  (except
+    (union :all true
+      (values (columns id code) (row 1 "a") (row 2 "b"))
+      (project (get legacy) id code))
+    (union
+      (project (get retired) id code)
+      (intersect (project (get a) id) (project (get b) id) :all true))))

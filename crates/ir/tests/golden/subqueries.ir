@@ -1,0 +1,24 @@
+; Unresolved subqueries, before the resolver lowers them to Apply.
+; SELECT u.name, (SELECT max(p.created_at) FROM posts p WHERE p.author_id = u.id) AS last_post
+; FROM users u
+; WHERE EXISTS (SELECT 1 FROM follows f WHERE f.followee_id = u.id)
+;   AND u.id IN (SELECT b.user_id FROM badges b)
+;   AND u.karma > ALL (SELECT k.threshold FROM karma_levels k)
+;   AND NOT u.id = ANY (SELECT x.user_id FROM banned x)
+(plan
+  (project
+    (filter
+      (get users :as u)
+      (and
+        (exists (project (filter (get follows :as f) (= f.followee_id u.id)) 1))
+        (in u.id (project (get badges :as b) b.user_id))
+        (all > u.karma (project (get karma_levels :as k) k.threshold))
+        (not (any = u.id (project (get banned :as x) x.user_id)))))
+    u.name
+    (as
+      (scalar
+        (aggregate
+          (filter (get posts :as p) (= p.author_id u.id))
+          (keys)
+          (aggs (agg max p.created_at))))
+      last_post)))

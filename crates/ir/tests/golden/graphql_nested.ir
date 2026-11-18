@@ -1,0 +1,14 @@
+; GraphQL: { users(limit: 10) { name posts(orderBy: newest) { title likes } } }
+; Each user's posts are a correlated Apply, nested into an array of records.
+(plan
+  (project
+    (apply left
+      (limit (sort (get users :as u) (asc u.id)) :count 10)
+      (nest :as posts
+        (sort
+          (filter (get posts :as p) (= p.author_id u.id))
+          (desc p.created_at))
+        (keys)
+        (fields (as p.title title) (as p.likes likes))))
+    u.name
+    posts))

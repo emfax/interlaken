@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/storage"]
+members = ["crates/ir", "crates/storage"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ rust-version = "1.90"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+interlaken-ir = { path = "crates/ir" }
 interlaken-storage = { path = "crates/storage" }
 fjall = { version = "3.1", features = ["bytes_1"] }
 bytes = "1"

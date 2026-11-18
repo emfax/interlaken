@@ -1,0 +1,14 @@
+; Every join and apply kind.
+(plan
+  (join full
+    (join right
+      (join left (get a) (get b) (= a.id b.a_id))
+      (join semi (get c) (get d) (= c.id d.c_id))
+      true)
+    (join anti
+      (apply single
+        (apply anti (apply semi (apply inner (get e) (get f)) (get g)) (get h))
+        (get i))
+      (get j)
+      (<> e.id j.e_id))
+    (and)))

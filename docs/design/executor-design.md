@@ -191,6 +191,6 @@ Roughly 11 weeks for one experienced engineer. It can start after storage milest
 
 ### Open questions
 
-- Should `Nest` produce jsonb directly or Arrow list/struct columns that the GraphQL serializer converts? jsonb is simpler; Arrow keeps types and is cheaper to serialize.
+- Should `Nest` produce jsonb directly or Arrow list/struct columns that the GraphQL serializer converts? jsonb is simpler; Arrow keeps types and is cheaper to serialize. *Resolved by [ADR-0012](0012-nesting-and-decorrelation-for-graphql.md): typed Arrow list-of-struct, converted to JSON by serializers.*
 - Default memory budget per query and per node for the container sizes we expect.
 - Should a hash join's build side be chosen at run time (after seeing input sizes) rather than at planning time?

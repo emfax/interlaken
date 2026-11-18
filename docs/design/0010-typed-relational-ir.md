@@ -117,6 +117,19 @@ All operators have a typed output schema.
 
 DDL is not part of the IR. Catalog changes go through the catalog API inside a transaction ([ADR-0007](0007-minimal-catalog-and-row-layer.md)).
 
+### Representation (I1)
+
+The IR lives in the `interlaken-ir` crate, which does not depend on storage.
+
+- **One tree for both forms.** Unresolved and resolved IR ([ADR-0013](0013-ir-forms-formats-resolver-and-verifier.md)) share one `Rel`/`Expr` tree. Each reference is an enum with a variant per form: tables and functions by name or catalog ID, columns by name or by binding, DML target columns by name or column ID. The resolver rewrites references and nothing else; the verifier (I2) checks that resolved IR has no names left.
+- **Bindings.** Every operator that introduces columns (`Get`, `Project`, `Aggregate`, `Values`, set operations, `Nest`, `Unnest`, DML) carries a `BindingId`, unique within a plan. A resolved column reference is `(binding, column)`: the catalog column ID for a table, the output position otherwise. Pass-through operators (`Filter`, `Join`, `Apply`, `Sort`, `Limit`, `Distinct`, `PolicyFilter`, `WriteCheck`) have no binding. DML operators have two: one for the target row, which `RETURNING` reads (new values for insert and update, old values for delete), and one for the `RETURNING` output.
+- **Aggregates are not expressions.** Aggregate calls appear only in `Aggregate`'s list, so "aggregates only inside Aggregate" holds by construction. The verifier still checks that a scalar call never resolves to an aggregate function.
+- **Operators are nodes, not function calls.** Comparison, arithmetic, `LIKE`, `IS [NOT] NULL` and `IS [NOT] DISTINCT FROM` are dedicated expression nodes; `AND` and `OR` are n-ary. The function catalog (I2) supplies their properties by operator and operand types.
+- **Apply kinds:** inner, left, semi, anti and single. Single is a left apply that fails on more than one inner row; scalar subqueries lower to it.
+- **`Nest`** takes grouping keys, record fields and a column name. Its output is the keys followed by one `array(record(fields))` column.
+- **Literals.** `NULL` is untyped; resolved IR wraps a NULL that needs a type in an explicit cast. `date` is days since 1970-01-01 and `timestamptz` is microseconds since the Unix epoch, matching Arrow's `Date32` and `Timestamp(µs, UTC)`. IR equality compares floats by bit pattern but treats every NaN as one value, as Postgres does.
+- **IDs:** table, function, column and binding IDs are `u32`; schema versions are `u64`. The storage-backed catalog converts storage IDs.
+
 ### MVP scope
 
 | In the MVP | Deferred |
@@ -129,7 +142,7 @@ The SQL and GraphQL front ends are separate projects that start once the IR is s
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Types, expressions, operators, builder, text format** - I1
+- [x] **Phase 1: Types, expressions, operators, builder, text format** - I1
 
 ## Consequences
 
