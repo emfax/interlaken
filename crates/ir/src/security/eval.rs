@@ -178,6 +178,17 @@ impl Env<'_> {
                 }
             }
             SecExpr::Has(base, attr) => {
+                // As in Cedar, an entity that does not exist has no attributes:
+                // `has` is false, though reading one is an error.
+                if !matches!(**base, SecExpr::Resource)
+                    && let SecValue::Entity(uid) = self.eval(base)?
+                {
+                    let missing = self.resource.and_then(|r| r.uid.as_ref()) != Some(&uid)
+                        && self.store.attributes(&uid).is_none();
+                    if missing {
+                        return Ok(SecValue::Bool(false));
+                    }
+                }
                 SecValue::Bool(self.fields(base)?.iter().any(|(n, _)| n == attr))
             }
             SecExpr::Is(base, ty) => match base.as_ref() {

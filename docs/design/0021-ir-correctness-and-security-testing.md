@@ -76,6 +76,12 @@ The IR is the single enforcement point for access control, so a bug in lowering 
     - **Planted bugs**, each caught: removing `Try`, letting non-leakproof predicates below the barrier, and a wrong principal-membership comparison.
   - **Leak suite:** probes through division by zero and invalid `LIKE` patterns in hidden rows, scalar-subquery cardinality, aggregates, `LIMIT`, join conditions, `EXISTS`, grouping and nesting, plus write checks, column-level denial, and injected privileged operators. In every optimized plan, only leakproof expressions run below a `PolicyFilter`.
   - **Transactional tests:** in `interlaken-engine`, against real storage ([ADR-0019](0019-transactional-authorization-and-residual-cache.md)).
+- **Phase 5 as implemented (I5):**
+  - **The Cedar oracle** ([ADR-0020](0020-cedar-policy-provider-and-deployment-gates.md)).
+  - **Residual cache tests:** a hit only while every dependency is unchanged; never cached when depending on time.
+  - **Impact analysis and lint tests.**
+  - **Proposal workflow tests** with a fake prover: proof-required waiting, confirmation, superseding, refuted proposals.
+  - **SMT prover tests**, which run when cvc5 is present: narrowing proves clean; broadening, overflow and invariant violations yield counterexamples.
 
 ### MVP success criteria
 
@@ -102,7 +108,7 @@ Roughly 14 weeks for one engineer. I1–I3 start after storage milestone M2 and 
 - [x] **Phase 2: Verifier fuzzing** - I2
 - [x] **Phase 3: Reference interpreter and differential testing** - I3
 - [x] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4
-- [ ] **Phase 5: Oracle with Cedar, deployment gate tests** - I5
+- [x] **Phase 5: Oracle with Cedar, deployment gate tests** - I5
 
 ## Consequences
 

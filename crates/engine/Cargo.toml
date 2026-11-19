@@ -10,6 +10,13 @@ license.workspace = true
 interlaken-ir.workspace = true
 interlaken-storage.workspace = true
 thiserror.workspace = true
+cedar-policy = { workspace = true, optional = true }
+cedar-policy-symcc = { workspace = true, optional = true }
+tokio = { version = "1", features = ["process"], optional = true }
+
+[features]
+# Prover nodes: prove policy changes with cvc5 (ADR-0030). Never needed by embedded builds.
+smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "dep:tokio"]
 
 [dev-dependencies]
 tempfile.workspace = true

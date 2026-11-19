@@ -1,16 +1,13 @@
 //! The engine layer: where the IR meets storage.
 //!
-//! This crate currently provides the transactional side of authorization
-//! (ADR-0017, ADR-0019): loading the principal's entity data and policies
-//! from the transaction's snapshot, so they join its read set and a
-//! concurrent revocation or policy change conflicts with transactions that
-//! relied on the old state.
+//! This crate currently provides the transactional side of authorization:
+//! loading the principal's entity data from the transaction's snapshot
+//! (ADR-0017, ADR-0019), and [`policy`]: versioned policies changed through
+//! verified proposals (ADR-0020, ADR-0030).
 
 mod authz;
 mod error;
+pub mod policy;
 
-pub use authz::{
-    LoadedEntities, POLICY_TABLE, PolicySet, create_policy_table, load_policies, load_principal,
-    store_policies,
-};
+pub use authz::{LoadedEntities, load_principal};
 pub use error::EngineError;

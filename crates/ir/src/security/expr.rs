@@ -218,7 +218,9 @@ impl Policy {
     /// Return `true` if this row-level policy covers `action` on resources of type `resource_type`.
     #[must_use]
     pub fn applies(&self, action: Action, resource_type: &Ident) -> bool {
-        self.column.is_none() && self.actions.contains(&action) && &self.resource_type == resource_type
+        self.column.is_none()
+            && self.actions.contains(&action)
+            && &self.resource_type == resource_type
     }
 }
 

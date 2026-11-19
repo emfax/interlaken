@@ -89,6 +89,20 @@ Entry format:
 - **Size:** About 1–2 days.
 - **Status:** open
 
+### impact-analysis-at-scale: Make impact analysis scale with the data
+- **Origin:** ADR-0030, I5
+- **Why:** Impact analysis authorizes every principal against every governed row and column. That is fine for small and medium data, but quadratic.
+- **When:** When a policy change takes noticeably long to verify.
+- **Size:** About 3–5 days, for sampling, pruning by the policies' resource types, and incremental evaluation.
+- **Status:** open
+
+### prover-subscriptions: Provers that watch replicated proposals
+- **Origin:** ADR-0030 phase 2
+- **Why:** `prove_pending` must be called. With replication, prover nodes should run it whenever a proposal arrives.
+- **When:** With Raft.
+- **Size:** About 1–2 days once change notifications exist.
+- **Status:** open
+
 ### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
 - **Origin:** ADR-0012 (decorrelation), I3
 - **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.

@@ -48,10 +48,30 @@ A policy change is a transaction that runs these gates before committing:
 
 Failures return a concrete counterexample request.
 
+**Revised (I5): where the gates run.** The SMT gates (never errors, no broadening, declared invariants) run only on prover nodes configured with cvc5. Policy changes are proposals verified by whichever nodes can verify them ([ADR-0030](0030-policy-proposals-and-distributed-verification.md)). Every node runs validation, a forbid lint and impact analysis on its data. Embedded databases never need a solver.
+
+### As implemented (I5)
+
+- **Provider.** `security::CedarProvider` builds the Cedar schema from the catalog's entity declarations (`cedar_schema`):
+  - nullable columns become optional attributes;
+  - references are typed by the referenced entity;
+  - memberships become parent types;
+  - the actions `read`, `insert`, `update` and `delete` apply to every entity type, with the standard context fields and an application record type.
+
+  Policies are validated in strict mode when the provider is constructed.
+- **Partial evaluation** uses TPE with the principal's entity (attributes and ancestors) as the only known entity, so attribute paths through references stay residual for lowering. The translator converts residual policies' syntax trees into the sublanguage. Extension types, tags and unknowns are rejected, so lowering fails closed. Our partial evaluator then substitutes the principal and context, and the result is combined and lowered exactly as for the RLS provider. All Cedar-specific code is in `security::cedar`, and `cedar-policy` is pinned to `=4.15.0`.
+- **Writes** use Cedar's own authorizer (`is_authorized_batched`), loading entities on demand from the entity store.
+- **Column-level policies** carry a `@column("name")` annotation and take no part in row decisions.
+- **Gates.** The SMT gates are implemented by the engine's `SmtProver` (feature `smt-prover`), with `cedar-policy-symcc` `=0.9.0` and cvc5 1.3.1. Invariants are Cedar policy sets describing the most the new set may allow.
+- **Testing:**
+  - The Cedar oracle renders random policies in Cedar. For every governed row, our sublanguage evaluator must decide exactly as Cedar's authorizer. Every secured query must return what the query returns over the rows Cedar authorizes.
+  - Runs: 1,500 cases per run, and 10,000 once.
+  - It found one semantic difference, which is fixed: Cedar's `has` on a missing entity is false, not an error.
+
 ## Implementation Phases
 
-- [ ] **Phase 1: Cedar provider and translator** - I5
-- [ ] **Phase 2: Deployment gates** - I5
+- [x] **Phase 1: Cedar provider and translator** - I5
+- [x] **Phase 2: Deployment gates** - I5 (SMT gates on prover nodes, [ADR-0030](0030-policy-proposals-and-distributed-verification.md))
 
 ## Consequences
 

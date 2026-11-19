@@ -15,6 +15,11 @@ fjall = { version = "3.1", features = ["bytes_1"] }
 bytes = "1"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 thiserror = "2"
+# Pinned exactly: type-aware partial evaluation (tpe) is experimental (ADR-0020).
+cedar-policy = { version = "=4.15.0", default-features = false, features = ["tpe"] }
+smol_str = "0.3"
+# The SMT prover (ADR-0030); pinned to the cedar-policy version it is built against.
+cedar-policy-symcc = "=0.9.0"
 proptest = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

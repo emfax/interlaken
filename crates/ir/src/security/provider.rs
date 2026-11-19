@@ -152,6 +152,12 @@ pub trait PolicyProvider: Send + Sync {
     /// Return how policy results combine.
     fn combining_rule(&self) -> CombiningRule;
 
+    /// Return warnings about policies whose forbid conditions can raise
+    /// errors and so stop forbidding (ADR-0030). None by default.
+    fn lint(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Decide whether the principal may read attribute `column` of
     /// resources of type `resource_type` (ADR-0018). Must be decidable from
     /// the principal and context alone.
@@ -243,7 +249,7 @@ impl RlsProvider {
 }
 
 /// Combine partial results: `OR(permits) AND NOT OR(forbids)`.
-fn combine(permits: Vec<Partial>, forbids: Vec<Partial>) -> Residual {
+pub(crate) fn combine(permits: Vec<Partial>, forbids: Vec<Partial>) -> Residual {
     /// Fold partial results with `||`, dropping known-false ones.
     fn any(parts: Vec<Partial>) -> Partial {
         let mut residuals = Vec::new();
@@ -359,6 +365,19 @@ impl PolicyProvider for RlsProvider {
         CombiningRule::PermitUnlessForbid
     }
 
+    /// Flag forbid policies whose condition can raise an error.
+    fn lint(&self) -> Vec<String> {
+        self.policies
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.effect == Effect::Forbid)
+            .filter_map(|(i, p)| {
+                super::impact::forbid_hazard(&p.condition)
+                    .map(|why| format!("forbid policy {i} on {}: {why}", p.resource_type))
+            })
+            .collect()
+    }
+
     /// A column no policy names is readable; one that some policy names is
     /// readable only if the column policies allow it for every row.
     /// A decision that depends on the row denies: per-row column masking is
@@ -380,12 +399,23 @@ impl PolicyProvider for RlsProvider {
         }
         let record = context.record();
         let penv = PartialEnv {
-            env: Env { principal: &context.principal, resource: None, context: &record, store: entities },
+            env: Env {
+                principal: &context.principal,
+                resource: None,
+                context: &record,
+                store: entities,
+            },
             resource_type,
         };
-        let (permits, forbids): (Vec<&Policy>, Vec<&Policy>) =
-            governing.into_iter().filter(|p| p.actions.contains(&Action::Read)).partition(|p| p.effect == Effect::Permit);
-        let eval = |ps: Vec<&Policy>| ps.into_iter().map(|p| penv.partial(&guarded(&p.condition))).collect();
+        let (permits, forbids): (Vec<&Policy>, Vec<&Policy>) = governing
+            .into_iter()
+            .filter(|p| p.actions.contains(&Action::Read))
+            .partition(|p| p.effect == Effect::Permit);
+        let eval = |ps: Vec<&Policy>| {
+            ps.into_iter()
+                .map(|p| penv.partial(&guarded(&p.condition)))
+                .collect()
+        };
         Ok(match combine(eval(permits), eval(forbids)) {
             Residual::Allow => Decision::Allow,
             Residual::Deny | Residual::Conditional(_) => Decision::Deny,

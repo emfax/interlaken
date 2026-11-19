@@ -279,6 +279,13 @@ impl Catalog for InMemoryCatalog {
         self.entities.values().find(|e| e.table == table).cloned()
     }
 
+    /// Return every entity type, ordered by name.
+    fn entities(&self) -> Vec<Arc<EntityDef>> {
+        let mut out: Vec<_> = self.entities.values().cloned().collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     /// Return every membership of `member` entities, ordered by group type.
     fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
         let mut out: Vec<_> = self

@@ -263,7 +263,13 @@ impl Lowering<'_> {
 /// a set operation, an insert or `DISTINCT`. Policy residuals are added
 /// later and are not checked: the engine may read any column to enforce
 /// policies.
-fn check_columns(plan: &Plan, catalog: &dyn Catalog, provider: &dyn PolicyProvider, context: &SecurityContext, store: &dyn EntityStore) -> Result<(), SecurityError> {
+fn check_columns(
+    plan: &Plan,
+    catalog: &dyn Catalog,
+    provider: &dyn PolicyProvider,
+    context: &SecurityContext,
+    store: &dyn EntityStore,
+) -> Result<(), SecurityError> {
     let mut read = std::collections::HashSet::new();
     crate::optimize::referenced(&plan.root, &mut read);
     let mut whole_rows = std::collections::HashSet::new();
@@ -271,8 +277,14 @@ fn check_columns(plan: &Plan, catalog: &dyn Catalog, provider: &dyn PolicyProvid
     /// Collect the table and binding of every get and DML target row.
     fn row_sources(rel: &Rel, out: &mut Vec<(TableId, BindingId)>) {
         match rel {
-            Rel::Get { table: TableRef::Id(t), binding: Some(b), .. } => out.push((*t, *b)),
-            Rel::Insert { target, .. } | Rel::Update { target, .. } | Rel::Delete { target, .. } => {
+            Rel::Get {
+                table: TableRef::Id(t),
+                binding: Some(b),
+                ..
+            } => out.push((*t, *b)),
+            Rel::Insert { target, .. }
+            | Rel::Update { target, .. }
+            | Rel::Delete { target, .. } => {
                 if let (TableRef::Id(t), Some(b)) = (&target.table, target.binding) {
                     out.push((*t, b));
                 }
@@ -284,13 +296,21 @@ fn check_columns(plan: &Plan, catalog: &dyn Catalog, provider: &dyn PolicyProvid
     let mut sources = Vec::new();
     row_sources(&plan.root, &mut sources);
     for (table, binding) in sources {
-        let (Some(entity), Some(def)) = (catalog.entity_for_table(table), catalog.table_by_id(table)) else {
+        let (Some(entity), Some(def)) =
+            (catalog.entity_for_table(table), catalog.table_by_id(table))
+        else {
             continue;
         };
         for attribute in &entity.attributes {
             let used = whole_rows.contains(&binding) || read.contains(&(binding, attribute.column));
-            if used && provider.column_access(context, &entity.name, &attribute.name, store)? == super::provider::Decision::Deny {
-                return Err(SecurityError::ColumnDenied { table: def.name.to_string(), column: attribute.name.to_string() });
+            if used
+                && provider.column_access(context, &entity.name, &attribute.name, store)?
+                    == super::provider::Decision::Deny
+            {
+                return Err(SecurityError::ColumnDenied {
+                    table: def.name.to_string(),
+                    column: attribute.name.to_string(),
+                });
             }
         }
     }

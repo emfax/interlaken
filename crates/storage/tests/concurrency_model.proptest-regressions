@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6c2212c39ca9749311e781a3605ceb7a118b9f1392e186a6cd320b8378134fa7 # shrinks to steps = [Begin(1, Serializable, false), Begin(0, ReadCommitted, false), Op(0, Put(1, 0)), Op(1, Put(0, 0)), Op(1, Scan(ScanSpec { start: Unbounded, end: Unbounded, reverse: false, limit_rows: 1, limit_bytes: 1, parity: None })), Commit(0), Commit(1)]

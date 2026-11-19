@@ -1,4 +1,4 @@
-//! Transactional authorization data (ADR-0017, ADR-0019).
+//! Loading the principal's entity data (ADR-0017, ADR-0019).
 //!
 //! - **Principal loading.** At transaction start the engine reads the
 //!   principal's entity row and its closure rows (every group it belongs
@@ -8,118 +8,16 @@
 //!   fail at commit with a serialization failure if it wrote anything.
 //!   Closure rows are scanned by the principal's key prefix, so unrelated
 //!   memberships do not conflict.
-//! - **Versioned policies.** The policy set is one row of
-//!   [`POLICY_TABLE`] holding its text and a version, changed by
-//!   transactions like DDL. Reading it registers a dependency, so a writing
-//!   transaction conflicts with a concurrent policy change at every
-//!   isolation level, and authorization and data come from one snapshot.
 
 use interlaken_ir::Ident;
 use interlaken_ir::catalog::Catalog;
-use interlaken_ir::security::{
-    EntityKey, EntityStore, EntityUid, Policy, SecValue, parse_policies,
-};
+use interlaken_ir::security::{EntityKey, EntityStore, EntityUid, SecValue};
 use interlaken_storage::Txn;
-use interlaken_storage::catalog::{self, ColumnDef, TableSpec};
-use interlaken_storage::encoding::{ColumnType, Datum};
+use interlaken_storage::catalog;
+use interlaken_storage::encoding::Datum;
 use interlaken_storage::rows::{self, RowScan};
 
 use super::error::EngineError;
-
-/// The name of the table holding the policy set.
-pub const POLICY_TABLE: &str = "policy_set";
-
-/// The policy set as of a transaction's snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolicySet {
-    /// The version, incremented by every change.
-    pub version: i64,
-    /// The policies.
-    pub policies: Vec<Policy>,
-}
-
-/// Create the policy table, with an empty policy set at version 0.
-///
-/// # Errors
-///
-/// Returns an [`EngineError`] if the table exists or storage fails.
-pub async fn create_policy_table(txn: &Txn) -> Result<(), EngineError> {
-    let spec = TableSpec {
-        name: POLICY_TABLE.into(),
-        columns: vec![
-            ColumnDef::new("id", ColumnType::Int8),
-            ColumnDef::new("version", ColumnType::Int8).not_null(),
-            ColumnDef::new("body", ColumnType::Text).not_null(),
-        ],
-        primary_key: vec!["id".into()],
-    };
-    let table = catalog::create_table(txn, spec).await?;
-    rows::insert(
-        txn,
-        &table,
-        vec![
-            Datum::Int8(1),
-            Datum::Int8(0),
-            Datum::Text("(policies)".into()),
-        ],
-    )
-    .await?;
-    Ok(())
-}
-
-/// Return the policy table's definition.
-async fn policy_table(txn: &Txn) -> Result<catalog::TableDef, EngineError> {
-    catalog::table(txn, POLICY_TABLE)
-        .await?
-        .ok_or_else(|| EngineError::Catalog(format!("table {POLICY_TABLE} does not exist")))
-}
-
-/// Read the policy set from the transaction's snapshot, registering a dependency on it.
-///
-/// # Errors
-///
-/// Returns an [`EngineError`] if the table is missing, storage fails, or the stored text does not parse.
-pub async fn load_policies(txn: &Txn) -> Result<PolicySet, EngineError> {
-    let table = policy_table(txn).await?;
-    let pk = [Datum::Int8(1)];
-    let row = rows::get(txn, &table, &pk)
-        .await?
-        .ok_or_else(|| EngineError::Catalog("the policy set row is missing".into()))?;
-    rows::register_row_dependency(txn, &table, &pk)?;
-    let (Datum::Int8(version), Datum::Text(body)) = (&row[1], &row[2]) else {
-        return Err(EngineError::Catalog(
-            "the policy set row is malformed".into(),
-        ));
-    };
-    Ok(PolicySet {
-        version: *version,
-        policies: parse_policies(body)?,
-    })
-}
-
-/// Replace the policy set with `text`, after checking it parses; return the new version.
-///
-/// # Errors
-///
-/// Returns an [`EngineError`] if `text` does not parse or storage fails.
-pub async fn store_policies(txn: &Txn, text: &str) -> Result<i64, EngineError> {
-    parse_policies(text)?;
-    let current = load_policies(txn).await?;
-    let table = policy_table(txn).await?;
-    let version = current.version + 1;
-    rows::update(
-        txn,
-        &table,
-        &[Datum::Int8(1)],
-        vec![
-            Datum::Int8(1),
-            Datum::Int8(version),
-            Datum::Text(text.into()),
-        ],
-    )
-    .await?;
-    Ok(version)
-}
 
 /// The principal's entity data, read through a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]

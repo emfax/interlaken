@@ -231,10 +231,17 @@ fn short_circuits_inside_policies_survive_simplification() {
 }
 
 /// Secure `query` for `principal` under `policies`, returning the secured plan or the error.
-fn secure_as(principal: i64, policies: &str, query: &str) -> Result<Plan, interlaken_ir::security::SecurityError> {
+fn secure_as(
+    principal: i64,
+    policies: &str,
+    query: &str,
+) -> Result<Plan, interlaken_ir::security::SecurityError> {
     let catalog = catalog();
     let db = sample().database();
-    let store = DatabaseEntities { catalog: &catalog, db: &db };
+    let store = DatabaseEntities {
+        catalog: &catalog,
+        db: &db,
+    };
     let provider = RlsProvider::new(parse_policies(policies).unwrap());
     let context = SecurityContext::new(EntityUid::long("User", principal));
     let plan = resolve(&parse_plan(query).unwrap(), &catalog).unwrap().plan;
@@ -256,12 +263,29 @@ fn denied_columns_cannot_be_read() {
         "(plan (get docs))",
         "(plan (distinct (project (get docs :as d) d.secret)))",
     ] {
-        assert!(denied(&secure_as(1, policies, query)), "ann must not read secrets: {query}");
-        assert!(secure_as(3, policies, query).is_ok(), "cy may read secrets: {query}");
+        assert!(
+            denied(&secure_as(1, policies, query)),
+            "ann must not read secrets: {query}"
+        );
+        assert!(
+            secure_as(3, policies, query).is_ok(),
+            "cy may read secrets: {query}"
+        );
     }
     // Other columns stay readable, including in a query over the same table.
-    assert!(secure_as(1, policies, "(plan (project (get docs :as d) d.id d.title))").is_ok());
+    assert!(
+        secure_as(
+            1,
+            policies,
+            "(plan (project (get docs :as d) d.id d.title))"
+        )
+        .is_ok()
+    );
     // A column decision that depends on the row cannot be enforced by projection: it denies.
     let per_row = "(policies (permit (read) Doc true) (permit (read) Doc (== resource.owner principal) :column secret))";
-    assert!(denied(&secure_as(1, per_row, "(plan (project (get docs :as d) d.secret))")));
+    assert!(denied(&secure_as(
+        1,
+        per_row,
+        "(plan (project (get docs :as d) d.secret))"
+    )));
 }

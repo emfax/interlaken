@@ -45,6 +45,11 @@ pub trait Catalog: Send + Sync {
         None
     }
 
+    /// Return every declared entity type, ordered by name. None by default.
+    fn entities(&self) -> Vec<Arc<EntityDef>> {
+        Vec::new()
+    }
+
     /// Return every membership whose member type is `member`. None by default.
     fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
         let _ = member;

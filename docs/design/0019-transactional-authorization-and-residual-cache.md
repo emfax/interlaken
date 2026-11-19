@@ -46,12 +46,17 @@ If authorization reads policy data outside the transaction, a role can be revoke
 - **Key:** (principal, action, table, policy version, version of the principal's entity data, the context fields the residual depends on).
 - **Invalidation:** a policy change or a change to the principal's attributes or memberships bumps the relevant version.
 - **Not cached:** residuals that depend on fast-changing context (time, IP), as reported by `PolicyProvider::dependencies` ([ADR-0015](0015-security-core-and-policy-provider-contract.md)).
+- **As implemented (I5):** `security::ResidualCache` wraps any provider (`cache.provider(inner, policy_version)`). The key holds the principal, action, resource type and policy version, plus:
+  - a fingerprint of the principal's attributes and ancestors, when the provider reports reading them;
+  - the values of the context fields the policies read.
+
+  Residuals reading `time` or `ip` are not cached. Every input that can change is in the key, so stale entries are never hit again, and the cache is cleared at capacity.
 - **Per node.** Each node keeps its own cache. Because invalidation keys on catalog and policy versions, which Raft replicates with the data, each node invalidates correctly from its own applied state; no shared cache or cross-node invalidation protocol is needed.
 
 ## Implementation Phases
 
 - [x] **Phase 1: Read-set registration and versioned policies** - I4
-- [ ] **Phase 2: Residual cache** - I5
+- [x] **Phase 2: Residual cache** - I5
 
 ## Consequences
 

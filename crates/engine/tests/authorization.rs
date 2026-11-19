@@ -6,108 +6,40 @@
 //! concurrent policy change makes a writing transaction fail at every
 //! isolation level.
 
-use interlaken_engine::{
-    EngineError, create_policy_table, load_policies, load_principal, store_policies,
+use interlaken_engine::load_principal;
+use interlaken_engine::policy::{
+    PolicyDocument, PolicyLanguage, VerificationMode, activate, load_policies, submit_proposal,
+    verify_locally,
 };
-use interlaken_ir::catalog::InMemoryCatalog;
-use interlaken_ir::security::{EntityUid, SecValue};
-use interlaken_ir::text::parse_catalog;
-use interlaken_storage::catalog::{self, ColumnDef, TableSpec};
-use interlaken_storage::encoding::{ColumnType, Datum};
-use interlaken_storage::{
-    Durability, Error, FjallStorage, Isolation, Storage, StorageOptions, TxnOptions, rows,
-};
+use interlaken_ir::security::{EntityUid, SecValue, SecurityContext};
+use interlaken_storage::catalog;
+use interlaken_storage::encoding::Datum;
+use interlaken_storage::{Error, FjallStorage, Isolation, Storage, TxnOptions, rows};
 
-/// The IR catalog matching the stored tables.
-fn ir_catalog() -> InMemoryCatalog {
-    parse_catalog(
-        "(catalog
-           (table users :id 100 (column id (not-null int8)) (column dept text) (primary-key id))
-           (table groups :id 101 (column id (not-null int8)) (primary-key id))
-           (table memberships :id 102 (column member (not-null int8)) (column grp (not-null int8)) (primary-key member grp))
-           (table memberships_closure :id 103
-             (column member (not-null int8)) (column grp (not-null int8)) (column paths (not-null int8))
-             (primary-key member grp))
-           (table docs :id 104 (column id (not-null int8)) (primary-key id))
-           (entity User :table users :key id (attr dept))
-           (entity Group :table groups :key id)
-           (membership User Group :edges memberships (member grp) :closure memberships_closure (member grp paths)))",
-    )
-    .unwrap()
+mod support;
+
+use support::ir_catalog;
+
+/// Open the shared fixture in analysis-sufficient mode.
+async fn setup(dir: &std::path::Path) -> FjallStorage {
+    support::setup(dir, VerificationMode::AnalysisSufficient).await
 }
 
-/// Open storage with users 1 and 2, user 1 in group 7, user 2 in group 8, and the policy table.
-async fn setup(dir: &std::path::Path) -> FjallStorage {
-    let storage = FjallStorage::open(
-        dir,
-        StorageOptions {
-            durability: Durability::Buffered,
-            gc_interval: None,
-            ..StorageOptions::default()
-        },
-    )
-    .unwrap();
+/// Make `body` (RLS policies) the active policy set through the proposal workflow, as an admin.
+async fn activate_rls(storage: &FjallStorage, body: &str) -> i64 {
     let txn = storage.begin(TxnOptions::default()).await.unwrap();
-    let int = |n: &str| ColumnDef::new(n, ColumnType::Int8);
-    let tables = [
-        (
-            "users",
-            vec![int("id"), ColumnDef::new("dept", ColumnType::Text)],
-            vec!["id"],
-        ),
-        ("groups", vec![int("id")], vec!["id"]),
-        (
-            "memberships",
-            vec![int("member"), int("grp")],
-            vec!["member", "grp"],
-        ),
-        (
-            "memberships_closure",
-            vec![int("member"), int("grp"), int("paths").not_null()],
-            vec!["member", "grp"],
-        ),
-        ("docs", vec![int("id")], vec!["id"]),
-    ];
-    for (name, columns, pk) in tables {
-        let spec = TableSpec {
-            name: name.into(),
-            columns,
-            primary_key: pk.into_iter().map(Into::into).collect(),
-        };
-        catalog::create_table(&txn, spec).await.unwrap();
-    }
-    let users = catalog::table(&txn, "users").await.unwrap().unwrap();
-    rows::insert(
-        &txn,
-        &users,
-        vec![Datum::Int8(1), Datum::Text("eng".into())],
-    )
-    .await
-    .unwrap();
-    rows::insert(&txn, &users, vec![Datum::Int8(2), Datum::Null])
+    let document = PolicyDocument {
+        language: PolicyLanguage::Rls,
+        body: body.into(),
+    };
+    let id = submit_proposal(&txn, &document, "", "admin").await.unwrap();
+    let base = SecurityContext::new(EntityUid::long("User", 1));
+    verify_locally(&txn, support::shared_catalog(), id, "local", &base)
         .await
         .unwrap();
-    let closure = catalog::table(&txn, "memberships_closure")
-        .await
-        .unwrap()
-        .unwrap();
-    rows::insert(
-        &txn,
-        &closure,
-        vec![Datum::Int8(1), Datum::Int8(7), Datum::Int8(1)],
-    )
-    .await
-    .unwrap();
-    rows::insert(
-        &txn,
-        &closure,
-        vec![Datum::Int8(2), Datum::Int8(8), Datum::Int8(1)],
-    )
-    .await
-    .unwrap();
-    create_policy_table(&txn).await.unwrap();
+    let version = activate(&txn, id, Some("admin")).await.unwrap();
     txn.commit().await.unwrap();
-    storage
+    version
 }
 
 /// Delete `member`'s closure row for group `grp` in its own committed transaction.
@@ -128,9 +60,13 @@ async fn revoke(storage: &FjallStorage, member: i64, grp: i64) {
 /// Insert a document, as an authorized write would.
 async fn write_doc(txn: &interlaken_storage::Txn, id: i64) {
     let docs = catalog::table(txn, "docs").await.unwrap().unwrap();
-    rows::insert(txn, &docs, vec![Datum::Int8(id)])
-        .await
-        .unwrap();
+    rows::insert(
+        txn,
+        &docs,
+        vec![Datum::Int8(id), Datum::Int8(1), Datum::Null],
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -210,43 +146,31 @@ async fn unrelated_revocations_do_not_conflict() {
 }
 
 #[tokio::test]
-/// Assert policies are versioned, validated, and a concurrent change fails writers at every isolation level.
+/// Assert a concurrent policy activation fails writers that loaded the old set, at every isolation level.
 async fn policy_changes_conflict_at_every_level() {
     let dir = tempfile::tempdir().unwrap();
     let storage = setup(dir.path()).await;
-    let txn = storage.begin(TxnOptions::default()).await.unwrap();
-    assert_eq!(load_policies(&txn).await.unwrap().version, 0);
-    let v = store_policies(&txn, "(policies (permit (read) Doc true))")
-        .await
-        .unwrap();
-    assert_eq!(v, 1);
-    assert!(matches!(
-        store_policies(&txn, "(policies (permit (fly) Doc true))").await,
-        Err(EngineError::Policies(_))
-    ));
-    txn.commit().await.unwrap();
-
+    assert_eq!(
+        activate_rls(&storage, "(policies (permit (read) Doc true))").await,
+        1
+    );
     for isolation in [
         Isolation::ReadCommitted,
         Isolation::RepeatableRead,
         Isolation::Serializable,
     ] {
         let txn = storage.begin(TxnOptions::new(isolation)).await.unwrap();
-        let set = load_policies(&txn).await.unwrap();
-        assert_eq!(set.policies.len(), 1);
-        write_doc(&txn, 200 + set.version).await;
-        let admin = storage.begin(TxnOptions::default()).await.unwrap();
-        store_policies(&admin, "(policies)").await.unwrap();
-        admin.commit().await.unwrap();
+        let active = load_policies(&txn).await.unwrap();
+        write_doc(&txn, 200 + active.version).await;
+        let body = if active.version % 2 == 1 {
+            "(policies)"
+        } else {
+            "(policies (permit (read) Doc true))"
+        };
+        activate_rls(&storage, body).await;
         assert!(
             matches!(txn.commit().await, Err(Error::SerializationFailure(_))),
             "{isolation:?}: a writer must not commit against a replaced policy set"
         );
-        // Restore one policy for the next round.
-        let admin = storage.begin(TxnOptions::default()).await.unwrap();
-        store_policies(&admin, "(policies (permit (read) Doc true))")
-            .await
-            .unwrap();
-        admin.commit().await.unwrap();
     }
 }
