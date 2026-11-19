@@ -1,12 +1,12 @@
 ---
 id: 0018
 title: PolicyFilter Barrier and WriteCheck Plan Constructs
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [security, ir, optimizer]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-19
 spec-sections: ["ir-design.md#plan-constructs", "ir-design.md#barrier-rules-for-the-optimizer", "ir-design.md#actions-and-granularity"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

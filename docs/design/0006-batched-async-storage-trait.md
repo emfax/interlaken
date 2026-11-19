@@ -1,12 +1,12 @@
 ---
 id: 0006
 title: Batched Async Storage Trait
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, api]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-18
 spec-sections:
   - mvp-fjall-storage-design.md#storage-trait-api
   - mvp-fjall-storage-design.md#hooks-for-later-layers
@@ -17,7 +17,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

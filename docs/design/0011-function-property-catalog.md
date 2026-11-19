@@ -1,12 +1,12 @@
 ---
 id: 0011
 title: Function Property Catalog
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [ir, functions, security]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-19
 spec-sections: ["ir-design.md#function-properties"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

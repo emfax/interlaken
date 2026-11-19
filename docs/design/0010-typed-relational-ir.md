@@ -1,12 +1,12 @@
 ---
 id: 0010
 title: Typed Relational IR as the Single Middle End
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [ir, types]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-19
 spec-sections: ["ir-design.md#summary", "ir-design.md#position-in-the-stack", "ir-design.md#type-system", "ir-design.md#expressions", "ir-design.md#relational-operators"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

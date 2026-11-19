@@ -1,12 +1,12 @@
 ---
 id: 0025
 title: Runtime Security Enforcement in the Executor
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, security]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-20
-implemented:
+implemented: 2026-11-20
 spec-sections: ["executor-design.md#security-in-the-executor", "executor-design.md#observability", "executor-design.md#testing-strategy"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 

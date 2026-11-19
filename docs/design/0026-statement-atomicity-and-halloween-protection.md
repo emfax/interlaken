@@ -1,12 +1,12 @@
 ---
 id: 0026
 title: Statement Atomicity and Halloween Protection
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, transactions, dml]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-19
-implemented:
+implemented: 2026-11-20
 spec-sections: ["executor-design.md#transactions-and-statements", "executor-design.md#testing-strategy"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 

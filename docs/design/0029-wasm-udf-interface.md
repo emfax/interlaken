@@ -1,11 +1,11 @@
 ---
 id: 0029
 title: WASM UDF Interface
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [executor, wasm, udf]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-19
 implemented:
 spec-sections: ["executor-design.md#wasm-udf-interface-designed-now-built-later"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -36,7 +36,8 @@ WASM extensibility is deferred, but the executor's batch format and operator mod
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Model function properties in the catalog** - I2
+- [x] **Phase 1: Model function properties in the catalog** - I2
+  - *As implemented:* each catalog function carries `FunctionProperties`: volatility, strictness, leakproofness, determinism and cost, written as `:volatility`, `:strict`, `:leakproof`, `:deterministic` and `:cost` in the catalog text ([ADR-0011](0011-function-property-catalog.md)). Built-ins are immutable and deterministic, except `now` (stable) and `random` and `gen_random_uuid` (volatile). Properties come only from the catalog: IR has no way to declare them. Enforcing determinism in read-write transactions belongs to phase 2, with `UdfProject`.
 - [ ] **Phase 2: UdfProject and wasmtime integration** - with the WASM runtime (post-MVP)
 
 ## Consequences

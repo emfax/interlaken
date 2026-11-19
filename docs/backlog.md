@@ -23,21 +23,21 @@ Entry format:
 ### lazyfs-power-loss: Power-loss testing with a fault-injecting filesystem
 - **Origin:** ADR-0009 phase 6, ADR-0005 (crash harness section), M6
 - **Why:** The crash harness kills the process with `SIGKILL`. That loses nothing already handed to the kernel, so it checks crash consistency and recovery, not power loss. A bug in how `Durability::Sync` reaches stable storage (fjall's `SyncAll`, directory fsyncs, journal rotation) would go unnoticed. Run the crash workload on LazyFS (or a similar FUSE filesystem that drops unsynced writes on demand) and check that every commit acknowledged under `Sync` survives while `Buffered` commits may be lost.
-- **When:** Before anything relies on `Sync` durability in production.
+- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before anything relies on `Sync` durability in production.
 - **Size:** About 2–3 days. Most of the time goes on LazyFS setup and CI plumbing; the checks in `tests/crash.rs` can be reused.
 - **Status:** open
 
 ### fsync-stalls-other-hardware: Re-measure commit stalls on other hardware
 - **Origin:** ADR-0005 measurements, M3
 - **Why:** Under `Sync`, rare commit stalls of 0.2–2 s matched raw fsync stalls on the development disk (up to 354 ms with plain `fsync`). We concluded they come from the disk, not the sequencer, but checked on only one machine. Run `benches/commit_throughput.rs` and a raw-fsync probe on the target deployment storage (cloud block volume, NVMe) and record p99/max commit latency in ADR-0005.
-- **When:** Once the target deployment hardware is known, or if latency SLOs are set.
+- **When:** Milestone F4 (`design/mvp-completion.md`), but it doesn't block the milestone: once the target deployment hardware is known, or if latency SLOs are set.
 - **Size:** About half a day.
 - **Status:** open
 
 ### disk-space-boundedness: Assert disk space, not only versions, stays bounded
 - **Origin:** ADR-0009 phase 5, M5/M6
 - **Why:** `space_stays_bounded_under_sustained_updates` shows the number of live versions stays bounded, but not on-disk bytes. GC removes are physical fjall deletes, so space comes back only after compaction drops the tombstones. A long soak should track `StorageMetrics::disk_space_bytes` and assert it levels off under a steady update workload.
-- **When:** Before the first long-running deployment, or sooner if disk growth shows up.
+- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before the first long-running deployment, or sooner if disk growth shows up.
 - **Size:** About 1 day, plus a soak run.
 - **Status:** open
 
@@ -53,7 +53,7 @@ Entry format:
 ### leakproof-admin-only: Enforce that only administrators mark functions leakproof
 - **Origin:** ADR-0011, I2
 - **Why:** Leakproofness decides whether a predicate may move below a security barrier. The in-memory catalog accepts any `FunctionDef`. The rule belongs with catalog DDL and roles, which do not exist yet.
-- **When:** With the storage-backed catalog (ADR-0013 phase 3), or when user-defined functions arrive, whichever is first.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: with the storage-backed catalog (ADR-0013 phase 3), or when user-defined functions arrive, whichever is first.
 - **Size:** About 1 day once roles exist.
 - **Status:** open
 
@@ -71,28 +71,28 @@ Entry format:
 ### closure-maintenance-in-dml: Maintain closure tables in the same transaction as edge changes
 - **Origin:** ADR-0017, I4
 - **Why:** `security::Closure` implements path-counted maintenance, and principal loading reads the closure tables. Nothing yet writes closure rows when an edges table changes. Until something does, closure tables must be maintained by whoever changes memberships.
-- **When:** Executor milestone E4 (DML sinks), which is the natural hook. Required before memberships change through SQL.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: executor milestone E4 (DML sinks), which is the natural hook. Required before memberships change through SQL.
 - **Size:** About 3 days, including tests that interleave edge changes with authorization.
 - **Status:** open
 
 ### column-masking: Per-row column access and masking functions
 - **Origin:** ADR-0018, I4
 - **Why:** A column policy that depends on the row denies the column outright (fail closed). Returning redacted values per row needs masking functions.
-- **When:** When an application needs per-row column visibility.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when an application needs per-row column visibility.
 - **Size:** About 1 week.
 - **Status:** open
 
 ### entity-loading-beyond-principal: Load entities other than the principal for partial evaluation
 - **Origin:** ADR-0017, I4
 - **Why:** `load_principal` loads only the principal's attributes and ancestors. A policy reading another entity through the principal (`principal.manager.dept`) fails, and the policy is then ignored.
-- **When:** When policies need it. Load referenced entities on demand through the transaction.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when policies need it. Load referenced entities on demand through the transaction.
 - **Size:** About 1–2 days.
 - **Status:** open
 
 ### impact-analysis-at-scale: Make impact analysis scale with the data
 - **Origin:** ADR-0030, I5
 - **Why:** Impact analysis authorizes every principal against every governed row and column. That is fine for small and medium data, but quadratic.
-- **When:** When a policy change takes noticeably long to verify.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when a policy change takes noticeably long to verify.
 - **Size:** About 3–5 days, for sampling, pruning by the policies' resource types, and incremental evaluation.
 - **Status:** open
 
@@ -106,7 +106,7 @@ Entry format:
 ### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
 - **Origin:** ADR-0012 (decorrelation), I3
 - **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.
-- **When:** When a workload shows `NOT IN` or `ALL` over large subqueries, or with the executor's join operators (E3).
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when a workload shows `NOT IN` or `ALL` over large subqueries, or with the executor's join operators (E3).
 - **Size:** About 3–5 days, including differential test coverage.
 - **Status:** open
 
@@ -122,35 +122,35 @@ Entry format:
 ### batched-index-lookup: Probe an index with a whole input batch in joins
 - **Origin:** ADR-0023 phase 2, E4
 - **Why:** An index nested loop currently runs through `Apply`, one index scan per outer row. An `IndexLookup` join operator that collects a batch's keys and calls `get_many` (or one ranged scan) per batch would cut storage calls by the batch size.
-- **When:** When joins on indexed keys show up in profiles, or with cost-based planning.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when joins on indexed keys show up in profiles, or with cost-based planning.
 - **Size:** About 3–4 days.
 - **Status:** open
 
 ### batched-row-writes: Write DML rows in batches
 - **Origin:** E4
 - **Why:** DML calls the row layer once per row, and each call makes its own constraint-check reads. A batch API in the row layer could probe all keys of a batch in one `get_many` and buffer its writes together.
-- **When:** When bulk inserts or large updates matter.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when bulk inserts or large updates matter.
 - **Size:** About 3 days, mostly in the storage row layer.
 - **Status:** open
 
 ### incremental-aggregates: Accumulate sum, min, max and bool aggregates incrementally
 - **Origin:** E3 (ADR-0028 phase 1)
 - **Why:** Aggregates other than plain `count` keep every argument tuple until the group finishes, so memory grows with the input. Exact incremental accumulators (integer sums in `i128`, min and max) would make it proportional to the number of groups; float sums need care to stay identical to the interpreter.
-- **When:** When large groups show up. Since E5, kept argument tuples count against the query's memory budget, so large groups fail cleanly rather than exhaust the node.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when large groups show up. Since E5, kept argument tuples count against the query's memory budget, so large groups fail cleanly rather than exhaust the node.
 - **Size:** About 2 days.
 - **Status:** open
 
 ### explain-policy-markers: Mark the subplans security lowering adds
 - **Origin:** ADR-0025 phase 1, E5
 - **Why:** `EXPLAIN` hides policy logic from principals without policy privilege, and it finds the parts to hide by plan shape: the inner side of joins and applies on the path from a policy filter down to its rows. That is safe for the plans lowering produces today, but an optimizer change that reshapes them could expose a policy subplan. A marker that lowering sets on the operators it adds would make the redaction exact.
-- **When:** Before the optimizer gains rules that move joins across policy filters, or before `EXPLAIN` is exposed to untrusted clients.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: before the optimizer gains rules that move joins across policy filters, or before `EXPLAIN` is exposed to untrusted clients.
 - **Size:** About 1–2 days across the IR and the executor.
 - **Status:** open
 
 ### storage-temporal-types: Store dates, timestamps and UUIDs
 - **Origin:** E5
 - **Why:** Storage has types only for the scalars the MVP tables needed (plus, since E5, arrays of them). The IR and executor support `date`, `timestamptz`, `uuid` and `jsonb`, but tables can't hold them, so `stored_type` returns `None` for them.
-- **When:** When the SQL front end needs those column types.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: when the SQL front end needs those column types.
 - **Size:** About 2–3 days (tuple encoding, row format, catalog codes, property tests).
 - **Status:** open
 
@@ -159,7 +159,7 @@ Entry format:
 ### default-memory-budgets: Choose default per-query and per-node memory budgets
 - **Origin:** ADR-0027 open questions, `executor-design.md`
 - **Why:** Queries that exceed the budget fail rather than spill, so the defaults decide which real queries succeed. They need numbers for the container sizes we expect.
-- **When:** Before production deployment, after measuring operators on realistic data. E5 kept the 256 MiB per-query default and configures no node pool unless asked (ADR-0027).
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: before production deployment, after measuring operators on realistic data. E5 kept the 256 MiB per-query default and configures no node pool unless asked (ADR-0027).
 - **Size:** About 1 day of measurement, plus an ADR update.
 - **Status:** open
 

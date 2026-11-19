@@ -82,7 +82,12 @@ A prover implements `Prover::prove(current, proposal)` and records its results w
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Proposal tables, local gates (validation, lint, impact analysis), activation rules, the `Prover` interface, the SMT prover** - I5
+- [x] **Phase 1: Proposal tables, local gates (validation, lint, impact analysis), activation rules, the `Prover` interface, the SMT prover** - I5
+  - *As implemented:* in `interlaken-engine` (`policy` module).
+    - **Tables and verification:** `create_policy_tables` creates the four tables. `submit_proposal` and `verify_locally` run validation, lint and impact analysis, impact running against an `entity_snapshot` read through the transaction.
+    - **Activation:** `activate` enforces the rules above and supersedes the other pending proposals.
+    - **Provers:** they implement `Prover` and record results with `prove_pending`. The cvc5-backed `SmtProver` builds only with the `smt-prover` feature.
+    - *Testing:* `policy_proposals.rs` covers activation in both modes, superseding and waiting for a prover. `smt_prover.rs` covers proofs and counterexamples, and that RLS policies can't be proved; it skips if cvc5 is absent.
 - [ ] **Phase 2: Provers subscribing to replicated proposal tables** - with Raft
 
 ## Consequences

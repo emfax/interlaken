@@ -1,12 +1,12 @@
 ---
 id: 0015
 title: Security Core and Policy Provider Contract
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [security, ir]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-19
 spec-sections: ["ir-design.md#security-core", "ir-design.md#principles", "ir-design.md#security-context", "ir-design.md#provider-contract", "ir-design.md#other-providers", "ir-design.md#hand-built-ir-and-wasm"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 
@@ -99,7 +99,8 @@ The security core lives in `interlaken_ir::security`.
 ## Implementation Phases
 
 - [x] **Phase 1: Security context, provider contract, RLS-style provider** - I4
-- [ ] **Phase 2: Cedar provider** - I5
+- [x] **Phase 2: Cedar provider** - I5
+  - *As implemented:* `interlaken_ir::security::cedar` translates Cedar policies to the security sublanguage against a schema generated from the catalog, and serves them through the same provider contract as the RLS-style provider ([ADR-0020](0020-cedar-policy-provider-and-deployment-gates.md)). The security oracle runs with it (`security_cedar.rs`).
 
 ## Consequences
 

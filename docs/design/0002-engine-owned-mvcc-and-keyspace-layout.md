@@ -1,12 +1,12 @@
 ---
 id: 0002
 title: Engine-Owned MVCC and Keyspace Layout
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, mvcc, fjall]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-18
 spec-sections:
   - mvp-fjall-storage-design.md#keyspace-layout-and-key-encoding
   - mvp-fjall-storage-design.md#fjall-keyspaces
@@ -18,7 +18,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

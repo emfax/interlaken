@@ -1,12 +1,12 @@
 ---
 id: 0020
 title: Cedar Policy Provider and Deployment Gates
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [security, cedar]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-19
 spec-sections: ["ir-design.md#cedar-provider", "ir-design.md#policy-deployment-and-analysis"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

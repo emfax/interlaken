@@ -1,11 +1,11 @@
 ---
 id: 0013
 title: IR Forms, Formats, Resolver and Verifier
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [ir, security]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-19
 implemented:
 spec-sections: ["ir-design.md#names-resolution-and-formats", "ir-design.md#compilation-pipeline"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -140,7 +140,7 @@ flowchart TB
 
 - [x] **Phase 1: Builder, text format, `Catalog` trait and in-memory implementation** - I1
 - [x] **Phase 2: Resolver and verifier against the in-memory catalog** - I2
-- [ ] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - after storage M4
+- [ ] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - F1 ([mvp-completion.md](mvp-completion.md))
 
 ## Consequences
 

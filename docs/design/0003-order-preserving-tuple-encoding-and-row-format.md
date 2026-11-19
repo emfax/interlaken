@@ -1,12 +1,12 @@
 ---
 id: 0003
 title: Order-Preserving Tuple Encoding and Row Format
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, encoding]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-18
 spec-sections:
   - mvp-fjall-storage-design.md#order-preserving-tuple-encoding
   - mvp-fjall-storage-design.md#row-and-value-format
@@ -17,7 +17,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

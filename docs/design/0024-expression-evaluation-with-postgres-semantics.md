@@ -1,12 +1,12 @@
 ---
 id: 0024
 title: Expression Evaluation with Postgres Semantics
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, expressions, postgres-compat]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-19
-implemented:
+implemented: 2026-11-19
 spec-sections: ["executor-design.md#expression-evaluation", "executor-design.md#testing-strategy"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 

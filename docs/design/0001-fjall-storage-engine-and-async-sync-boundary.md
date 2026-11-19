@@ -1,12 +1,12 @@
 ---
 id: 0001
 title: fjall Storage Engine and Async/Sync Boundary
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, fjall, concurrency]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-18
 spec-sections:
   - mvp-fjall-storage-design.md#summary
   - mvp-fjall-storage-design.md#goals-and-non-goals
@@ -18,7 +18,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

@@ -1,12 +1,12 @@
 ---
 id: 0007
 title: Minimal Catalog and Row Layer
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, catalog, indexes]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-18
 spec-sections:
   - mvp-fjall-storage-design.md#minimal-catalog-and-row-layer
 superseded-by:
@@ -16,7 +16,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

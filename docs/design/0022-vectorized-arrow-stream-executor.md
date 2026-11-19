@@ -1,12 +1,12 @@
 ---
 id: 0022
 title: Vectorized Arrow Stream Executor
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, arrow, async]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-19
+implemented: 2026-11-20
 spec-sections: ["executor-design.md#summary", "executor-design.md#data-format-apache-arrow", "executor-design.md#execution-model", "executor-design.md#testing-strategy"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

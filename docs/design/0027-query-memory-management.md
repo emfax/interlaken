@@ -1,12 +1,12 @@
 ---
 id: 0027
 title: Query Memory Management
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, memory]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-20
-implemented:
+implemented: 2026-11-20
 spec-sections: ["executor-design.md#memory-management", "executor-design.md#summary"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 

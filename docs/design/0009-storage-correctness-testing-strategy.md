@@ -1,12 +1,12 @@
 ---
 id: 0009
 title: Storage Correctness Testing Strategy
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, testing]
 feature-flag:
 created: 2026-11-17
-accepted:
-implemented:
+accepted: 2026-11-18
+implemented: 2026-11-19
 spec-sections:
   - mvp-fjall-storage-design.md#testing-strategy
   - mvp-fjall-storage-design.md#milestones
@@ -17,7 +17,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Implemented
 
 ## Summary
 

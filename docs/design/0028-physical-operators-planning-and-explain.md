@@ -1,12 +1,12 @@
 ---
 id: 0028
 title: Physical Operators, Planning and EXPLAIN
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [executor, planner, observability, graphql]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-19
-implemented:
+implemented: 2026-11-20
 spec-sections: ["executor-design.md#physical-operators", "executor-design.md#physical-planning-mvp", "executor-design.md#nest-and-graphql-output", "executor-design.md#observability"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 
