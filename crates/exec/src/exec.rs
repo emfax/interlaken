@@ -3,12 +3,15 @@
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use futures::stream::{BoxStream, TryStreamExt};
+use futures::StreamExt;
+use futures::stream::{self, BoxStream, TryStreamExt};
+use interlaken_ir::Expr;
 use interlaken_ir::catalog::Catalog;
 use interlaken_ir::interp::{Datum, ExecOptions};
 use interlaken_storage::Txn;
 
 use crate::error::ExecError;
+use crate::kernels::CompiledExpr;
 use crate::operators::{filter, limit, project, table_scan};
 use crate::physical::{Op, Physical};
 
@@ -40,25 +43,44 @@ pub fn execute(node: &Physical, ctx: &ExecContext) -> BatchStream {
             pushed,
             batch_rows,
         } => table_scan(node, table.clone(), pushed.clone(), *batch_rows, ctx),
-        Op::Filter { input, predicate } => filter(
-            execute(input, ctx),
-            predicate.clone(),
-            input.layout.clone(),
-            ctx,
-        ),
-        Op::Project { input, exprs } => project(
-            execute(input, ctx),
-            exprs.clone(),
-            input.layout.clone(),
-            node,
-            ctx,
-        ),
+        Op::Filter { input, predicate } => match compile(predicate, input, ctx) {
+            Ok(predicate) => filter(execute(input, ctx), predicate),
+            Err(e) => failed(e),
+        },
+        Op::Project { input, exprs } => {
+            match exprs.iter().map(|e| compile(e, input, ctx)).collect() {
+                Ok(exprs) => project(execute(input, ctx), exprs, node.schema.clone()),
+                Err(e) => failed(e),
+            }
+        }
         Op::Limit {
             input,
             limit: count,
             offset,
         } => limit(execute(input, ctx), count.clone(), offset.clone(), ctx),
     }
+}
+
+/// Compile `expr` against the output columns of `input`.
+fn compile(expr: &Expr, input: &Physical, ctx: &ExecContext) -> Result<CompiledExpr, ExecError> {
+    let columns: Vec<_> = input
+        .layout
+        .iter()
+        .zip(&input.types)
+        .map(|((b, c), ty)| (*b, *c, ty.clone()))
+        .collect();
+    CompiledExpr::compile(
+        expr,
+        &columns,
+        ctx.catalog.as_ref(),
+        &ctx.params,
+        ctx.options,
+    )
+}
+
+/// Return a stream that fails with `error` when first polled.
+fn failed(error: ExecError) -> BatchStream {
+    stream::once(async move { Err(error) }).boxed()
 }
 
 /// Execute `node` and collect every batch.

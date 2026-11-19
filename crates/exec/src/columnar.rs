@@ -19,7 +19,7 @@ use interlaken_ir::{DataType, ScalarType, Type};
 use crate::error::ExecError;
 
 /// The time zone of every `timestamptz` column.
-const UTC: &str = "+00:00";
+pub(crate) const UTC: &str = "+00:00";
 
 /// Return the Arrow type of an IR data type.
 #[must_use]

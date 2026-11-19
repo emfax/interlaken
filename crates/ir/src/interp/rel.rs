@@ -34,7 +34,7 @@ pub(crate) struct Interp<'a> {
     /// Function definitions looked up so far.
     functions: HashMap<FunctionId, Arc<FunctionDef>>,
     /// State of the random number generator.
-    rng: u64,
+    pub(crate) rng: u64,
     /// The table each `Get` binding reads, for finding DML target rows.
     binding_tables: HashMap<BindingId, crate::names::TableId>,
 }

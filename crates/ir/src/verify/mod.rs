@@ -8,5 +8,5 @@
 mod check;
 mod error;
 
-pub use check::{VerifyOptions, column_types, verify};
+pub use check::{VerifyOptions, column_types, expr_type, verify};
 pub use error::VerifyError;

@@ -112,8 +112,8 @@ Entry format:
 
 ### interp-text-formats: Widen the reference interpreter's text input formats
 - **Origin:** ADR-0021 phase 3, I3
-- **Why:** Casts from text accept only ISO dates and timestamps, hex `bytea` and a basic set of booleans, and `jsonb` is stored unvalidated. Postgres accepts more. The executor's kernels will be tested against the interpreter, so the two must agree.
-- **When:** Executor milestone E2 (expression kernels).
+- **Why:** Casts from text accept only ISO dates and timestamps, hex `bytea` and a basic set of booleans, and `jsonb` is stored unvalidated. Postgres accepts more. Since E2 the executor's cast kernels call the interpreter's `cast_value` for text, so widening it widens both at once.
+- **When:** With the SQL front end, when client-supplied text literals arrive in other formats.
 - **Size:** About 2 days.
 - **Status:** open
 

@@ -116,7 +116,12 @@ impl<'a> RowEvaluator<'a> {
     /// Construct an evaluator.
     #[must_use]
     pub fn new(catalog: &'a dyn Catalog, params: Vec<Datum>, options: ExecOptions) -> Self {
-        Self { catalog, params, options, db: Database::new() }
+        Self {
+            catalog,
+            params,
+            options,
+            db: Database::new(),
+        }
     }
 
     /// Evaluate `expr` on `row`, whose values are the columns `layout` names, in order.
@@ -132,6 +137,10 @@ impl<'a> RowEvaluator<'a> {
         row: &[Datum],
     ) -> Result<Datum, EvalError> {
         let frame = super::eval::Frame { layout, row };
-        Interp::new(self.catalog, &mut self.db, &self.params, self.options).eval(expr, &[frame])
+        let mut interp = Interp::new(self.catalog, &mut self.db, &self.params, self.options);
+        let result = interp.eval(expr, &[frame]);
+        // Continue the random sequence on the next row rather than repeating it.
+        self.options.seed = interp.rng;
+        result
     }
 }

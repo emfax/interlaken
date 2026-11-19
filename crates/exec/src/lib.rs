@@ -11,6 +11,7 @@
 mod columnar;
 mod error;
 mod exec;
+mod kernels;
 mod operators;
 mod physical;
 mod rowwise;
@@ -18,4 +19,5 @@ mod rowwise;
 pub use columnar::{arrow_type, build_array, datum_at, field};
 pub use error::ExecError;
 pub use exec::{BatchStream, ExecContext, collect, execute};
+pub use kernels::CompiledExpr;
 pub use physical::{BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};

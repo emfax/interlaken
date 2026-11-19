@@ -20,10 +20,13 @@ mod datum;
 mod error;
 mod eval;
 mod functions;
+mod like;
 mod rel;
 mod run;
 
+pub use cast::cast_value;
 pub use datum::{Datum, RowKey};
 pub use error::EvalError;
+pub use like::LikePattern;
 pub(crate) use run::eval_constant;
 pub use run::{Database, ExecOptions, RowEvaluator, execute};

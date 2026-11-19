@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use super::cast::{cast, int_range_error, int_to, int_value};
 use super::datum::Datum;
 use super::error::EvalError;
+use super::like::LikePattern;
 use super::rel::Interp;
 use crate::expr::{BinaryOp, Expr, UnaryOp};
 use crate::names::{BindingId, ColumnId, ColumnRef, FunctionRef};
@@ -130,48 +131,9 @@ fn float_arith(op: BinaryOp, a: f64, b: f64) -> Result<Datum, EvalError> {
     }
 }
 
-/// Return whether `text` matches the `LIKE` pattern, with `\` escaping the next character.
+/// Return whether `text` matches the `LIKE` pattern, with `\\` escaping the next character.
 pub(crate) fn like(text: &str, pattern: &str) -> Result<bool, EvalError> {
-    /// One element of a compiled pattern.
-    enum Token {
-        /// `%`: any run of characters.
-        Any,
-        /// `_`: one character.
-        One,
-        /// A literal character.
-        Char(char),
-    }
-    let mut tokens = Vec::new();
-    let mut chars = pattern.chars();
-    while let Some(c) = chars.next() {
-        tokens.push(match c {
-            '%' => Token::Any,
-            '_' => Token::One,
-            '\\' => Token::Char(chars.next().ok_or(EvalError::InvalidEscape)?),
-            c => Token::Char(c),
-        });
-    }
-    let text: Vec<char> = text.chars().collect();
-    // matches[j]: the first i text characters match the first j tokens.
-    let mut matches = vec![false; tokens.len() + 1];
-    matches[0] = true;
-    for (j, token) in tokens.iter().enumerate() {
-        if matches!(token, Token::Any) {
-            matches[j + 1] = matches[j];
-        }
-    }
-    for c in &text {
-        let mut next = vec![false; tokens.len() + 1];
-        for (j, token) in tokens.iter().enumerate() {
-            next[j + 1] = match token {
-                Token::Any => next[j] || matches[j + 1],
-                Token::One => matches[j],
-                Token::Char(t) => matches[j] && t == c,
-            };
-        }
-        matches = next;
-    }
-    Ok(matches[tokens.len()])
+    Ok(LikePattern::compile(pattern)?.matches(text))
 }
 
 /// Apply a binary operator to two non-NULL values (or, for `IS [NOT] DISTINCT FROM`, any values).

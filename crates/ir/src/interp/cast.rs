@@ -213,6 +213,31 @@ fn from_text(text: &str, ty: ScalarType) -> Result<Datum, EvalError> {
     })
 }
 
+/// Cast a value to `to` with Postgres semantics. NULL casts to NULL.
+///
+/// The executor's cast kernels call this for conversions they do not
+/// implement natively (text in and out), so both share one definition.
+///
+/// # Errors
+///
+/// Returns [`EvalError::InvalidText`] for text that does not parse,
+/// [`EvalError::OutOfRange`] for values that do not fit the target, and
+/// [`EvalError::Unsupported`] for casts the IR does not allow.
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_ir::interp::{Datum, cast_value};
+/// use interlaken_ir::{DataType, ScalarType};
+///
+/// let int4 = DataType::Scalar(ScalarType::Int4);
+/// assert_eq!(cast_value(Datum::Text(" 42 ".into()), &int4), Ok(Datum::Int4(42)));
+/// assert!(cast_value(Datum::Int8(1 << 40), &int4).is_err());
+/// ```
+pub fn cast_value(d: Datum, to: &DataType) -> Result<Datum, EvalError> {
+    cast(d, to)
+}
+
 /// Cast a value to `to`. NULL casts to NULL.
 pub(crate) fn cast(d: Datum, to: &DataType) -> Result<Datum, EvalError> {
     if d.is_null() {
@@ -247,7 +272,11 @@ pub(crate) fn cast(d: Datum, to: &DataType) -> Result<Datum, EvalError> {
             Datum::Bool(int_value(&d).expect("integer") != 0)
         }
         (Datum::Bool(b), ty @ (S::Int2 | S::Int4 | S::Int8)) => int_to(i128::from(b), ty)?,
-        (Datum::Date(days), S::Timestamptz) => Datum::Timestamptz(i64::from(days) * MICROS_PER_DAY),
+        (Datum::Date(days), S::Timestamptz) => Datum::Timestamptz(
+            i64::from(days)
+                .checked_mul(MICROS_PER_DAY)
+                .ok_or_else(|| EvalError::OutOfRange("timestamp".into()))?,
+        ),
         (Datum::Timestamptz(micros), S::Date) => Datum::Date(
             i32::try_from(micros.div_euclid(MICROS_PER_DAY))
                 .map_err(|_| EvalError::OutOfRange("date".into()))?,

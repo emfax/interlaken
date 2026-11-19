@@ -80,10 +80,7 @@ pub fn verify(plan: &Plan, catalog: &dyn Catalog, options: &VerifyOptions) -> Re
 /// verified plan; for a plan that fails verification the map covers the
 /// part checked before the failure.
 #[must_use]
-pub fn column_types(
-    plan: &Plan,
-    catalog: &dyn Catalog,
-) -> HashMap<(BindingId, ColumnId), Type> {
+pub fn column_types(plan: &Plan, catalog: &dyn Catalog) -> HashMap<(BindingId, ColumnId), Type> {
     let mut verifier = Verifier {
         catalog,
         options: VerifyOptions { trusted: true },
@@ -93,6 +90,41 @@ pub fn column_types(
     };
     let _ = verifier.rel(&plan.root, &[]);
     verifier.types
+}
+
+/// Return the type of `expr` with `columns` in scope, checking it as trusted code.
+///
+/// The executor uses it for the type of every subexpression it evaluates,
+/// for example to build an all-NULL column for a branch no row reaches.
+///
+/// # Errors
+///
+/// Returns a [`VerifyError`] if `expr` does not type-check.
+pub fn expr_type(
+    expr: &Expr,
+    catalog: &dyn Catalog,
+    columns: &[(BindingId, ColumnId, Type)],
+) -> Result<Type> {
+    let mut verifier = Verifier {
+        catalog,
+        options: VerifyOptions { trusted: true },
+        bindings: HashSet::new(),
+        params: HashMap::new(),
+        types: HashMap::new(),
+    };
+    let schema: Schema = columns
+        .iter()
+        .map(|(binding, column, ty)| Col {
+            out: OutputColumn {
+                binding: *binding,
+                column: *column,
+                name: None,
+                ty: ty.clone(),
+            },
+            source: None,
+        })
+        .collect();
+    verifier.expr(expr, &[&schema])
 }
 
 /// An output column plus the table it was read from, if any.

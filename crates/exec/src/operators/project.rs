@@ -1,40 +1,34 @@
-//! `Project`: compute the output columns of each row.
+//! `Project`: compute the output columns of each batch.
 
-use arrow_array::RecordBatch;
+use arrow_array::{RecordBatch, RecordBatchOptions};
+use arrow_schema::SchemaRef;
 use futures::StreamExt;
 use futures::future::ready;
 use futures::stream::TryStreamExt;
-use interlaken_ir::Expr;
 
-use crate::exec::{BatchStream, ExecContext};
-use crate::physical::{Layout, Physical};
-use crate::rowwise::{eval_column, rows_of};
+use crate::exec::BatchStream;
+use crate::kernels::CompiledExpr;
 
-/// Project each batch of `input` through `exprs` into `node`'s schema.
+/// Project each batch of `input` through compiled expressions into `schema`.
 pub(crate) fn project(
     input: BatchStream,
-    exprs: Vec<Expr>,
-    input_layout: Layout,
-    node: &Physical,
-    ctx: &ExecContext,
+    mut exprs: Vec<CompiledExpr>,
+    schema: SchemaRef,
 ) -> BatchStream {
-    let (ctx, schema, types) = (ctx.clone(), node.schema.clone(), node.types.clone());
     input
         .and_then(move |batch| {
-            let result = rows_of(&batch).and_then(|rows| {
-                let columns = exprs
-                    .iter()
-                    .zip(&types)
-                    .map(|(e, ty)| eval_column(&ctx, e, &input_layout, &rows, &ty.data))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let options =
-                    arrow_array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
-                Ok(RecordBatch::try_new_with_options(
-                    schema.clone(),
-                    columns,
-                    &options,
-                )?)
-            });
+            let result = exprs
+                .iter_mut()
+                .map(|e| e.eval(batch.columns(), batch.num_rows()))
+                .collect::<Result<Vec<_>, _>>()
+                .and_then(|columns| {
+                    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+                    Ok(RecordBatch::try_new_with_options(
+                        schema.clone(),
+                        columns,
+                        &options,
+                    )?)
+                });
             ready(result)
         })
         .boxed()
