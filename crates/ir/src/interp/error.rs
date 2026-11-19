@@ -40,8 +40,8 @@ pub enum EvalError {
         /// The column.
         column: String,
     },
-    /// A duplicate primary key (23505).
-    #[error("duplicate key value violates the primary key of \"{0}\"")]
+    /// A duplicate primary key or unique index key (23505).
+    #[error("duplicate key value violates a unique constraint of \"{0}\"")]
     UniqueViolation(String),
     /// A required value is absent: `assert_present` of NULL, used for
     /// policy attributes that are not set (22004).

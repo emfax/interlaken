@@ -1,6 +1,7 @@
 //! Row reads, table and index scans, and the index integrity check.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use bytes::Bytes;
 
@@ -9,9 +10,9 @@ use super::keys::{
 };
 use super::write::Row;
 use crate::catalog::{IndexDef, IndexId, TableDef};
-use crate::encoding::{Datum, decode_row};
+use crate::encoding::{Datum, Direction, SortOrder, decode_row};
 use crate::scan::{DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, RowFilter, ScanRequest};
-use crate::{Result, Txn};
+use crate::{CatalogError, Result, Txn};
 use std::sync::Arc;
 
 /// Return the row whose primary key is `pk`, or `None`.
@@ -61,6 +62,20 @@ pub struct RowScan {
     pub limit_rows: usize,
     /// Resume key from the previous batch of the same scan.
     pub resume: Option<Key>,
+    /// Bounds on the key column right after `prefix`; `None` for no bounds.
+    pub range: Option<ValueRange>,
+}
+
+/// Bounds on one key column's values, in value order.
+///
+/// Rows whose value is NULL are outside every range bounded on at least
+/// one side, as comparisons with NULL are never true.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueRange {
+    /// The lower bound.
+    pub lower: Bound<Datum>,
+    /// The upper bound.
+    pub upper: Bound<Datum>,
 }
 
 impl RowScan {
@@ -78,6 +93,7 @@ impl RowScan {
             reverse: false,
             limit_rows: DEFAULT_SCAN_LIMIT_ROWS,
             resume: None,
+            range: None,
         }
     }
 }
@@ -138,7 +154,24 @@ async fn scan_with(
     filter: Option<Arc<dyn RowFilter>>,
 ) -> Result<RowBatch> {
     let prefix = pk_key(table, &scan.prefix)?;
-    let mut request = request(&prefix, scan);
+    if scan.range.is_some() && scan.prefix.len() >= table.primary_key().len() {
+        return Err(CatalogError::InvalidDefinition(
+            "a range needs a primary key column after the prefix".into(),
+        )
+        .into());
+    }
+    let range = key_range(
+        &prefix,
+        |v| {
+            pk_key(
+                table,
+                &[scan.prefix.as_slice(), std::slice::from_ref(v)].concat(),
+            )
+        },
+        SortOrder::ASC,
+        scan.range.as_ref(),
+    )?;
+    let mut request = request(range, scan);
     request.filter = filter;
     let batch = txn.scan(request).await?;
     let types = table.types();
@@ -168,7 +201,30 @@ pub async fn scan_index(
     scan: &RowScan,
 ) -> Result<IndexBatch> {
     let prefix = index_values_prefix(table, index, &scan.prefix)?;
-    let batch = txn.scan(request(&prefix, scan)).await?;
+    let order = match (&scan.range, index.columns().get(scan.prefix.len())) {
+        (None, _) => SortOrder::ASC,
+        (Some(_), Some(column)) => column.order,
+        (Some(_), None) => {
+            return Err(CatalogError::InvalidDefinition(format!(
+                "a range on index \"{}\" needs a column after the prefix",
+                index.name()
+            ))
+            .into());
+        }
+    };
+    let range = key_range(
+        &prefix,
+        |v| {
+            index_values_prefix(
+                table,
+                index,
+                &[scan.prefix.as_slice(), std::slice::from_ref(v)].concat(),
+            )
+        },
+        order,
+        scan.range.as_ref(),
+    )?;
+    let batch = txn.scan(request(range, scan)).await?;
     let primary_keys = batch
         .rows
         .iter()
@@ -180,9 +236,98 @@ pub async fn scan_index(
     })
 }
 
-/// Build the storage request for one scan batch under `prefix`.
-fn request(prefix: &[u8], scan: &RowScan) -> ScanRequest {
-    let mut request = ScanRequest::new(KeyRange::prefix(prefix));
+/// Return the key range of the entries under `prefix` whose next column lies in `range`.
+///
+/// `encode` returns the key prefix of the entries with a given next value,
+/// and `order` is that column's order in the key. Each value's entries
+/// form one contiguous block of keys starting with its encoding, so value
+/// bounds become key bounds on those blocks (swapped for descending
+/// columns), and the block of NULLs is cut off when either side is bounded.
+fn key_range(
+    prefix: &[u8],
+    encode: impl Fn(&Datum) -> Result<Key>,
+    order: SortOrder,
+    range: Option<&ValueRange>,
+) -> Result<KeyRange> {
+    let base = KeyRange::prefix(prefix);
+    let Some(range) = range else { return Ok(base) };
+    if matches!(
+        (&range.lower, &range.upper),
+        (Bound::Unbounded, Bound::Unbounded)
+    ) {
+        return Ok(base);
+    }
+    let Bound::Included(mut start) = base.start.clone() else {
+        unreachable!("prefix ranges start inclusively")
+    };
+    let mut end = base.end.clone();
+    let mut empty = false;
+    // Every bound produced is an inclusive start or an exclusive end.
+    let raise_start = |start: &mut Key, empty: &mut bool, after: Bound<Key>| match after {
+        Bound::Included(k) | Bound::Excluded(k) => {
+            if k > *start {
+                *start = k;
+            }
+        }
+        Bound::Unbounded => *empty = true,
+    };
+    let lower_end = |end: &mut Bound<Key>, before: Key| {
+        if !matches!(end, Bound::Excluded(e) if *e <= before) {
+            *end = Bound::Excluded(before);
+        }
+    };
+    // The keys of a value's entries: [block start, block end).
+    let block = |v: &Datum| -> Result<(Key, Bound<Key>)> {
+        let key = encode(v)?;
+        let end = KeyRange::prefix(&key).end;
+        Ok((key, end))
+    };
+    let end_key = |b: Bound<Key>| match b {
+        Bound::Excluded(k) | Bound::Included(k) => Some(k),
+        Bound::Unbounded => None,
+    };
+    let descending = order.direction == Direction::Desc;
+    let mut some_value = None;
+    for (bound, is_lower) in [(&range.lower, true), (&range.upper, false)] {
+        let (value, inclusive) = match bound {
+            Bound::Included(v) => (v, true),
+            Bound::Excluded(v) => (v, false),
+            Bound::Unbounded => continue,
+        };
+        let (block_start, block_end) = block(value)?;
+        some_value = Some(block_start.clone());
+        // In key order, is this bound a start (keys after it) or an end?
+        let is_start = is_lower != descending;
+        match (is_start, inclusive) {
+            (true, true) => raise_start(&mut start, &mut empty, Bound::Included(block_start)),
+            (true, false) => raise_start(&mut start, &mut empty, block_end),
+            (false, true) => {
+                if let Some(k) = end_key(block_end) {
+                    lower_end(&mut end, k);
+                }
+            }
+            (false, false) => lower_end(&mut end, block_start),
+        }
+    }
+    // Cut off the NULL block, which lies at one end of the prefix range.
+    let (null_start, null_end) = block(&Datum::Null)?;
+    if some_value.is_some_and(|v| null_start < v) {
+        raise_start(&mut start, &mut empty, null_end);
+    } else {
+        lower_end(&mut end, null_start);
+    }
+    if empty || matches!(&end, Bound::Excluded(e) if *e <= start) {
+        return Ok(KeyRange::new(
+            Bound::Included(start.clone()),
+            Bound::Excluded(start),
+        ));
+    }
+    Ok(KeyRange::new(Bound::Included(start), end))
+}
+
+/// Build the storage request for one scan batch over `range`.
+fn request(range: KeyRange, scan: &RowScan) -> ScanRequest {
+    let mut request = ScanRequest::new(range);
     request.reverse = scan.reverse;
     request.limit_rows = scan.limit_rows;
     request.resume.clone_from(&scan.resume);

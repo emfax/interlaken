@@ -14,6 +14,50 @@ pub struct ColumnDef {
     pub ty: Type,
 }
 
+/// One column of an index key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IndexColumn {
+    /// The column.
+    pub column: ColumnId,
+    /// `true` for descending order.
+    pub descending: bool,
+    /// `true` if NULLs sort before other values.
+    pub nulls_first: bool,
+}
+
+impl IndexColumn {
+    /// Construct an ascending key column, NULLs last (the Postgres default).
+    #[must_use]
+    pub const fn asc(column: ColumnId) -> Self {
+        Self {
+            column,
+            descending: false,
+            nulls_first: false,
+        }
+    }
+
+    /// Construct a descending key column, NULLs first (the Postgres default).
+    #[must_use]
+    pub const fn desc(column: ColumnId) -> Self {
+        Self {
+            column,
+            descending: true,
+            nulls_first: true,
+        }
+    }
+}
+
+/// A secondary index, which the physical planner may use as an access path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct IndexDef {
+    /// The index name, which the storage catalog knows it by.
+    pub name: Ident,
+    /// The key columns, in key order.
+    pub columns: Vec<IndexColumn>,
+    /// Whether the index is unique: at most one row per key with no NULLs.
+    pub unique: bool,
+}
+
 /// A table's definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableDef {
@@ -27,6 +71,8 @@ pub struct TableDef {
     pub primary_key: Vec<ColumnId>,
     /// Whether this is a system table, which clients may not write.
     pub system: bool,
+    /// The secondary indexes.
+    pub indexes: Vec<IndexDef>,
 }
 
 impl TableDef {
@@ -52,6 +98,7 @@ impl TableDef {
             columns: Vec::new(),
             primary_key: Vec::new(),
             system: false,
+            indexes: Vec::new(),
         }
     }
 
@@ -93,6 +140,36 @@ impl TableDef {
                     .id
             })
             .collect();
+        self
+    }
+
+    /// Add a secondary index on ascending columns, by name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a name is not a column of the table.
+    #[must_use]
+    pub fn index<'a>(
+        mut self,
+        name: impl Into<Ident>,
+        columns: impl IntoIterator<Item = &'a str>,
+        unique: bool,
+    ) -> Self {
+        let columns = columns
+            .into_iter()
+            .map(|c| {
+                IndexColumn::asc(
+                    self.column_by_name(c)
+                        .unwrap_or_else(|| panic!("no column {c} in {}", self.name))
+                        .id,
+                )
+            })
+            .collect();
+        self.indexes.push(IndexDef {
+            name: name.into(),
+            columns,
+            unique,
+        });
         self
     }
 

@@ -13,7 +13,8 @@ use interlaken_storage::Txn;
 use crate::error::ExecError;
 use crate::kernels::CompiledExpr;
 use crate::operators::{
-    aggregate, apply, distinct, filter, join, limit, project, set_op, sort, table_scan, values,
+    DmlKind, aggregate, apply, distinct, dml, filter, join, limit, project, set_op, sort,
+    table_scan, values,
 };
 use crate::physical::{Op, Physical};
 
@@ -86,9 +87,17 @@ pub fn execute(node: &Physical, ctx: &ExecContext) -> BatchStream {
     match &node.op {
         Op::TableScan {
             table,
+            access,
             pushed,
             batch_rows,
-        } => table_scan(node, table.clone(), pushed.clone(), *batch_rows, ctx),
+        } => table_scan(
+            node,
+            table.clone(),
+            access.clone(),
+            pushed.clone(),
+            *batch_rows,
+            ctx,
+        ),
         Op::Filter { input, predicate } => match compile(predicate, input, ctx) {
             Ok(predicate) => filter(execute(input, ctx), predicate),
             Err(e) => failed(e),
@@ -126,6 +135,17 @@ pub fn execute(node: &Physical, ctx: &ExecContext) -> BatchStream {
             right,
         } => set_op(node, *op, *all, left, right, ctx),
         Op::Values { rows } => values(node, rows, ctx),
+        Op::Insert { dml: d, columns } => {
+            dml(node, d, DmlKind::Insert(columns), ctx).unwrap_or_else(failed)
+        }
+        Op::Update {
+            dml: d,
+            key,
+            assignments,
+        } => dml(node, d, DmlKind::Update(key, assignments), ctx).unwrap_or_else(failed),
+        Op::Delete { dml: d, key } => {
+            dml(node, d, DmlKind::Delete(key), ctx).unwrap_or_else(failed)
+        }
     }
 }
 

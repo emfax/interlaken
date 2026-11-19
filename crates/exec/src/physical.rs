@@ -19,10 +19,11 @@ use interlaken_ir::catalog::{Catalog, FunctionDef, TableDef};
 use interlaken_ir::optimize::is_leakproof;
 use interlaken_ir::verify::{column_types, expr_type};
 use interlaken_ir::{
-    ApplyKind, BinaryOp, BindingId, ColumnId, ColumnRef, Expr, FunctionRef, JoinKind, Plan, Rel,
-    SetOpKind, SortKey, TableRef, Type,
+    ApplyKind, BinaryOp, BindingId, ColumnId, ColumnRef, DmlTarget, Expr, FunctionRef, JoinKind,
+    NamedExpr, Plan, Rel, SetOpKind, SortKey, TableRef, TargetColumn, Type,
 };
 
+use crate::access::{Access, choose};
 use crate::columnar::field;
 use crate::error::ExecError;
 
@@ -62,6 +63,8 @@ pub enum Op {
     TableScan {
         /// The table.
         table: Arc<TableDef>,
+        /// How the rows are reached.
+        access: Access,
         /// Leakproof conjuncts evaluated on the storage thread (ADR-0023).
         pushed: Option<Expr>,
         /// Rows per storage call.
@@ -151,6 +154,42 @@ pub enum Op {
         /// The rows' expressions.
         rows: Vec<Vec<Expr>>,
     },
+    /// Write a row per input row (ADR-0026).
+    Insert {
+        /// What is written and returned.
+        dml: Dml,
+        /// The table column each input column fills; the rest are NULL.
+        columns: Vec<usize>,
+    },
+    /// Rewrite each target row the input identifies, once.
+    Update {
+        /// What is written and returned.
+        dml: Dml,
+        /// The input position of each table column of the target row.
+        key: Vec<usize>,
+        /// (table column, new value over the input) pairs.
+        assignments: Vec<(usize, Expr)>,
+    },
+    /// Delete each target row the input identifies, once.
+    Delete {
+        /// What is written and returned.
+        dml: Dml,
+        /// The input position of each table column of the target row.
+        key: Vec<usize>,
+    },
+}
+
+/// What a DML operator writes and returns.
+#[derive(Clone, Debug)]
+pub struct Dml {
+    /// The target table.
+    pub table: Arc<TableDef>,
+    /// The input.
+    pub input: Box<Physical>,
+    /// The `RETURNING` expressions, over the target row.
+    pub returning: Vec<Expr>,
+    /// The target row's columns as `RETURNING` sees them.
+    pub target: Layout,
 }
 
 /// Rows per storage call and per output batch.
@@ -180,6 +219,8 @@ struct Planner<'a> {
     plan: &'a Plan,
     /// The type of every column the plan introduces.
     types: HashMap<(BindingId, ColumnId), Type>,
+    /// The same, as a list, for typing expressions over any columns.
+    columns: Vec<(BindingId, ColumnId, Type)>,
     /// Settings.
     options: PlanOptions,
 }
@@ -247,6 +288,55 @@ fn reads_only(expr: &Expr, allowed: &HashSet<BindingId>) -> bool {
     let mut read = HashSet::new();
     bindings_read(expr, &mut read);
     read.is_subset(allowed)
+}
+
+/// Return whether `expr` reads any column with a binding in `bindings`.
+fn reads_any(expr: &Expr, bindings: &HashSet<BindingId>) -> bool {
+    let mut read = HashSet::new();
+    bindings_read(expr, &mut read);
+    !read.is_disjoint(bindings)
+}
+
+/// Collect the bindings of every scan of `table` in `rel`.
+fn scans_of(rel: &Rel, table: &TableRef, out: &mut Vec<BindingId>) {
+    if let Rel::Get {
+        table: t,
+        binding: Some(b),
+        ..
+    } = rel
+        && t == table
+    {
+        out.push(*b);
+    }
+    for input in rel.inputs() {
+        scans_of(input, table, out);
+    }
+}
+
+/// Return where the target row's columns are in an update's or delete's input.
+///
+/// The input reads the target table; as in the interpreter, the target row
+/// is the first scan of it whose columns are all in the input.
+fn target_row(dml: &Dml, input: &Rel) -> Result<Vec<usize>, ExecError> {
+    let mut scans = Vec::new();
+    scans_of(input, &TableRef::Id(dml.table.id), &mut scans);
+    let layout = &dml.input.layout;
+    let mut bindings: Vec<BindingId> = Vec::new();
+    for (b, _) in layout {
+        if scans.contains(b) && !bindings.contains(b) {
+            bindings.push(*b);
+        }
+    }
+    bindings
+        .into_iter()
+        .find_map(|b| {
+            dml.table
+                .columns
+                .iter()
+                .map(|c| layout.iter().position(|&(lb, lc)| lb == b && lc == c.id))
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| ExecError::Unsupported("DML input does not carry the target row".into()))
 }
 
 /// Return the distinct bindings of a layout.
@@ -323,26 +413,32 @@ impl Planner<'_> {
         &self,
         table: &TableRef,
         binding: Option<BindingId>,
+        access: Access,
         pushed: Option<Expr>,
     ) -> Result<Physical, ExecError> {
-        let TableRef::Id(id) = table else {
-            return Err(ExecError::Unsupported("unresolved table".into()));
-        };
-        let def = self
-            .catalog
-            .table_by_id(*id)
-            .ok_or_else(|| ExecError::Catalog(format!("unknown table {}", id.get())))?;
+        let def = self.table(table)?;
         let binding =
             binding.ok_or_else(|| ExecError::Unsupported("get without a binding".into()))?;
         let layout = def.columns.iter().map(|c| (binding, c.id)).collect();
         self.node(
             Op::TableScan {
                 table: def,
+                access,
                 pushed,
                 batch_rows: self.options.batch_rows.max(1),
             },
             layout,
         )
+    }
+
+    /// Look up a resolved table.
+    fn table(&self, table: &TableRef) -> Result<Arc<TableDef>, ExecError> {
+        let TableRef::Id(id) = table else {
+            return Err(ExecError::Unsupported("unresolved table".into()));
+        };
+        self.catalog
+            .table_by_id(*id)
+            .ok_or_else(|| ExecError::Catalog(format!("unknown table {}", id.get())))
     }
 
     /// Build a filter, pushing what it can into a scan directly below.
@@ -353,12 +449,31 @@ impl Planner<'_> {
             ..
         } = input
         {
-            // Leakproof conjuncts on the scan's own columns run in storage; the rest above it.
+            // The best key bounds the scan; the filter is still applied to what it returns.
             let own = HashSet::from([*binding]);
-            let (pushed, kept): (Vec<Expr>, Vec<Expr>) = conjuncts(predicate)
-                .into_iter()
-                .partition(|c| reads_only(c, &own) && is_leakproof(c, self.plan, self.catalog));
-            let scan = self.scan(table, Some(*binding), conjoin(pushed))?;
+            let conjuncts = conjuncts(predicate);
+            let def = self.table(table)?;
+            let access = choose(
+                &def,
+                *binding,
+                &conjuncts,
+                |e| !reads_any(e, &own) && is_leakproof(e, self.plan, self.catalog),
+                |e| {
+                    expr_type(e, self.catalog, &self.columns)
+                        .ok()
+                        .map(|t| t.data)
+                },
+            );
+            // Leakproof conjuncts on the scan's own columns run in storage, except
+            // under an index scan, which cannot filter there; the rest run above it.
+            let (pushed, kept): (Vec<Expr>, Vec<Expr>) = if matches!(access, Access::Index { .. }) {
+                (Vec::new(), conjuncts)
+            } else {
+                conjuncts
+                    .into_iter()
+                    .partition(|c| reads_only(c, &own) && is_leakproof(c, self.plan, self.catalog))
+            };
+            let scan = self.scan(table, Some(*binding), access, conjoin(pushed))?;
             return match conjoin(kept) {
                 None => Ok(scan),
                 Some(predicate) => {
@@ -444,10 +559,41 @@ impl Planner<'_> {
         self.node(op, layout)
     }
 
+    /// Build the parts every DML operator shares.
+    fn dml(
+        &self,
+        target: &DmlTarget,
+        input: &Rel,
+        returning: &[NamedExpr],
+        table: Arc<TableDef>,
+    ) -> Result<Dml, ExecError> {
+        if table.system {
+            return Err(ExecError::Unsupported(format!(
+                "writing system table {}",
+                table.name
+            )));
+        }
+        let target_layout = match target.binding {
+            Some(binding) => table.columns.iter().map(|c| (binding, c.id)).collect(),
+            None if returning.is_empty() => Vec::new(),
+            None => {
+                return Err(ExecError::Unsupported(
+                    "RETURNING without a target binding".into(),
+                ));
+            }
+        };
+        Ok(Dml {
+            input: Box::new(self.build(input)?),
+            returning: returning.iter().map(|e| e.expr.clone()).collect(),
+            target: target_layout,
+            table,
+        })
+    }
+
     /// Build the physical form of `rel`.
     fn build(&self, rel: &Rel) -> Result<Physical, ExecError> {
         match rel {
-            Rel::Get { table, binding, .. } => self.scan(table, *binding, None),
+            Rel::Get { table, binding, .. } => self.scan(table, *binding, Access::Full, None),
             Rel::Filter { input, predicate } => self.filter(input, predicate),
             Rel::Project {
                 input,
@@ -597,6 +743,79 @@ impl Planner<'_> {
                     layout,
                 )
             }
+            Rel::Insert {
+                target,
+                columns,
+                input,
+                returning,
+                binding,
+            } => {
+                let table = self.table(&target.table)?;
+                let positions = columns
+                    .iter()
+                    .map(|c| match c {
+                        TargetColumn::Id(id) => usize::try_from(id.get())
+                            .map_err(|_| ExecError::Catalog("column id".into())),
+                        TargetColumn::Named(_) => {
+                            Err(ExecError::Unsupported("insert column by name".into()))
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                let dml = self.dml(target, input, returning, table)?;
+                self.node(
+                    Op::Insert {
+                        dml,
+                        columns: positions,
+                    },
+                    columns_of(*binding, returning.len())?,
+                )
+            }
+            Rel::Update {
+                target,
+                input,
+                assignments,
+                returning,
+                binding,
+            } => {
+                let table = self.table(&target.table)?;
+                let assignments = assignments
+                    .iter()
+                    .map(|a| match &a.column {
+                        TargetColumn::Id(id) => Ok((
+                            usize::try_from(id.get())
+                                .map_err(|_| ExecError::Catalog("column id".into()))?,
+                            a.value.clone(),
+                        )),
+                        TargetColumn::Named(_) => {
+                            Err(ExecError::Unsupported("update column by name".into()))
+                        }
+                    })
+                    .collect::<Result<_, ExecError>>()?;
+                let dml = self.dml(target, input, returning, table)?;
+                let key = target_row(&dml, input)?;
+                self.node(
+                    Op::Update {
+                        dml,
+                        key,
+                        assignments,
+                    },
+                    columns_of(*binding, returning.len())?,
+                )
+            }
+            Rel::Delete {
+                target,
+                input,
+                returning,
+                binding,
+            } => {
+                let table = self.table(&target.table)?;
+                let dml = self.dml(target, input, returning, table)?;
+                let key = target_row(&dml, input)?;
+                self.node(
+                    Op::Delete { dml, key },
+                    columns_of(*binding, returning.len())?,
+                )
+            }
             Rel::Values {
                 columns,
                 rows,
@@ -637,10 +856,16 @@ pub fn plan_with(
     catalog: &dyn Catalog,
     options: PlanOptions,
 ) -> Result<Physical, ExecError> {
+    let types = column_types(plan, catalog);
+    let columns = types
+        .iter()
+        .map(|((b, c), t)| (*b, *c, t.clone()))
+        .collect();
     let planner = Planner {
         catalog,
         plan,
-        types: column_types(plan, catalog),
+        types,
+        columns,
         options,
     };
     planner.build(&plan.root)

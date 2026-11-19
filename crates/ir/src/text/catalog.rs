@@ -5,7 +5,8 @@
 //!   (builtins)                                   ; install the built-in functions
 //!   (table NAME :id N [:system true]
 //!     (column NAME TYPE)...
-//!     [(primary-key NAME...)])
+//!     [(primary-key NAME...)]
+//!     (index NAME (COLUMN | (asc COLUMN) | (desc COLUMN) [:nulls first|last])... [:unique true])...)
 //!   (function NAME :id N [:aggregate true] (args DATATYPE...) (returns TYPE)
 //!     [:volatility immutable|stable|volatile] [:strict B] [:leakproof B]
 //!     [:deterministic B] [:cost F] [:selectivity F])
@@ -21,7 +22,7 @@ use super::read::{Form, boolean, ident, list_of, qualified, uint};
 use super::sexp::{Sexp, SexpKind, read_one};
 use crate::catalog::{
     AttributeDef, EntityDef, FunctionDef, FunctionKind, FunctionProperties, InMemoryCatalog,
-    MembershipDef, TableDef, Volatility, install_builtins,
+    IndexColumn, IndexDef, MembershipDef, TableDef, Volatility, install_builtins,
 };
 use crate::names::{ColumnId, FunctionId, Ident, SchemaVersion, TableId};
 
@@ -75,6 +76,7 @@ fn table(sexp: &Sexp) -> Result<TableDef> {
                 part.rest();
                 part.finish()?;
             }
+            "index" => def.indexes.push(index(&def, item, part)?),
             other => {
                 return Err(ParseError::at(
                     item.pos,
@@ -85,6 +87,63 @@ fn table(sexp: &Sexp) -> Result<TableDef> {
     }
     form.finish()?;
     Ok(def)
+}
+
+/// Read the rest of `(index NAME COLUMN... [:unique B])` on `def`.
+fn index(def: &TableDef, item: &Sexp, mut part: Form<'_>) -> Result<IndexDef> {
+    let name = ident(part.next("the index name")?)?;
+    let unique = part.keyword("unique").map(boolean).transpose()? == Some(true);
+    let mut columns = Vec::new();
+    for column in part.rest() {
+        let (name, mut key) = match column.as_word() {
+            Some(_) => (column, IndexColumn::asc(ColumnId::new(0))),
+            None => {
+                let mut c = Form::open(column)?;
+                let descending = match c.head {
+                    "asc" => false,
+                    "desc" => true,
+                    other => {
+                        return Err(ParseError::at(
+                            column.pos,
+                            format!("expected asc or desc, found '{other}'"),
+                        ));
+                    }
+                };
+                let name = c.next("the column name")?;
+                let mut key = if descending {
+                    IndexColumn::desc(ColumnId::new(0))
+                } else {
+                    IndexColumn::asc(ColumnId::new(0))
+                };
+                if let Some(nulls) = c.keyword("nulls") {
+                    key.nulls_first = match nulls.as_word() {
+                        Some("first") => true,
+                        Some("last") => false,
+                        _ => return Err(ParseError::at(nulls.pos, "expected first or last")),
+                    };
+                }
+                c.finish()?;
+                (name, key)
+            }
+        };
+        let column_name = ident(name)?;
+        key.column = def
+            .column_by_name(column_name.as_str())
+            .ok_or_else(|| {
+                ParseError::at(
+                    item.pos,
+                    format!("index column {column_name} does not exist"),
+                )
+            })?
+            .id;
+        columns.push(key);
+    }
+    part.finish()?;
+    Ok(IndexDef {
+        name,
+        columns,
+        unique,
+    })
 }
 
 /// Read `(function ...)`.

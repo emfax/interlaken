@@ -72,7 +72,8 @@ The rule-based optimizer ([ADR-0014](0014-rule-based-optimizer.md)) emits logica
   - `Sort` uses the interpreter's `compare_sort_keys`, stably; a limit directly above makes it a top-N that compacts to the rows the limit can return. `Distinct`, `UNION`, `INTERSECT` and `EXCEPT` hash rows by value. `Values` may read an enclosing row.
   - Arrow fields are all nullable, since outer joins and applies pad NOT NULL columns with NULLs.
   - *Testing:* a differential test runs 3,000 random plans over three stored tables, optimized or not, against real storage and the interpreter, with every join and apply kind, aggregates with `DISTINCT` and `FILTER`, set operations, `VALUES`, subqueries and top-N; rows compare as bags, and in order under a limit over a total sort. Planted bugs in outer-join padding (left and right), semi joins, NULL key matching, empty aggregation, aggregate filters, top-N offsets, `EXCEPT ALL`, left-apply padding and `DISTINCT` are each caught.
-- [ ] **Phase 2: Index scans and lookups** - E4
+- [x] **Phase 2: Index scans and lookups** - E4
+  - *As implemented:* see [ADR-0023](0023-leaf-operators-and-storage-pushdown.md) phase 2. The heuristic prefers a key whose every column is equal and unique (one row), then the longest equality prefix, then a range, and the primary key on ties. The E3 differential test now runs over indexed tables and generates key ranges, so about 15% of its plans scan by an index and 15% by a primary key range.
 - [ ] **Phase 3: Nest, Unnest, EXPLAIN ANALYZE** - E5
 
 ## Consequences

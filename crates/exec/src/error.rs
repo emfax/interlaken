@@ -21,4 +21,33 @@ pub enum ExecError {
     /// The IR catalog and the stored tables disagree.
     #[error("catalog mismatch: {0}")]
     Catalog(String),
+    /// An earlier statement failed, so the transaction accepts nothing but a
+    /// rollback (to a savepoint or entirely) (SQLSTATE `25P02`).
+    #[error("current transaction is aborted, commands ignored until end of transaction block")]
+    TransactionAborted,
+}
+
+impl ExecError {
+    /// Return the Postgres SQLSTATE code for this error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interlaken_exec::ExecError;
+    ///
+    /// assert_eq!(ExecError::TransactionAborted.sqlstate(), "25P02");
+    /// ```
+    #[must_use]
+    pub fn sqlstate(&self) -> &'static str {
+        use interlaken_storage::{ConstraintViolation, Error};
+        match self {
+            Self::Eval(e) => e.sqlstate(),
+            Self::Storage(Error::SerializationFailure(_)) => "40001",
+            Self::Storage(Error::Constraint(ConstraintViolation::NotNull { .. })) => "23502",
+            Self::Storage(Error::Constraint(_)) => "23505",
+            Self::Storage(_) | Self::Arrow(_) | Self::Catalog(_) => "XX000",
+            Self::Unsupported(_) => "0A000",
+            Self::TransactionAborted => "25P02",
+        }
+    }
 }

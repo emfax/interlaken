@@ -1,11 +1,11 @@
 ---
 id: 0026
 title: Statement Atomicity and Halloween Protection
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [executor, transactions, dml]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-19
 implemented:
 spec-sections: ["executor-design.md#transactions-and-statements", "executor-design.md#testing-strategy"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -38,7 +38,10 @@ The storage layer provides a write buffer merged into reads, savepoints, `next_s
 
 ## Implementation Phases
 
-- [ ] **Phase 1: DML sinks, statement atomicity, Halloween protection** - E4
+- [x] **Phase 1: DML sinks, statement atomicity, Halloween protection** - E4
+  - *As implemented:* `interlaken_exec::Transaction` runs statements: `next_statement()`, an implicit savepoint, rollback to it on failure, and an aborted state in which statements and new savepoints fail with `25P02` until `rollback_to` a savepoint; committing an aborted transaction rolls it back. The statement-sequence tag already existed in the storage write buffer, so DML streams its input without materializing it: reads hide the statement's own writes, while constraint checks see them. `Insert`, `Update` and `Delete` write row by row through the row layer (indexes maintained there); an update or delete changes each target row once, for the first input row naming it, and computes new values only for those rows. `ExecError::sqlstate` maps errors, including `40001` for serialization failures, which are never retried.
+  - *Uniqueness timing:* storage checks primary key and unique index constraints after each row, as Postgres does for non-deferrable constraints, while the reference interpreter checks them at the end of the statement (it now also enforces unique indexes). They differ only for statements that swap or shift unique values, which the differential test avoids.
+  - *Testing:* a differential test runs random statement sequences (inserts, insert-selects, updates including join-driven ones, deletes with subqueries, `RETURNING`, queries) over indexed tables in the interpreter and the statement runner, comparing results, failures and full table contents after each statement. Halloween tests move every primary key past the table's end and move rows forward in the index driving an update; each row changes once. Planted bugs in update deduplication, statement rollback, insert column mapping, delete `RETURNING` and key bounds are caught.
 
 ## Consequences
 

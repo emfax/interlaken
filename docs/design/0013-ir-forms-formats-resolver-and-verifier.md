@@ -82,6 +82,7 @@ pub trait Catalog: Send + Sync {
   - Lookups return shared `Arc` definitions.
   - `functions_by_name` returns every overload, because the resolver needs all the candidates to apply implicit casts. `function_by_name` is a provided method that matches argument types exactly.
   - `TableDef` carries columns (with nullable types) and the primary key; indexes join when the optimizer needs them.
+  - *As implemented (E4):* `TableDef::indexes` lists secondary indexes (name, key columns with direction and NULL placement, unique flag), written `(index NAME COLUMN... [:unique true])` in the catalog text form, with `(asc C)` / `(desc C)` and `:nulls first|last`. The executor's planner chooses access paths from them; the interpreter enforces unique indexes.
   - `InMemoryCatalog` is built from Rust and rejects duplicate IDs and names, and nullable primary key columns.
   - Entity lookups arrive with the security core in I4.
   - A text form for catalogs arrives in I2, with the resolver's golden tests.

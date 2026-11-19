@@ -117,6 +117,29 @@ Entry format:
 - **Size:** About 2 days.
 - **Status:** open
 
+## Executor
+
+### batched-index-lookup: Probe an index with a whole input batch in joins
+- **Origin:** ADR-0023 phase 2, E4
+- **Why:** An index nested loop currently runs through `Apply`, one index scan per outer row. An `IndexLookup` join operator that collects a batch's keys and calls `get_many` (or one ranged scan) per batch would cut storage calls by the batch size.
+- **When:** When joins on indexed keys show up in profiles, or with cost-based planning.
+- **Size:** About 3–4 days.
+- **Status:** open
+
+### batched-row-writes: Write DML rows in batches
+- **Origin:** E4
+- **Why:** DML calls the row layer once per row, and each call makes its own constraint-check reads. A batch API in the row layer could probe all keys of a batch in one `get_many` and buffer its writes together.
+- **When:** When bulk inserts or large updates matter.
+- **Size:** About 3 days, mostly in the storage row layer.
+- **Status:** open
+
+### incremental-aggregates: Accumulate sum, min, max and bool aggregates incrementally
+- **Origin:** E3 (ADR-0028 phase 1)
+- **Why:** Aggregates other than plain `count` keep every argument tuple until the group finishes, so memory grows with the input. Exact incremental accumulators (integer sums in `i128`, min and max) would make it proportional to the number of groups; float sums need care to stay identical to the interpreter.
+- **When:** Before memory budgets (E5), or when large groups show up.
+- **Size:** About 2 days.
+- **Status:** open
+
 ## Executor and IR open questions
 
 ### default-memory-budgets: Choose default per-query and per-node memory budgets

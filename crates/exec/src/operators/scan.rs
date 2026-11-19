@@ -1,4 +1,10 @@
 //! `TableScan`: the leaf that reads a table through the transaction (ADR-0023).
+//!
+//! It reaches rows by its access path: every row, the rows under a
+//! primary key prefix and range (one `scan` call per batch), or the rows
+//! found through a secondary index (one `scan_index` call for a batch of
+//! primary keys, then one `get_many` call for their rows). Key values are
+//! evaluated once, when the scan starts; a NULL key value matches nothing.
 
 use std::sync::Arc;
 
@@ -7,15 +13,32 @@ use futures::stream::{self, StreamExt};
 use interlaken_ir::Expr;
 use interlaken_ir::catalog::{Catalog, TableDef};
 use interlaken_ir::interp::{Datum, ExecOptions, RowEvaluator};
+use interlaken_storage::RowFilter;
+use interlaken_storage::catalog::IndexDef as StoredIndex;
 use interlaken_storage::catalog::TableDef as StoredTable;
 use interlaken_storage::encoding::{ColumnType, Datum as Stored, decode_row};
-use interlaken_storage::rows::{self, RowScan};
-use interlaken_storage::{Key, RowFilter};
+use interlaken_storage::rows::{self, RowScan, ValueRange};
 
-use crate::columnar::build_array;
+use crate::access::{Access, KeyBounds};
+use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
-use crate::exec::{BatchStream, ExecContext};
+use crate::exec::{BatchStream, ExecContext, compile_over};
 use crate::physical::{Layout, Physical};
+
+/// Convert an interpreter value to its stored form, if it has one.
+pub(crate) fn to_stored(d: &Datum) -> Option<Stored> {
+    Some(match d {
+        Datum::Null => Stored::Null,
+        Datum::Bool(v) => Stored::Bool(*v),
+        Datum::Int2(v) => Stored::Int2(*v),
+        Datum::Int4(v) => Stored::Int4(*v),
+        Datum::Int8(v) => Stored::Int8(*v),
+        Datum::Float8(v) => Stored::Float8(*v),
+        Datum::Text(v) => Stored::Text(v.clone()),
+        Datum::Bytea(v) => Stored::Bytea(v.clone()),
+        _ => return None,
+    })
+}
 
 /// Convert a stored value to an interpreter value.
 pub(crate) fn from_stored(d: &Stored) -> Datum {
@@ -67,14 +90,28 @@ impl RowFilter for PushedFilter {
     }
 }
 
+/// The storage-side form of an access path, resolved when the scan starts.
+enum Resolved {
+    /// Nothing can match (a key value is NULL).
+    Empty,
+    /// A primary key scan.
+    Primary(RowScan),
+    /// A secondary index scan.
+    Index(StoredIndex, RowScan),
+}
+
 /// Where a scan is.
 struct State {
     /// The executor context.
     ctx: ExecContext,
     /// The IR table.
     table: Arc<TableDef>,
+    /// The access path.
+    access: Access,
     /// The stored table, looked up on the first pull.
     stored: Option<StoredTable>,
+    /// The resolved access path, built on the first pull.
+    resolved: Option<Resolved>,
     /// The storage filter, built on the first pull.
     filter: Option<Arc<dyn RowFilter>>,
     /// The pushed predicate.
@@ -87,55 +124,148 @@ struct State {
     schema: arrow_schema::SchemaRef,
     /// Rows per storage call.
     batch_rows: usize,
-    /// Where the next storage call resumes.
-    resume: Option<Key>,
     /// Whether the last batch was read.
     done: bool,
 }
 
+/// Evaluate a key value (an expression reading no columns of the scanned table).
+fn key_value(expr: &Expr, ctx: &ExecContext) -> Result<Datum, ExecError> {
+    let value = compile_over(expr, &[], &[], ctx)?.eval(&[], 1)?;
+    datum_at(value.as_ref(), 0)
+}
+
+/// Return the stored form of a key value, or `None` if it is NULL.
+fn stored_key(expr: &Expr, ctx: &ExecContext) -> Result<Option<Stored>, ExecError> {
+    match key_value(expr, ctx)? {
+        Datum::Null => Ok(None),
+        value => to_stored(&value)
+            .map(Some)
+            .ok_or_else(|| ExecError::Unsupported(format!("key value {value:?}"))),
+    }
+}
+
+/// Resolve key bounds into a storage scan, or `None` if a key value is NULL.
+fn resolve_bounds(
+    bounds: &KeyBounds,
+    batch_rows: usize,
+    ctx: &ExecContext,
+) -> Result<Option<RowScan>, ExecError> {
+    let mut prefix = Vec::with_capacity(bounds.prefix.len());
+    for e in &bounds.prefix {
+        match stored_key(e, ctx)? {
+            Some(v) => prefix.push(v),
+            None => return Ok(None),
+        }
+    }
+    let bound = |b: &std::ops::Bound<Expr>| -> Result<Option<std::ops::Bound<Stored>>, ExecError> {
+        use std::ops::Bound;
+        Ok(match b {
+            Bound::Unbounded => Some(Bound::Unbounded),
+            Bound::Included(e) => stored_key(e, ctx)?.map(Bound::Included),
+            Bound::Excluded(e) => stored_key(e, ctx)?.map(Bound::Excluded),
+        })
+    };
+    let (Some(lower), Some(upper)) = (bound(&bounds.lower)?, bound(&bounds.upper)?) else {
+        return Ok(None);
+    };
+    let mut scan = RowScan::prefix(prefix);
+    scan.limit_rows = batch_rows;
+    if !matches!(
+        (&lower, &upper),
+        (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded)
+    ) {
+        scan.range = Some(ValueRange { lower, upper });
+    }
+    Ok(Some(scan))
+}
+
 impl State {
+    /// Look up the stored table, build the storage filter and resolve the access path.
+    async fn start(&mut self) -> Result<(), ExecError> {
+        let name = self.table.name.last().to_string();
+        let stored = interlaken_storage::catalog::table(&self.ctx.txn, &name)
+            .await?
+            .ok_or_else(|| ExecError::Catalog(format!("table {name} is not stored")))?;
+        if let Some(predicate) = &self.pushed {
+            self.filter = Some(Arc::new(PushedFilter {
+                predicate: predicate.clone(),
+                layout: self.layout.clone(),
+                types: stored.types(),
+                catalog: self.ctx.catalog.clone(),
+                params: self.ctx.params.clone(),
+                options: self.ctx.options,
+            }));
+        }
+        let resolved = match &self.access {
+            Access::Full => {
+                let mut scan = RowScan::all();
+                scan.limit_rows = self.batch_rows;
+                Resolved::Primary(scan)
+            }
+            Access::Primary(bounds) => match resolve_bounds(bounds, self.batch_rows, &self.ctx)? {
+                Some(scan) => Resolved::Primary(scan),
+                None => Resolved::Empty,
+            },
+            Access::Index { name, bounds } => {
+                let index = stored
+                    .index(name.as_str())
+                    .cloned()
+                    .ok_or_else(|| ExecError::Catalog(format!("index {name} is not stored")))?;
+                match resolve_bounds(bounds, self.batch_rows, &self.ctx)? {
+                    Some(scan) => Resolved::Index(index, scan),
+                    None => Resolved::Empty,
+                }
+            }
+        };
+        self.stored = Some(stored);
+        self.resolved = Some(resolved);
+        Ok(())
+    }
+
+    /// Read the next batch of stored rows, or `None` when the scan is complete.
+    async fn read(&mut self) -> Result<Option<Vec<Vec<Stored>>>, ExecError> {
+        let stored = self.stored.as_ref().expect("started");
+        match self.resolved.as_mut().expect("started") {
+            Resolved::Empty => Ok(None),
+            Resolved::Primary(scan) => {
+                let batch = match &self.filter {
+                    Some(filter) => {
+                        rows::scan_filtered(&self.ctx.txn, stored, scan, filter.clone()).await?
+                    }
+                    None => rows::scan(&self.ctx.txn, stored, scan).await?,
+                };
+                self.done = batch.resume.is_none();
+                scan.resume = batch.resume;
+                Ok(Some(batch.rows))
+            }
+            Resolved::Index(index, scan) => {
+                let batch = rows::scan_index(&self.ctx.txn, stored, index, scan).await?;
+                self.done = batch.resume.is_none();
+                scan.resume = batch.resume;
+                let found = rows::get_many(&self.ctx.txn, stored, &batch.primary_keys).await?;
+                Ok(Some(found.into_iter().flatten().collect()))
+            }
+        }
+    }
+
     /// Read storage batches until one has rows or the scan ends.
     async fn next(&mut self) -> Result<Option<RecordBatch>, ExecError> {
+        if self.resolved.is_none() {
+            self.start().await?;
+        }
         loop {
             if self.done {
                 return Ok(None);
             }
-            if self.stored.is_none() {
-                let name = self.table.name.last().to_string();
-                let stored = interlaken_storage::catalog::table(&self.ctx.txn, &name)
-                    .await?
-                    .ok_or_else(|| ExecError::Catalog(format!("table {name} is not stored")))?;
-                if let Some(predicate) = &self.pushed {
-                    self.filter = Some(Arc::new(PushedFilter {
-                        predicate: predicate.clone(),
-                        layout: self.layout.clone(),
-                        types: stored.types(),
-                        catalog: self.ctx.catalog.clone(),
-                        params: self.ctx.params.clone(),
-                        options: self.ctx.options,
-                    }));
-                }
-                self.stored = Some(stored);
-            }
-            let stored = self.stored.as_ref().expect("looked up above");
-            let mut scan = RowScan::all();
-            scan.limit_rows = self.batch_rows;
-            scan.resume = self.resume.take();
-            let batch = match &self.filter {
-                Some(filter) => {
-                    rows::scan_filtered(&self.ctx.txn, stored, &scan, filter.clone()).await?
-                }
-                None => rows::scan(&self.ctx.txn, stored, &scan).await?,
+            let Some(rows) = self.read().await? else {
+                return Ok(None);
             };
-            self.resume = batch.resume;
-            self.done = self.resume.is_none();
-            if batch.rows.is_empty() {
+            if rows.is_empty() {
                 continue;
             }
             let columns = (0..self.types.len())
                 .map(|c| {
-                    let values: Vec<Datum> = batch
-                        .rows
+                    let values: Vec<Datum> = rows
                         .iter()
                         .map(|r| r.get(c).map_or(Datum::Null, from_stored))
                         .collect();
@@ -151,6 +281,7 @@ impl State {
 pub(crate) fn table_scan(
     node: &Physical,
     table: Arc<TableDef>,
+    access: Access,
     pushed: Option<Expr>,
     batch_rows: usize,
     ctx: &ExecContext,
@@ -158,14 +289,15 @@ pub(crate) fn table_scan(
     let state = State {
         ctx: ctx.clone(),
         table,
+        access,
         stored: None,
+        resolved: None,
         filter: None,
         pushed,
         layout: node.layout.clone(),
         types: node.types.clone(),
         schema: node.schema.clone(),
         batch_rows,
-        resume: None,
         done: false,
     };
     stream::try_unfold(state, |mut state| async move {

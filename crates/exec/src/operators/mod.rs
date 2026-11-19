@@ -3,6 +3,7 @@
 mod aggregate;
 mod apply;
 mod distinct;
+mod dml;
 mod filter;
 mod join;
 mod limit;
@@ -16,6 +17,7 @@ mod values;
 pub(crate) use aggregate::aggregate;
 pub(crate) use apply::apply;
 pub(crate) use distinct::distinct;
+pub(crate) use dml::{DmlKind, dml};
 pub(crate) use filter::filter;
 pub(crate) use join::join;
 pub(crate) use limit::limit;

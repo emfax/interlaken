@@ -131,6 +131,25 @@ const TABLES: [Table; 3] = [
     },
 ];
 
+/// One secondary index: (name, table, [(column, descending)]).
+type Index = (&'static str, &'static str, &'static [(&'static str, bool)]);
+
+/// The secondary indexes.
+const INDEXES: [Index; 4] = [
+    ("users_age", "users", &[("age", false)]),
+    (
+        "posts_author_likes",
+        "posts",
+        &[("author", false), ("likes", true)],
+    ),
+    ("tags_post", "tags", &[("post", false)]),
+    (
+        "tags_label_weight",
+        "tags",
+        &[("label", true), ("weight", false)],
+    ),
+];
+
 /// Return the IR catalog matching the stored tables.
 fn ir_catalog() -> InMemoryCatalog {
     let mut text = String::from("(catalog (builtins)");
@@ -143,7 +162,23 @@ fn ir_catalog() -> InMemoryCatalog {
                 write!(text, " (column {name} {})", ty.name()).unwrap();
             }
         }
-        text.push_str(" (primary-key id))");
+        text.push_str(" (primary-key id)");
+        for (name, table, columns) in INDEXES {
+            if table == t.name {
+                let columns: Vec<String> = columns
+                    .iter()
+                    .map(|(c, desc)| {
+                        if *desc {
+                            format!("(desc {c})")
+                        } else {
+                            (*c).to_owned()
+                        }
+                    })
+                    .collect();
+                write!(text, " (index {name} {})", columns.join(" ")).unwrap();
+            }
+        }
+        text.push(')');
     }
     text.push(')');
     parse_catalog(&text).unwrap()
@@ -347,6 +382,42 @@ impl Gen {
 
     /// Return a predicate over `r`, possibly with subqueries correlated to it.
     fn predicate(&mut self, r: &R) -> String {
+        let rest = self.base_predicate(r);
+        // Often also a range on an indexed column (or the primary key), usable as an access path.
+        if self.chance(40) {
+            let candidates: Vec<&Col> = r
+                .cols
+                .iter()
+                .filter(|c| {
+                    [
+                        ".age", ".author", ".post", ".label", ".weight", ".id", ".likes",
+                    ]
+                    .iter()
+                    .any(|s| c.name.ends_with(s))
+                })
+                .collect();
+            if !candidates.is_empty() {
+                let c = candidates[self.below(candidates.len())].clone();
+                let (lo, hi) = (self.literal(c.ty), self.literal(c.ty));
+                let range = match self.below(3) {
+                    0 => format!("(= {} {lo})", c.name),
+                    1 => format!(
+                        "(and ({} {} {lo}) ({} {} {hi}))",
+                        self.pick(&[">", ">="]),
+                        c.name,
+                        self.pick(&["<", "<="]),
+                        c.name
+                    ),
+                    _ => format!("({} {lo} {})", self.pick(&["<", ">=", "="]), c.name),
+                };
+                return format!("(and {range} {rest})");
+            }
+        }
+        rest
+    }
+
+    /// Return a predicate over `r` without a deliberate key range.
+    fn base_predicate(&mut self, r: &R) -> String {
         let outer = self.int8_col(&r.cols);
         match (self.below(6), outer) {
             (0, Some(o)) => {
@@ -590,7 +661,16 @@ impl Gen {
             if self.chance(15) {
                 return self.values();
             }
-            return self.base();
+            let base = self.base();
+            // A filter directly on a scan is what can use a key as an access path.
+            if self.chance(30) {
+                let p = self.predicate(&base);
+                return R {
+                    text: format!("(filter {} {p})", base.text),
+                    cols: base.cols,
+                };
+            }
+            return base;
         }
         let d = depth - 1;
         match self.below(11) {
@@ -857,19 +937,47 @@ fn operators_agree_with_interpreter() {
             };
             catalog::create_table(&txn, spec).await.unwrap();
         }
+        for (name, table, columns) in INDEXES {
+            let columns = columns
+                .iter()
+                .map(|(c, desc)| {
+                    (
+                        (*c).to_owned(),
+                        if *desc {
+                            interlaken_storage::encoding::SortOrder::DESC
+                        } else {
+                            interlaken_storage::encoding::SortOrder::ASC
+                        },
+                    )
+                })
+                .collect();
+            catalog::create_index(
+                &txn,
+                interlaken_storage::catalog::IndexSpec {
+                    name: name.into(),
+                    table: table.into(),
+                    columns,
+                    unique: false,
+                },
+            )
+            .await
+            .unwrap();
+        }
         txn.commit().await.unwrap();
         storage
     });
     let catalog = Arc::new(ir_catalog());
     let shared: Arc<dyn Catalog> = catalog.clone();
     let cases = 3000;
-    let counters: [AtomicU32; 5] = Default::default();
+    let counters: [AtomicU32; 7] = Default::default();
     let [
         compared,
         interp_failed,
         both_failed,
         ordered_cases,
         multi_batch,
+        index_paths,
+        primary_paths,
     ] = &counters;
     let operators = std::sync::Mutex::new(HashMap::new());
     TestRunner::new(Config {
@@ -911,6 +1019,13 @@ fn operators_agree_with_interpreter() {
 
             let physical = plan_with(&plan, catalog.as_ref(), PlanOptions { batch_rows })
                 .unwrap_or_else(|e| panic!("physical planning failed: {e}\n{}", print_plan(&plan)));
+            let shape = format!("{physical:?}");
+            if shape.contains("Index {") {
+                index_paths.fetch_add(1, Ordering::Relaxed);
+            }
+            if shape.contains("Primary(") {
+                primary_paths.fetch_add(1, Ordering::Relaxed);
+            }
             let actual = runtime.block_on(async {
                 let txn = storage.begin(TxnOptions::default()).await.unwrap();
                 for (table, rows) in TABLES.iter().zip(&tables) {
@@ -992,11 +1107,18 @@ fn operators_agree_with_interpreter() {
         both_failed,
         ordered_cases,
         multi_batch,
+        index_paths,
+        primary_paths,
     ] = counters.map(|c| c.into_inner());
     let operators = operators.into_inner().unwrap();
     eprintln!(
         "compared {compared} of {cases} ({ordered_cases} in order, {multi_batch} multi-batch); \
-         interpreter failed {interp_failed}, executor too in {both_failed}; operators {operators:?}"
+         interpreter failed {interp_failed}, executor too in {both_failed}; operators {operators:?}; \
+         {index_paths} plans with an index scan, {primary_paths} with a primary key scan"
+    );
+    assert!(
+        index_paths * 10 >= cases && primary_paths * 10 >= cases,
+        "too few keyed access paths"
     );
     assert!(compared * 2 >= cases, "only {compared} of {cases} compared");
     assert!(

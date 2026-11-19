@@ -354,7 +354,7 @@ impl<'a> Interp<'a> {
         })
     }
 
-    /// Check NOT NULL columns and primary key uniqueness of `table` after a change.
+    /// Check NOT NULL columns, primary key and unique index uniqueness of `table` after a change.
     fn check_constraints(&self, table: &TableDef, rows: &[Vec<Datum>]) -> Result<(), EvalError> {
         for row in rows {
             for column in &table.columns {
@@ -365,6 +365,20 @@ impl<'a> Interp<'a> {
                         table: table.name.to_string(),
                         column: column.name.to_string(),
                     });
+                }
+            }
+        }
+        // Unique indexes: NULLs are distinct, so only rows with every indexed value set can collide.
+        for index in table.indexes.iter().filter(|i| i.unique) {
+            let mut keys = HashSet::new();
+            for row in rows {
+                let key: Vec<Datum> = index
+                    .columns
+                    .iter()
+                    .map(|c| row[usize::try_from(c.column.get()).expect("column id")].clone())
+                    .collect();
+                if !key.iter().any(Datum::is_null) && !keys.insert(RowKey(key)) {
+                    return Err(EvalError::UniqueViolation(table.name.to_string()));
                 }
             }
         }

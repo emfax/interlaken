@@ -1,11 +1,11 @@
 ---
 id: 0023
 title: Leaf Operators and Storage Pushdown
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [executor, storage, pushdown]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-19
 implemented:
 spec-sections: ["executor-design.md#where-rows-become-columns", "executor-design.md#physical-operators", "executor-design.md#physical-planning-mvp"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -49,7 +49,8 @@ The storage trait ([ADR-0006](0006-batched-async-storage-trait.md)) is coarse-gr
 
 - [x] **Phase 1: TableScan with ScanRequest pushdown and async-side decode** - E1
   - *As implemented:* the planner splits a filter directly above a scan into leakproof conjuncts, run on the storage thread through a `RowFilter` (new `rows::scan_filtered`), and the rest, which run in a `Filter` above the scan. Because pushed conjuncts can discard a row before a raising conjunct sees it, a query the interpreter fails may succeed in the executor; this matches Postgres, which does not fix conjunct order. Stored tables are found by name until the storage-backed catalog (ADR-0013 phase 3) exists.
-- [ ] **Phase 2: IndexScan and IndexLookup** - E4
+- [x] **Phase 2: IndexScan and IndexLookup** - E4
+  - *As implemented:* `TableScan` carries an access path chosen from the conjuncts of a filter directly on it (`interlaken_exec::Access`): every row; a primary key prefix and range (one `scan` per batch); or a secondary index prefix and range (one `scan_index` for a batch of primary keys, then one `get_many` for their rows). The row layer gained `RowScan::range`, a value range on the key column after the prefix, which becomes key bounds on each value's block of keys (swapped for descending columns) with the NULL block cut off. Key values come from expressions that read none of the scanned table's columns and cannot raise (literals, parameters, outer columns), so a correlated `Apply` whose inner filter is keyed by the outer row is an index nested loop. Float columns are never keys, because -0 and NaN make key equality differ from SQL equality. The filter always stays as a recheck. Index scans cannot use a storage `RowFilter`, so under them every conjunct runs above the scan. A batched `IndexLookup` that probes with a whole input batch, for joins, is future work.
 - [ ] **Phase 3: BatchDecoder on the storage thread** - post-MVP (sooner if decode shows up in profiles)
 
 ## Consequences

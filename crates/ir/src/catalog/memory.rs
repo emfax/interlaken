@@ -131,6 +131,28 @@ impl InMemoryCatalog {
                 return Err(invalid(format!("duplicate column {}", column.name)));
             }
         }
+        for (i, index) in table.indexes.iter().enumerate() {
+            if index.columns.is_empty() {
+                return Err(invalid(format!("index {} has no columns", index.name)));
+            }
+            if let Some(c) = index
+                .columns
+                .iter()
+                .find(|c| table.column_by_id(c.column).is_none())
+            {
+                return Err(invalid(format!(
+                    "index {} column {} does not exist",
+                    index.name,
+                    c.column.get()
+                )));
+            }
+            if table.indexes[..i]
+                .iter()
+                .any(|other| other.name == index.name)
+            {
+                return Err(invalid(format!("duplicate index {}", index.name)));
+            }
+        }
         for id in &table.primary_key {
             match table.column_by_id(*id) {
                 None => {
