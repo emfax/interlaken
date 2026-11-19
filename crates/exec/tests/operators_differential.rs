@@ -673,7 +673,7 @@ impl Gen {
             return base;
         }
         let d = depth - 1;
-        match self.below(11) {
+        match self.below(13) {
             0 | 1 => {
                 let r = self.rel(d);
                 let p = self.predicate(&r);
@@ -763,6 +763,11 @@ impl Gen {
                     cols: l.cols,
                 }
             }
+            9 => {
+                let r = self.rel(d);
+                self.unnest_scalars(&r)
+            }
+            10 => self.nested(d),
             _ => {
                 let r = self.rel(d);
                 let sorted = self.total_sort(&r);
@@ -776,6 +781,141 @@ impl Gen {
                     cols: r.cols,
                 }
             }
+        }
+    }
+
+    /// Return `r` with each row repeated once per element of an array of its expressions.
+    ///
+    /// The array is sometimes empty or NULL (no rows), and its elements may
+    /// be NULL or raise.
+    fn unnest_scalars(&mut self, r: &R) -> R {
+        let ty = self.pick(&[Ty::Int4, Ty::Int8, Ty::Text, Ty::Bool]);
+        let array = match self.below(8) {
+            0 => format!("(cast null (array {}))", ty.name()),
+            1 => format!("(cast (array) (array {}))", ty.name()),
+            _ => {
+                let items: Vec<String> = (0..1 + self.below(3))
+                    .map(|_| self.expr(ty, &r.cols, 1, true))
+                    .collect();
+                format!("(array {})", items.join(" "))
+            }
+        };
+        let name = self.name("u");
+        let mut cols = r.cols.clone();
+        cols.push(Col {
+            name: name.clone(),
+            ty,
+        });
+        R {
+            text: format!("(unnest {} {array} (columns {name}))", r.text),
+            cols,
+        }
+    }
+
+    /// Return a `Nest` whose records are unnested again, so its columns are scalars.
+    ///
+    /// Either rows of a relation are grouped by some of its columns, or (as
+    /// for a GraphQL field) each row of an outer relation gets the list of
+    /// its correlated inner rows, through an apply. Groups with an empty
+    /// list (the apply's) produce no rows when unnested.
+    fn nested(&mut self, depth: usize) -> R {
+        let (input, keys, outer) = if self.chance(35) {
+            let outer = self.rel(depth.min(1));
+            let inner = self.base();
+            let filtered = match (self.int8_col(&outer.cols), self.int8_col(&inner.cols)) {
+                (Some(o), Some(i)) => format!("(filter {} (= {} {}))", inner.text, i.name, o.name),
+                _ => inner.text.clone(),
+            };
+            let sorted = if self.chance(50) {
+                self.total_sort(&R {
+                    text: filtered,
+                    cols: inner.cols.clone(),
+                })
+            } else {
+                filtered
+            };
+            (
+                R {
+                    text: sorted,
+                    cols: inner.cols,
+                },
+                Vec::new(),
+                Some(outer),
+            )
+        } else {
+            let r = self.rel(depth);
+            let keys: Vec<Col> = (0..self.below(3))
+                .map(|_| r.cols[self.below(r.cols.len())].clone())
+                .collect();
+            (r, keys, None)
+        };
+        let key_cols: Vec<Col> = keys
+            .iter()
+            .map(|k| Col {
+                name: self.name("k"),
+                ty: k.ty,
+            })
+            .collect();
+        let key_text: Vec<String> = keys
+            .iter()
+            .zip(&key_cols)
+            .map(|(k, c)| format!("(as {} {})", k.name, c.name))
+            .collect();
+        let mut field_cols = Vec::new();
+        let mut field_text = Vec::new();
+        for _ in 0..1 + self.below(2) {
+            let ty = input.cols[self.below(input.cols.len())].ty;
+            let name = self.name("f");
+            field_text.push(format!(
+                "(as {} {name})",
+                self.expr(ty, &input.cols, 1, true)
+            ));
+            field_cols.push(Col { name, ty });
+        }
+        let list = self.name("n");
+        let nest = format!(
+            "(nest {} (keys {}) (fields {}) :as {list})",
+            input.text,
+            key_text.join(" "),
+            field_text.join(" ")
+        );
+        let (source, mut cols) = match outer {
+            Some(outer) => {
+                let kind = self.pick(&["left", "inner"]);
+                (format!("(apply {kind} {} {nest})", outer.text), outer.cols)
+            }
+            None => (nest, Vec::new()),
+        };
+        cols.extend(key_cols);
+        let element_cols: Vec<Col> = field_cols
+            .iter()
+            .map(|f| Col {
+                name: self.name("e"),
+                ty: f.ty,
+            })
+            .collect();
+        let element_names: Vec<&str> = element_cols.iter().map(|c| c.name.as_str()).collect();
+        let unnested = format!(
+            "(unnest {source} {list} (columns {}))",
+            element_names.join(" ")
+        );
+        cols.extend(element_cols);
+        // Drop the list column, which has no generator type, keeping every scalar.
+        let kept: Vec<Col> = cols
+            .iter()
+            .map(|c| Col {
+                name: self.name("c"),
+                ty: c.ty,
+            })
+            .collect();
+        let items: Vec<String> = cols
+            .iter()
+            .zip(&kept)
+            .map(|(c, k)| format!("(as {} {})", c.name, k.name))
+            .collect();
+        R {
+            text: format!("(project {unnested} {})", items.join(" ")),
+            cols: kept,
         }
     }
 
@@ -882,6 +1022,23 @@ fn bag(rows: &[Vec<Datum>]) -> HashMap<RowKey, usize> {
     counts
 }
 
+/// Return `row` with every list's elements in a canonical order, so lists compare as bags.
+fn unordered_lists(row: Vec<Datum>) -> Vec<Datum> {
+    /// Sort the elements of one value's lists, recursively.
+    fn canonical(d: Datum) -> Datum {
+        match d {
+            Datum::Array(items) => {
+                let mut items: Vec<Datum> = items.into_iter().map(canonical).collect();
+                items.sort_by_key(|i| format!("{i:?}"));
+                Datum::Array(items)
+            }
+            Datum::Record(fields) => Datum::Record(fields.into_iter().map(canonical).collect()),
+            other => other,
+        }
+    }
+    row.into_iter().map(canonical).collect()
+}
+
 /// Return whether the plan's result order is fully determined: a limit over a sort on every column.
 fn ordered(text: &str) -> bool {
     text.starts_with("(limit (sort")
@@ -897,6 +1054,8 @@ fn census(rel: &Rel, counts: &mut HashMap<&'static str, u32>) {
         Rel::Sort { .. } => "sort",
         Rel::SetOp { .. } => "setop",
         Rel::Values { .. } => "values",
+        Rel::Nest { .. } => "nest",
+        Rel::Unnest { .. } => "unnest",
         _ => "other",
     };
     *counts.entry(name).or_insert(0) += 1;
@@ -992,7 +1151,25 @@ fn operators_agree_with_interpreter() {
                 fresh: 0,
             };
             let r = g.rel(3);
-            let text = format!("(plan {})", r.text);
+            // Sometimes nest the whole result, so lists of records reach the output.
+            let nested_output = g.chance(15);
+            let text = if nested_output {
+                let keys: Vec<String> = r
+                    .cols
+                    .iter()
+                    .take(g.below(2))
+                    .map(|c| c.name.clone())
+                    .collect();
+                let fields: Vec<String> = r.cols.iter().map(|c| c.name.clone()).collect();
+                format!(
+                    "(plan (nest {} (keys {}) (fields {}) :as top))",
+                    r.text,
+                    keys.join(" "),
+                    fields.join(" ")
+                )
+            } else {
+                format!("(plan {})", r.text)
+            };
             let plan = resolve(&parse_plan(&text).unwrap(), catalog.as_ref())
                 .unwrap_or_else(|e| panic!("generated plan does not resolve: {e}\n{text}"))
                 .plan;
@@ -1067,6 +1244,21 @@ fn operators_agree_with_interpreter() {
                             );
                         }
                     }
+                    if nested_output {
+                        // List order within a group follows input order, which differs.
+                        got = got.into_iter().map(unordered_lists).collect();
+                        let expected_lists: Vec<Vec<Datum>> =
+                            expected.into_iter().map(unordered_lists).collect();
+                        prop_assert!(
+                            bag(&got) == bag(&expected_lists),
+                            "nested rows differ\nexpected {:?}\nactual {:?}\n{}",
+                            expected_lists,
+                            got,
+                            describe()
+                        );
+                        compared.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
                     if ordered(&r.text) {
                         ordered_cases.fetch_add(1, Ordering::Relaxed);
                         prop_assert_eq!(&got, &expected, "order differs\n{}", describe());
@@ -1137,6 +1329,8 @@ fn operators_agree_with_interpreter() {
         "sort",
         "setop",
         "values",
+        "nest",
+        "unnest",
     ] {
         assert!(
             operators.get(op).copied().unwrap_or(0) >= 200,

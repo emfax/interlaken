@@ -23,6 +23,7 @@ use crate::access::{Access, KeyBounds};
 use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over};
+use crate::metrics::NodeMetrics;
 use crate::physical::{Layout, Physical};
 
 /// Convert an interpreter value to its stored form, if it has one.
@@ -36,6 +37,15 @@ pub(crate) fn to_stored(d: &Datum) -> Option<Stored> {
         Datum::Float8(v) => Stored::Float8(*v),
         Datum::Text(v) => Stored::Text(v.clone()),
         Datum::Bytea(v) => Stored::Bytea(v.clone()),
+        Datum::Array(items) => Stored::Array(
+            items
+                .iter()
+                .map(|item| match item {
+                    Datum::Array(_) => None,
+                    scalar => to_stored(scalar),
+                })
+                .collect::<Option<_>>()?,
+        ),
         _ => return None,
     })
 }
@@ -51,7 +61,35 @@ pub(crate) fn from_stored(d: &Stored) -> Datum {
         Stored::Float8(v) => Datum::Float8(*v),
         Stored::Text(v) => Datum::Text(v.clone()),
         Stored::Bytea(v) => Datum::Bytea(v.clone()),
+        Stored::Array(items) => Datum::Array(items.iter().map(from_stored).collect()),
     }
+}
+
+/// Return the storage column type that holds values of an IR type, if any.
+///
+/// Scalars map to their storage namesakes, and arrays of those to storage
+/// arrays. Other types (dates, timestamps, UUIDs, records, nested arrays)
+/// have no stored form yet.
+#[must_use]
+pub fn stored_type(ty: &interlaken_ir::DataType) -> Option<ColumnType> {
+    use interlaken_ir::{DataType, ScalarType};
+    use interlaken_storage::encoding::ElementType;
+    Some(match ty {
+        DataType::Scalar(s) => match s {
+            ScalarType::Bool => ColumnType::Bool,
+            ScalarType::Int2 => ColumnType::Int2,
+            ScalarType::Int4 => ColumnType::Int4,
+            ScalarType::Int8 => ColumnType::Int8,
+            ScalarType::Float8 => ColumnType::Float8,
+            ScalarType::Text => ColumnType::Text,
+            ScalarType::Bytea => ColumnType::Bytea,
+            _ => return None,
+        },
+        DataType::Array(element) => {
+            ColumnType::Array(ElementType::of(stored_type(&element.data)?)?)
+        }
+        _ => return None,
+    })
 }
 
 /// A pushed-down predicate evaluated on the storage thread, row at a time,
@@ -126,6 +164,27 @@ struct State {
     batch_rows: usize,
     /// Whether the last batch was read.
     done: bool,
+    /// Where to count storage calls, for `EXPLAIN ANALYZE`.
+    metrics: Option<Arc<NodeMetrics>>,
+}
+
+/// Return the bytes a stored value occupies when decoded (an estimate for `EXPLAIN ANALYZE`).
+fn stored_bytes(d: &Stored) -> usize {
+    match d {
+        Stored::Null => 0,
+        Stored::Bool(_) => 1,
+        Stored::Int2(_) => 2,
+        Stored::Int4(_) => 4,
+        Stored::Int8(_) | Stored::Float8(_) => 8,
+        Stored::Text(s) => s.len(),
+        Stored::Bytea(b) => b.len(),
+        Stored::Array(items) => items.iter().map(stored_bytes).sum(),
+    }
+}
+
+/// Return the bytes of the values in `rows`.
+fn rows_bytes(rows: &[Vec<Stored>]) -> usize {
+    rows.iter().flatten().map(stored_bytes).sum()
 }
 
 /// Evaluate a key value (an expression reading no columns of the scanned table).
@@ -234,6 +293,9 @@ impl State {
                     }
                     None => rows::scan(&self.ctx.txn, stored, scan).await?,
                 };
+                if let Some(m) = &self.metrics {
+                    m.record_storage_call(rows_bytes(&batch.rows));
+                }
                 self.done = batch.resume.is_none();
                 scan.resume = batch.resume;
                 Ok(Some(batch.rows))
@@ -242,8 +304,17 @@ impl State {
                 let batch = rows::scan_index(&self.ctx.txn, stored, index, scan).await?;
                 self.done = batch.resume.is_none();
                 scan.resume = batch.resume;
-                let found = rows::get_many(&self.ctx.txn, stored, &batch.primary_keys).await?;
-                Ok(Some(found.into_iter().flatten().collect()))
+                let found: Vec<Vec<Stored>> =
+                    rows::get_many(&self.ctx.txn, stored, &batch.primary_keys)
+                        .await?
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                if let Some(m) = &self.metrics {
+                    m.record_storage_call(rows_bytes(&batch.primary_keys));
+                    m.record_storage_call(rows_bytes(&found));
+                }
+                Ok(Some(found))
             }
         }
     }
@@ -299,6 +370,7 @@ pub(crate) fn table_scan(
         schema: node.schema.clone(),
         batch_rows,
         done: false,
+        metrics: ctx.node_metrics(node.id),
     };
     stream::try_unfold(state, |mut state| async move {
         Ok(state.next().await?.map(|b| (b, state)))

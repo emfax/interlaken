@@ -18,6 +18,7 @@ use super::distinct::distinct;
 use super::pull::{Pull, batch, collect, into_stream, row_keys, take};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, execute};
+use crate::memory::{Reservation, entry_bytes};
 use crate::physical::Physical;
 
 /// Relabel a batch with the set operation's schema.
@@ -39,6 +40,8 @@ struct Filtered {
     all: bool,
     /// The output schema.
     schema: SchemaRef,
+    /// The memory held by the right input's counts.
+    memory: Reservation,
 }
 
 impl Pull for Filtered {
@@ -47,7 +50,14 @@ impl Pull for Filtered {
         if let Some(right) = self.right.take() {
             for b in collect(right).await? {
                 for key in row_keys(b.columns(), b.num_rows())? {
-                    *self.counts.entry(key).or_insert(0) += 1;
+                    match self.counts.get_mut(&key) {
+                        Some(n) => *n += 1,
+                        None => {
+                            self.memory
+                                .grow(entry_bytes(&key, std::mem::size_of::<usize>()))?;
+                            self.counts.insert(key, 1);
+                        }
+                    }
                 }
             }
         }
@@ -107,11 +117,12 @@ pub(crate) fn set_op(
             counts: HashMap::new(),
             all,
             schema: schema.clone(),
+            memory: ctx.reserve(node, "SetOp"),
         }),
     };
     if all {
         combined
     } else {
-        distinct(combined, schema)
+        distinct(combined, schema, ctx.reserve(node, "SetOp"))
     }
 }

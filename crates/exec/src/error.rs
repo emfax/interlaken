@@ -2,6 +2,8 @@
 
 use interlaken_ir::interp::EvalError;
 
+use crate::memory::MemoryScope;
+
 /// Why a query failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -25,6 +27,22 @@ pub enum ExecError {
     /// rollback (to a savepoint or entirely) (SQLSTATE `25P02`).
     #[error("current transaction is aborted, commands ignored until end of transaction block")]
     TransactionAborted,
+    /// A row written to `table` failed its write check (SQLSTATE `42501`).
+    /// The message names the table, never a row's values (ADR-0025).
+    #[error("permission denied for table {table}")]
+    PermissionDenied {
+        /// The table written.
+        table: String,
+    },
+    /// An operator needed more memory than the query's budget or the
+    /// node's limit allows (SQLSTATE `53200`, ADR-0027).
+    #[error("{operator} exceeded the {scope}")]
+    MemoryExceeded {
+        /// The operator that asked for the memory.
+        operator: &'static str,
+        /// Which limit it crossed.
+        scope: MemoryScope,
+    },
 }
 
 impl ExecError {
@@ -48,6 +66,8 @@ impl ExecError {
             Self::Storage(_) | Self::Arrow(_) | Self::Catalog(_) => "XX000",
             Self::Unsupported(_) => "0A000",
             Self::TransactionAborted => "25P02",
+            Self::PermissionDenied { .. } => "42501",
+            Self::MemoryExceeded { .. } => "53200",
         }
     }
 }

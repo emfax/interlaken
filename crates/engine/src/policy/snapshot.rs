@@ -20,6 +20,7 @@ fn datum(d: &Stored) -> Datum {
         Stored::Float8(v) => Datum::Float8(*v),
         Stored::Text(v) => Datum::Text(v.clone()),
         Stored::Bytea(v) => Datum::Bytea(v.clone()),
+        Stored::Array(items) => Datum::Array(items.iter().map(datum).collect()),
     }
 }
 

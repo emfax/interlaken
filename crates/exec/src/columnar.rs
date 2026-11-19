@@ -39,7 +39,7 @@ pub fn arrow_type(ty: &DataType) -> ArrowType {
             }
             ScalarType::Uuid => ArrowType::FixedSizeBinary(16),
         },
-        DataType::Array(element) => ArrowType::List(Arc::new(field("item", element))),
+        DataType::Array(element) => ArrowType::List(Arc::new(nested_field("item", element))),
         DataType::Record(fields) => ArrowType::Struct(record_fields(fields)),
         DataType::Entity(_) => ArrowType::Null,
     }
@@ -51,11 +51,18 @@ pub fn field(name: &str, ty: &Type) -> Field {
     Field::new(name, arrow_type(&ty.data), ty.nullable)
 }
 
+/// Return the Arrow field for a list element or record field: always
+/// nullable, since outer joins and applies pad nested NOT NULL values with
+/// NULLs just as they do top-level ones.
+fn nested_field(name: &str, ty: &Type) -> Field {
+    Field::new(name, arrow_type(&ty.data), true)
+}
+
 /// Return the Arrow fields of a record type.
 fn record_fields(fields: &[interlaken_ir::Field]) -> Fields {
     fields
         .iter()
-        .map(|f| field(f.name.as_str(), &f.ty))
+        .map(|f| nested_field(f.name.as_str(), &f.ty))
         .collect()
 }
 
@@ -134,7 +141,7 @@ pub fn build_array(ty: &DataType, values: &[Datum]) -> Result<ArrayRef, ExecErro
             }
             let child = build_array(&element.data, &children)?;
             Arc::new(ListArray::try_new(
-                Arc::new(field("item", element)),
+                Arc::new(nested_field("item", element)),
                 OffsetBuffer::new(ScalarBuffer::from(offsets)),
                 child,
                 Some(nulls.into()),

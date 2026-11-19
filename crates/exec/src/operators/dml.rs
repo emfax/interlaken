@@ -25,6 +25,7 @@ use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
+use crate::memory::{Reservation, entry_bytes};
 use crate::physical::{Dml, Physical};
 
 /// What a DML operator does to each target row.
@@ -51,6 +52,8 @@ struct DmlState {
     stored: Option<StoredTable>,
     /// Primary keys of the target rows already changed by this statement.
     changed: HashSet<RowKey>,
+    /// The memory held by `changed`.
+    memory: Reservation,
     /// The compiled `RETURNING` expressions, over the target row.
     returning: Vec<CompiledExpr>,
     /// The column types of the target table.
@@ -79,23 +82,27 @@ impl DmlState {
     }
 
     /// Return the input rows whose target rows this statement has not changed yet, marking them.
-    fn first_occurrences(&mut self, rows: &[Vec<Datum>]) -> Vec<usize> {
+    fn first_occurrences(&mut self, rows: &[Vec<Datum>]) -> Result<Vec<usize>, ExecError> {
         let pk: Vec<usize> = self
             .table
             .primary_key
             .iter()
             .map(|c| usize::try_from(c.get()).expect("column id"))
             .collect();
-        (0..rows.len())
-            .filter(|&i| {
-                let key = if pk.is_empty() {
-                    rows[i].clone()
-                } else {
-                    pk.iter().map(|&c| rows[i][c].clone()).collect()
-                };
-                self.changed.insert(RowKey(key))
-            })
-            .collect()
+        let mut first = Vec::new();
+        for (i, row) in rows.iter().enumerate() {
+            let key = RowKey(if pk.is_empty() {
+                row.clone()
+            } else {
+                pk.iter().map(|&c| row[c].clone()).collect()
+            });
+            if !self.changed.contains(&key) {
+                self.memory.grow(entry_bytes(&key, 0))?;
+                self.changed.insert(key);
+                first.push(i);
+            }
+        }
+        Ok(first)
     }
 
     /// Apply the write to one input batch and return the rows `RETURNING` sees.
@@ -128,7 +135,7 @@ impl DmlState {
             Write::Delete(key) => {
                 let key = key.clone();
                 let targets = Self::target_rows(b, &key)?;
-                for i in self.first_occurrences(&targets) {
+                for i in self.first_occurrences(&targets)? {
                     let row = &targets[i];
                     if rows::delete(txn, stored, &pk_of(row)?).await? {
                         written.push(row.clone());
@@ -138,7 +145,7 @@ impl DmlState {
             Write::Update(key, _) => {
                 let key = key.clone();
                 let targets = Self::target_rows(b, &key)?;
-                let selected = self.first_occurrences(&targets);
+                let selected = self.first_occurrences(&targets)?;
                 // New values are computed only for the rows actually updated.
                 let mask: BooleanArray = (0..b.num_rows())
                     .map(|i| Some(selected.binary_search(&i).is_ok()))
@@ -256,6 +263,7 @@ pub(crate) fn dml(
         table: dml.table.clone(),
         stored: None,
         changed: HashSet::new(),
+        memory: ctx.reserve(node, "ModifyTable"),
         returning,
         types,
         schema: node.schema.clone(),

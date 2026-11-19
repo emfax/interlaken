@@ -19,6 +19,7 @@ use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
+use crate::memory::{Reservation, entry_bytes, row_bytes};
 use crate::physical::{Aggregate, Physical};
 
 /// One aggregate's state for one group.
@@ -54,6 +55,8 @@ struct AggregateState {
     schema: SchemaRef,
     /// Output batches not yet returned.
     ready: Vec<RecordBatch>,
+    /// The memory held by groups and kept argument tuples.
+    memory: Reservation,
 }
 
 /// Return the rows of a predicate result that are TRUE.
@@ -92,15 +95,22 @@ impl AggregateState {
                 .iter_mut()
                 .map(|k| k.eval(b.columns(), n))
                 .collect::<Result<Vec<_>, _>>()?;
-            let group_of: Vec<usize> = row_keys(&keys, n)?
-                .into_iter()
-                .map(|key| {
-                    *groups.entry(key.clone()).or_insert_with(|| {
-                        order.push((key.0, fresh.clone()));
+            let mut group_of: Vec<usize> = Vec::with_capacity(n);
+            for key in row_keys(&keys, n)? {
+                let group = match groups.get(&key) {
+                    Some(&g) => g,
+                    None => {
+                        // The key is held twice: in the map and in the output order.
+                        self.memory.grow(
+                            2 * entry_bytes(&key, fresh.len() * std::mem::size_of::<Accumulator>()),
+                        )?;
+                        order.push((key.0.clone(), fresh.clone()));
+                        groups.insert(key, order.len() - 1);
                         order.len() - 1
-                    })
-                })
-                .collect();
+                    }
+                };
+                group_of.push(group);
+            }
             for (a, compiled) in self.aggs.iter_mut().enumerate() {
                 // Arguments are evaluated only for the rows the filter keeps.
                 let rows: Vec<usize> = match &mut compiled.filter {
@@ -132,7 +142,10 @@ impl AggregateState {
                                 *n += 1;
                             }
                         }
-                        Accumulator::Tuples(tuples) => tuples.push(tuple),
+                        Accumulator::Tuples(tuples) => {
+                            self.memory.grow(row_bytes(&tuple))?;
+                            tuples.push(tuple);
+                        }
                     }
                 }
             }
@@ -212,5 +225,6 @@ pub(crate) fn aggregate(
         types: node.types.clone(),
         schema: node.schema.clone(),
         ready: Vec::new(),
+        memory: ctx.reserve(node, "HashAggregate"),
     }))
 }

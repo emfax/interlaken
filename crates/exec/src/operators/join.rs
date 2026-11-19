@@ -13,10 +13,13 @@ use arrow_schema::SchemaRef;
 use interlaken_ir::JoinKind;
 use interlaken_ir::interp::RowKey;
 
-use super::pull::{Pull, batch, collect, concat, into_stream, row_keys, take};
+use futures::StreamExt;
+
+use super::pull::{Pull, batch, concat, into_stream, row_keys, take};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
+use crate::memory::{Reservation, batch_bytes, entry_bytes};
 use crate::physical::Physical;
 
 /// The most pairs evaluated against the residual at once.
@@ -56,13 +59,23 @@ struct JoinState {
     left_done: bool,
     /// Whether unmatched right rows were emitted.
     finished: bool,
+    /// The memory held by the build side.
+    memory: Reservation,
 }
 
 impl JoinState {
     /// Read and index the right input.
     async fn build(&mut self) -> Result<(), ExecError> {
-        let right = self.right.take().expect("built once");
-        let rows = concat(&self.right_schema, &collect(right).await?)?;
+        let mut right = self.right.take().expect("built once");
+        let mut batches = Vec::new();
+        while let Some(b) = right.next().await {
+            let b = b?;
+            self.memory.grow(batch_bytes(&b))?;
+            batches.push(b);
+        }
+        let rows = concat(&self.right_schema, &batches)?;
+        drop(batches);
+        self.memory.resize(batch_bytes(&rows) + rows.num_rows())?;
         let index = if self.right_keys.is_empty() {
             None
         } else {
@@ -74,6 +87,8 @@ impl JoinState {
             let mut index: HashMap<RowKey, Vec<u32>> = HashMap::new();
             for (j, key) in row_keys(&keys, rows.num_rows())?.into_iter().enumerate() {
                 if !key.0.iter().any(interlaken_ir::interp::Datum::is_null) {
+                    self.memory
+                        .grow(entry_bytes(&key, std::mem::size_of::<u32>()))?;
                     index
                         .entry(key)
                         .or_default()
@@ -301,5 +316,6 @@ pub(crate) fn join(
         schema: node.schema.clone(),
         left_done: false,
         finished: false,
+        memory: ctx.reserve(node, "HashJoin"),
     }))
 }

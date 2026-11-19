@@ -136,8 +136,22 @@ Entry format:
 ### incremental-aggregates: Accumulate sum, min, max and bool aggregates incrementally
 - **Origin:** E3 (ADR-0028 phase 1)
 - **Why:** Aggregates other than plain `count` keep every argument tuple until the group finishes, so memory grows with the input. Exact incremental accumulators (integer sums in `i128`, min and max) would make it proportional to the number of groups; float sums need care to stay identical to the interpreter.
-- **When:** Before memory budgets (E5), or when large groups show up.
+- **When:** When large groups show up. Since E5, kept argument tuples count against the query's memory budget, so large groups fail cleanly rather than exhaust the node.
 - **Size:** About 2 days.
+- **Status:** open
+
+### explain-policy-markers: Mark the subplans security lowering adds
+- **Origin:** ADR-0025 phase 1, E5
+- **Why:** `EXPLAIN` hides policy logic from principals without policy privilege, and it finds the parts to hide by plan shape: the inner side of joins and applies on the path from a policy filter down to its rows. That is safe for the plans lowering produces today, but an optimizer change that reshapes them could expose a policy subplan. A marker that lowering sets on the operators it adds would make the redaction exact.
+- **When:** Before the optimizer gains rules that move joins across policy filters, or before `EXPLAIN` is exposed to untrusted clients.
+- **Size:** About 1–2 days across the IR and the executor.
+- **Status:** open
+
+### storage-temporal-types: Store dates, timestamps and UUIDs
+- **Origin:** E5
+- **Why:** Storage has types only for the scalars the MVP tables needed (plus, since E5, arrays of them). The IR and executor support `date`, `timestamptz`, `uuid` and `jsonb`, but tables can't hold them, so `stored_type` returns `None` for them.
+- **When:** When the SQL front end needs those column types.
+- **Size:** About 2–3 days (tuple encoding, row format, catalog codes, property tests).
 - **Status:** open
 
 ## Executor and IR open questions
@@ -145,7 +159,7 @@ Entry format:
 ### default-memory-budgets: Choose default per-query and per-node memory budgets
 - **Origin:** ADR-0027 open questions, `executor-design.md`
 - **Why:** Queries that exceed the budget fail rather than spill, so the defaults decide which real queries succeed. They need numbers for the container sizes we expect.
-- **When:** Before executor milestone E5, ideally after measuring E3 operators on realistic data.
+- **When:** Before production deployment, after measuring operators on realistic data. E5 kept the 256 MiB per-query default and configures no node pool unless asked (ADR-0027).
 - **Size:** About 1 day of measurement, plus an ADR update.
 - **Status:** open
 

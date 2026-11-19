@@ -59,6 +59,7 @@ As implemented in M4: the system tables' own definitions are built in (IDs 1–4
 - **DDL and DML conflict at every isolation level.** Every DDL change to a table rewrites its `sys_tables` row (bumping `schema_version`), and every row write registers that row as a dependency ([ADR-0004](0004-optimistic-transactions-and-isolation-levels.md)), so DML under a stale definition aborts. Index backfill and `DROP TABLE` / `DROP INDEX` register the ranges they read as dependencies, so DML that committed after their snapshot aborts the DDL instead of being missed.
 - **DDL in M4:** `create_table`, `drop_table`, `create_index` (with backfill), `drop_index` and `add_column` (nullable only; rows written before it read the column as NULL through the row format's column count).
 - `rows::check_indexes` verifies that a table's indexes match its rows exactly, for tests and hardening.
+- **Array columns (E5):** columns may be arrays of a scalar type (row format in [ADR-0003](0003-order-preserving-tuple-encoding-and-row-format.md)). `create_table` and `create_index` reject array columns in primary keys and indexes.
 
 ## Implementation Phases
 

@@ -29,8 +29,8 @@ const MAX_COLUMNS: usize = 1600;
 /// - [`CatalogError::TableExists`] if the name is taken.
 /// - [`CatalogError::InvalidDefinition`] if the name is empty or reserved
 ///   (`sys_` prefix), there are no columns or too many, a column name
-///   repeats, or the primary key is empty, repeats a column or names an
-///   unknown column.
+///   repeats, or the primary key is empty, repeats a column, names an
+///   unknown column or includes an array column.
 /// - A storage error, or [`Error::ReadOnlyTransaction`].
 pub async fn create_table(txn: &Txn, spec: TableSpec) -> Result<TableDef> {
     check_name("table", &spec.name)?;
@@ -61,6 +61,12 @@ pub async fn create_table(txn: &Txn, spec: TableSpec) -> Result<TableDef> {
             })?;
         if primary_key.contains(&position) {
             return Err(invalid(format!("primary key repeats column \"{name}\"")));
+        }
+        if !spec.columns[position].ty.is_keyable() {
+            return Err(invalid(format!(
+                "primary key column \"{name}\" has type {}, which can't be a key",
+                spec.columns[position].ty
+            )));
         }
         primary_key.push(position);
     }
@@ -136,7 +142,7 @@ pub async fn drop_table(txn: &Txn, name: &str) -> Result<()> {
 ///   table or a column doesn't exist.
 /// - [`CatalogError::IndexExists`] if the name is taken.
 /// - [`CatalogError::InvalidDefinition`] if the name is empty or reserved,
-///   or the column list is empty or repeats a column.
+///   or the column list is empty, repeats a column or includes an array column.
 /// - [`ConstraintViolation::Unique`] if a unique index would have duplicates.
 /// - A storage error, or [`Error::ReadOnlyTransaction`].
 pub async fn create_index(txn: &Txn, spec: IndexSpec) -> Result<TableDef> {
@@ -157,6 +163,12 @@ pub async fn create_index(txn: &Txn, spec: IndexSpec) -> Result<TableDef> {
             })?;
         if columns.iter().any(|c: &IndexColumn| c.column == column) {
             return Err(invalid(format!("index repeats column \"{name}\"")));
+        }
+        let ty = def.columns()[column].ty;
+        if !ty.is_keyable() {
+            return Err(invalid(format!(
+                "index column \"{name}\" has type {ty}, which can't be indexed"
+            )));
         }
         columns.push(IndexColumn {
             column,

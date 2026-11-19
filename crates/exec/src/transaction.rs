@@ -18,6 +18,7 @@ use interlaken_storage::{SavepointId, Txn};
 
 use crate::error::ExecError;
 use crate::exec::{ExecContext, collect};
+use crate::memory::{DEFAULT_QUERY_BUDGET, MemoryPool, QueryMemory};
 use crate::physical::Physical;
 
 /// A transaction that runs statements.
@@ -30,6 +31,10 @@ pub struct Transaction {
     options: ExecOptions,
     /// Whether a statement failed since the last rollback to a savepoint.
     aborted: bool,
+    /// Each statement's memory budget in bytes (ADR-0027).
+    query_budget: usize,
+    /// The node-wide pool statements draw on, if any.
+    pool: Option<Arc<MemoryPool>>,
 }
 
 impl Transaction {
@@ -41,6 +46,18 @@ impl Transaction {
             catalog,
             options,
             aborted: false,
+            query_budget: DEFAULT_QUERY_BUDGET,
+            pool: None,
+        }
+    }
+
+    /// Give each statement a memory budget of `query_budget` bytes, drawn from `pool` if given.
+    #[must_use]
+    pub fn with_memory(self, query_budget: usize, pool: Option<Arc<MemoryPool>>) -> Self {
+        Self {
+            query_budget,
+            pool,
+            ..self
         }
     }
 
@@ -73,7 +90,8 @@ impl Transaction {
         }
         self.txn.next_statement();
         let savepoint = self.txn.savepoint();
-        let ctx = ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options);
+        let ctx = ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options)
+            .with_memory(QueryMemory::new(self.query_budget, self.pool.clone()));
         let result = collect(plan, &ctx).await;
         drop(ctx);
         match result {

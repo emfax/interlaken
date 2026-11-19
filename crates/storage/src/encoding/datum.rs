@@ -1,8 +1,9 @@
-//! Column values that can appear in an encoded key.
+//! Column values.
 
-/// A single column value in a key tuple.
+/// A single column value.
 ///
-/// The variants cover the types in ADR-0003. Equality is structural, so
+/// The scalar variants cover the types in ADR-0003 and can appear in keys;
+/// arrays appear only in row values. Equality is structural, so
 /// `Float8(NaN) != Float8(NaN)`; compare encoded bytes when you need
 /// Postgres equality semantics (NaN equals NaN, `-0.0` equals `0.0`).
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +24,8 @@ pub enum Datum {
     Text(String),
     /// `bytea`.
     Bytea(Vec<u8>),
+    /// An array of scalar values (or NULLs); never part of a key.
+    Array(Vec<Datum>),
 }
 
 impl Datum {

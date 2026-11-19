@@ -36,6 +36,8 @@ const SIGN_BIT: u64 = 1 << 63;
 pub struct KeyBuilder {
     buf: Vec<u8>,
     max_len: usize,
+    /// An array was pushed; arrays have no key encoding.
+    unkeyable: bool,
 }
 
 impl KeyBuilder {
@@ -60,6 +62,7 @@ impl KeyBuilder {
         Self {
             buf: Vec::new(),
             max_len,
+            unkeyable: false,
         }
     }
 
@@ -107,6 +110,11 @@ impl KeyBuilder {
                 self.buf.push(BYTEA);
                 self.push_escaped(b);
             }
+            Datum::Array(_) => {
+                // Arrays have no key encoding; `finish` reports it.
+                self.unkeyable = true;
+                return self;
+            }
         }
         if order.direction == Direction::Desc {
             for byte in &mut self.buf[start..] {
@@ -132,8 +140,12 @@ impl KeyBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`EncodeError::KeyTooLong`] if the tuple exceeds the builder's limit.
+    /// Returns [`EncodeError::KeyTooLong`] if the tuple exceeds the builder's limit,
+    /// or [`EncodeError::Unkeyable`] if an array was pushed.
     pub fn finish(self) -> Result<Vec<u8>, EncodeError> {
+        if self.unkeyable {
+            return Err(EncodeError::Unkeyable);
+        }
         if self.buf.len() > self.max_len {
             return Err(EncodeError::KeyTooLong {
                 len: self.buf.len(),
@@ -294,6 +306,10 @@ mod tests {
         assert_eq!(
             builder.finish(),
             Err(EncodeError::KeyTooLong { len: 9, max: 4 })
+        );
+        assert_eq!(
+            encode_tuple(&[(Datum::Array(vec![]), SortOrder::ASC)]),
+            Err(EncodeError::Unkeyable)
         );
     }
 

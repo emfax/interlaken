@@ -15,6 +15,7 @@ use crate::columnar::datum_at;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
+use crate::memory::{Reservation, batch_bytes};
 use crate::physical::{BATCH_ROWS, Physical};
 use crate::rowwise::eval_constant;
 
@@ -30,6 +31,8 @@ struct SortState {
     fetch: Option<usize>,
     /// The schema.
     schema: SchemaRef,
+    /// The memory held by buffered rows.
+    memory: Reservation,
     /// Sorted output batches not yet returned, last first.
     ready: Vec<RecordBatch>,
 }
@@ -69,6 +72,7 @@ impl SortState {
         let mut rows = 0;
         while let Some(b) = input.next().await {
             let b = b?;
+            self.memory.grow(batch_bytes(&b))?;
             rows += b.num_rows();
             buffered.push(b);
             // Top-N: once twice the fetch is buffered, keep only the best rows.
@@ -78,11 +82,15 @@ impl SortState {
                 let all = concat(&self.schema, &buffered)?;
                 let best = self.sort(&all)?;
                 rows = best.num_rows();
+                self.memory.resize(batch_bytes(&best))?;
                 buffered = vec![best];
             }
         }
         let all = concat(&self.schema, &buffered)?;
+        drop(buffered);
         let sorted = self.sort(&all)?;
+        drop(all);
+        self.memory.resize(batch_bytes(&sorted))?;
         self.ready = chunks(&sorted);
         self.ready.reverse();
         Ok(())
@@ -134,6 +142,7 @@ pub(crate) fn sort(
         exprs,
         fetch,
         schema: node.schema.clone(),
+        memory: ctx.reserve(node, if fetch.is_some() { "TopN" } else { "Sort" }),
         ready: Vec::new(),
     }))
 }

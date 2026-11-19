@@ -58,6 +58,8 @@ The schema version lets a later `ALTER TABLE` read old rows without rewriting th
 
 As implemented in M4 (`encoding::encode_row` / `decode_row`): little-endian `u32` schema version, `u16` column count, null bitmap with zero padding bits, fixed-width values, then each variable-length value as a `u32` length and its bytes. The column count lets rows written before `ADD COLUMN` read the new trailing columns as NULL. Decoding accepts only canonical encodings and is fuzzed.
 
+*Arrays (E5):* a column may hold a one-dimensional array of a scalar type, with NULL elements (`ColumnType::Array`, catalog code 100 plus the element type's code). An array is a variable-length row value whose bytes are a `u32` element count followed by the elements in the row's own layout: a NULL bitmap, the fixed-width elements, then the variable-length ones. Arrays have no key encoding: `KeyBuilder::finish` rejects a tuple containing one (`EncodeError::Unkeyable`), and DDL refuses array columns in primary keys and indexes ([ADR-0007](0007-minimal-catalog-and-row-layer.md)).
+
 ## Implementation Phases
 
 - [x] **Phase 1: Tuple encoding with property tests and fuzzing** - M1

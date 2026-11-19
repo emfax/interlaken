@@ -66,12 +66,6 @@ fn planning_pushes_only_leakproof_conjuncts() {
             ..
         }
     ));
-
-    // Later milestones' operators are reported, not mis-executed.
-    let unnest = resolved("(plan (unnest (get t) (array a) (columns v)))");
-    assert!(
-        matches!(plan(&unnest, &catalog), Err(ExecError::Unsupported(m)) if m.contains("unnest"))
-    );
 }
 
 #[test]
@@ -299,4 +293,68 @@ async fn large_inputs() {
     );
     drop(ctx);
     txn.commit().await.unwrap();
+}
+
+#[tokio::test]
+/// Assert `Unnest` and `Nest` edge cases match the interpreter: NULL records, NULL and empty
+/// arrays, ordered lists, keyless nests of no rows, and nested lists unnested again.
+async fn nest_and_unnest_edge_cases() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = storage_with(dir.path(), 5).await;
+    let catalog = Arc::new(ir_catalog());
+    let shared: Arc<dyn Catalog> = catalog.clone();
+    let txn = storage.begin(TxnOptions::default()).await.unwrap();
+    let ctx = ExecContext::new(txn.clone(), shared, Vec::new(), ExecOptions::default());
+    let mut db = interlaken_ir::interp::Database::new();
+    db.set_rows(
+        interlaken_ir::TableId::new(100),
+        (0..5)
+            .map(|i| {
+                vec![
+                    Datum::Int8(i),
+                    Datum::Int4(i32::try_from(i % 7).unwrap()),
+                    Datum::Text(format!("r{i}")),
+                ]
+            })
+            .collect(),
+    );
+    for text in [
+        // A NULL record element reads as NULL in every field.
+        "(plan (unnest (values (columns x) (row 1) (row 2)) (array (cast null (record (a int4) (b text)))) (columns a b)))",
+        // NULL and empty arrays produce no rows; NULL elements do.
+        "(plan (unnest (get t) (case (when (= a 1) (cast null (array int4))) (when (= a 2) (cast (array) (array int4))) (else (array a (cast null int4)))) (columns v)))",
+        // A sort below orders each list; nesting without keys over no rows gives one empty list.
+        "(plan (nest (sort (get t) (desc id)) (keys) (fields id b) :as all))",
+        "(plan (nest (filter (get t) (> a 100)) (keys) (fields id) :as none))",
+        "(plan (nest (filter (get t) (> a 100)) (keys a) (fields id) :as none))",
+        // Lists unnested again, keyed by a NULL-able key.
+        "(plan (project (unnest (nest (get t) (keys (as (nullif a 1) k)) (fields id b) :as g) g (columns i s)) k i s))",
+        // One-field records unnest into one column.
+        "(plan (unnest (nest (sort (get t) (asc id)) (keys) (fields id) :as g) g (columns i)))",
+    ] {
+        let plan = resolved(text);
+        let expected = interlaken_ir::interp::execute(
+            &plan,
+            catalog.as_ref(),
+            &mut db.clone(),
+            &[],
+            ExecOptions::default(),
+        )
+        .unwrap();
+        let physical = plan_with(&plan, catalog.as_ref(), PlanOptions { batch_rows: 2 }).unwrap();
+        let mut actual = Vec::new();
+        for b in collect(&physical, &ctx).await.unwrap() {
+            for r in 0..b.num_rows() {
+                actual.push(
+                    b.columns()
+                        .iter()
+                        .map(|c| datum_at(c.as_ref(), r).unwrap())
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{text}");
+    }
+    drop(ctx);
+    txn.abort();
 }

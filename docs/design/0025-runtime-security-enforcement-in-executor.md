@@ -1,11 +1,11 @@
 ---
 id: 0025
 title: Runtime Security Enforcement in the Executor
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [executor, security]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-20
 implemented:
 spec-sections: ["executor-design.md#security-in-the-executor", "executor-design.md#observability", "executor-design.md#testing-strategy"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -38,7 +38,14 @@ Security lowering inserts `PolicyFilter` and `WriteCheck` nodes and constrains t
 
 ## Implementation Phases
 
-- [ ] **Phase 1: PolicyFilter and WriteCheck operators, residual pushdown, end-to-end security oracle** - E5
+- [x] **Phase 1: PolicyFilter and WriteCheck operators, residual pushdown, end-to-end security oracle** - E5
+  - *As implemented:* the planner treats a chain of filters and policy filters directly above a scan as one unit. Leakproof conjuncts on the scan's own columns, from any filter in the chain, policy residual conjuncts included, run in storage as the scan's `RowFilter`. Rows they reject never leave the storage pool, and they still enter the read set. Every other conjunct stays in its own filter, in its original order, so a `PolicyFilter` still runs before anything above it. Leakproof conjuncts can't raise, so where they run doesn't matter. Policy conjuncts may also bound the scan's key range, since the filter is always kept as a recheck. The scan keeps pushed policy conjuncts apart from the user's, for `EXPLAIN`. A residual that needs a join (attribute paths, hierarchy closures, tag sets via `Unnest`) stays in a `PolicyFilter` above the join or apply that lowering added.
+  - `WriteCheck` checks each batch of DML input before the DML operator sees it, so a rejected row is never written. A check that is FALSE or NULL fails the statement with `ExecError::PermissionDenied`: SQLSTATE `42501`, message `permission denied for table docs`, with no row values. Because DML streams, an earlier batch may already be written when a later one fails. The statement savepoint ([ADR-0026](0026-statement-atomicity-and-halloween-protection.md)) rolls those writes back. The error may also differ from the interpreter's, which checks every row before writing any; for example, the executor can hit a unique violation first.
+  - `EXPLAIN` without policy privilege (`ExplainOptions::show_policies` false) prints `PolicyFilter(table)` and `WriteCheck(table)` without their expressions. A governed scan hides its key values and policy conjuncts. On the path from a policy filter down to its rows, the inner side of each join or apply, which lowering added, collapses to `<policy> subplan`, and the join's condition is hidden. This redaction depends on the shape of lowered plans; a marker from lowering would make it exact (backlog `explain-policy-markers`).
+  - The fixture's `docs.tags` is an array, so storage gained array columns ([ADR-0003](0003-order-preserving-tuple-encoding-and-row-format.md)).
+  - *Testing:* the IR security oracle runs end to end. In 3,000 random cases (policies, data, principals, tenants and queries, with 1 to 3 rows per storage call), the secured plans, optimized or not, are planned physically and executed over real storage. They must return exactly what the unsecured query returns in the interpreter over the authorized rows, and never fail where that succeeds. About 59% of the plans push policy conjuncts into storage, and about 58% keep a `PolicyFilter`.
+  - Every physical plan is also checked for the barrier rule: nothing but leakproof expressions runs below a policy filter or in a governed scan. The leak suite runs through the executor: hidden rows' errors, aggregates, `LIMIT`, `EXISTS`, nesting and unnesting. So do the USING and WITH CHECK write tests and a NULL write check. `EXPLAIN ANALYZE` confirms that only the visible row leaves storage. `EXPLAIN` is checked to hide distinctive policy literals, closure tables and lowering aliases, while keeping the user's own predicates.
+  - Seven planted bugs are each caught: dropped policy pushdown, filter stages rebuilt in the wrong order, non-leakproof conjuncts pushed into storage, write checks passing NULL or never failing, and `EXPLAIN` showing residuals or policy subplans.
 
 ## Consequences
 

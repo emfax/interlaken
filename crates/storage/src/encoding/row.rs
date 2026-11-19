@@ -10,6 +10,10 @@
 //! | Fixed-width columns, in column order, NULLs omitted | per type |
 //! | Variable-length columns, in column order, NULLs omitted | `u32` length, then the bytes |
 //!
+//! An array value is variable-length. Its bytes are a `u32` element count
+//! followed by the elements in the same layout as a row's columns: a NULL
+//! bitmap, the fixed-width elements, then the variable-length ones.
+//!
 //! A row may hold fewer columns than the table's current definition: it was
 //! written before `ALTER TABLE ... ADD COLUMN`, and the missing trailing
 //! columns read as NULL. The decoder accepts only the canonical encoding
@@ -76,12 +80,6 @@ pub fn encode_row(
             found: values.len(),
         });
     }
-    let count = u16::try_from(values.len()).map_err(|_| RowFormatError::TooLarge)?;
-    let mut out = Vec::with_capacity(16 + values.len() * 8);
-    out.extend_from_slice(&schema_version.to_le_bytes());
-    out.extend_from_slice(&count.to_le_bytes());
-    let bitmap_start = out.len();
-    out.resize(bitmap_start + values.len().div_ceil(8), 0);
     for (i, (ty, value)) in types.iter().zip(values).enumerate() {
         if !ty.accepts(value) {
             return Err(RowFormatError::TypeMismatch {
@@ -89,6 +87,24 @@ pub fn encode_row(
                 expected: *ty,
             });
         }
+    }
+    let count = u16::try_from(values.len()).map_err(|_| RowFormatError::TooLarge)?;
+    let mut out = Vec::with_capacity(16 + values.len() * 8);
+    out.extend_from_slice(&schema_version.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    write_values(&mut out, values)?;
+    Ok(out)
+}
+
+/// Append the NULL bitmap, fixed-width values and variable-length values of
+/// `values`, which have already been type-checked.
+///
+/// An array is a variable-length value whose body is a `u32` element count
+/// followed by the elements in this same layout.
+fn write_values(out: &mut Vec<u8>, values: &[Datum]) -> Result<(), RowFormatError> {
+    let bitmap_start = out.len();
+    out.resize(bitmap_start + values.len().div_ceil(8), 0);
+    for (i, value) in values.iter().enumerate() {
         if value.is_null() {
             out[bitmap_start + i / 8] |= 1 << (i % 8);
         }
@@ -100,20 +116,35 @@ pub fn encode_row(
             Datum::Int4(v) => out.extend_from_slice(&v.to_le_bytes()),
             Datum::Int8(v) => out.extend_from_slice(&v.to_le_bytes()),
             Datum::Float8(v) => out.extend_from_slice(&v.to_bits().to_le_bytes()),
-            Datum::Null | Datum::Text(_) | Datum::Bytea(_) => {}
+            Datum::Null | Datum::Text(_) | Datum::Bytea(_) | Datum::Array(_) => {}
         }
     }
     for value in values {
-        let bytes: &[u8] = match value {
-            Datum::Text(s) => s.as_bytes(),
-            Datum::Bytea(b) => b,
-            _ => continue,
-        };
-        let len = u32::try_from(bytes.len()).map_err(|_| RowFormatError::TooLarge)?;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(bytes);
+        let len_at = out.len();
+        match value {
+            Datum::Text(s) => write_bytes(out, s.as_bytes())?,
+            Datum::Bytea(b) => write_bytes(out, b)?,
+            Datum::Array(items) => {
+                out.extend_from_slice(&[0; 4]);
+                let count = u32::try_from(items.len()).map_err(|_| RowFormatError::TooLarge)?;
+                out.extend_from_slice(&count.to_le_bytes());
+                write_values(out, items)?;
+                let len =
+                    u32::try_from(out.len() - len_at - 4).map_err(|_| RowFormatError::TooLarge)?;
+                out[len_at..len_at + 4].copy_from_slice(&len.to_le_bytes());
+            }
+            _ => {}
+        }
     }
-    Ok(out)
+    Ok(())
+}
+
+/// Append a `u32` length and then `bytes`.
+fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), RowFormatError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| RowFormatError::TooLarge)?;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Decode a row of a table whose current columns have `types`.
@@ -136,14 +167,28 @@ pub fn decode_row(bytes: &[u8], types: &[ColumnType]) -> Result<(u32, Vec<Datum>
             found: stored,
         });
     }
-    let bitmap = reader.take(stored.div_ceil(8))?;
-    if stored % 8 != 0 && bitmap[stored / 8] >> (stored % 8) != 0 {
+    let mut values = read_values(&mut reader, &types[..stored])?;
+    values.resize(types.len(), Datum::Null);
+    if reader.pos != bytes.len() {
+        return Err(RowFormatError::Corrupt("trailing bytes"));
+    }
+    Ok((schema_version, values))
+}
+
+/// Read one value per entry of `types`, in the layout [`write_values`] writes.
+fn read_values(
+    reader: &mut Reader<'_>,
+    types: &[ColumnType],
+) -> Result<Vec<Datum>, RowFormatError> {
+    let n = types.len();
+    let bitmap = reader.take(n.div_ceil(8))?;
+    if !n.is_multiple_of(8) && bitmap[n / 8] >> (n % 8) != 0 {
         return Err(RowFormatError::Corrupt("nonzero null bitmap padding"));
     }
     let is_null = |i: usize| bitmap[i / 8] & (1 << (i % 8)) != 0;
 
-    let mut values = vec![Datum::Null; types.len()];
-    for (i, ty) in types.iter().enumerate().take(stored) {
+    let mut values = vec![Datum::Null; n];
+    for (i, ty) in types.iter().enumerate() {
         if is_null(i) {
             continue;
         }
@@ -159,28 +204,44 @@ pub fn decode_row(bytes: &[u8], types: &[ColumnType]) -> Result<(u32, Vec<Datum>
             ColumnType::Float8 => {
                 Datum::Float8(f64::from_bits(u64::from_le_bytes(reader.array()?)))
             }
-            ColumnType::Text | ColumnType::Bytea => continue,
+            ColumnType::Text | ColumnType::Bytea | ColumnType::Array(_) => continue,
         };
     }
-    for (i, ty) in types.iter().enumerate().take(stored) {
+    for (i, ty) in types.iter().enumerate() {
         if is_null(i) || ty.fixed_width().is_some() {
             continue;
         }
         let len = u32::from_le_bytes(reader.array()?);
         let len = usize::try_from(len).map_err(|_| RowFormatError::TooLarge)?;
         let body = reader.take(len)?;
-        values[i] = if *ty == ColumnType::Text {
-            let text = std::str::from_utf8(body)
-                .map_err(|_| RowFormatError::Corrupt("text is not valid UTF-8"))?;
-            Datum::Text(text.to_owned())
-        } else {
-            Datum::Bytea(body.to_vec())
+        values[i] = match ty {
+            ColumnType::Text => {
+                let text = std::str::from_utf8(body)
+                    .map_err(|_| RowFormatError::Corrupt("text is not valid UTF-8"))?;
+                Datum::Text(text.to_owned())
+            }
+            ColumnType::Array(element) => {
+                let mut inner = Reader {
+                    bytes: body,
+                    pos: 0,
+                };
+                let count = u32::from_le_bytes(inner.array()?);
+                let count = usize::try_from(count).map_err(|_| RowFormatError::TooLarge)?;
+                // Every element takes at least one bitmap bit, so a count beyond
+                // eight per byte is corrupt; checking first bounds the allocation.
+                if count > body.len().saturating_mul(8) {
+                    return Err(RowFormatError::Corrupt("array count exceeds its body"));
+                }
+                let items = read_values(&mut inner, &vec![element.column_type(); count])?;
+                if inner.pos != body.len() {
+                    return Err(RowFormatError::Corrupt("trailing bytes in an array"));
+                }
+                Datum::Array(items)
+            }
+            _ => Datum::Bytea(body.to_vec()),
         };
     }
-    if reader.pos != bytes.len() {
-        return Err(RowFormatError::Corrupt("trailing bytes"));
-    }
-    Ok((schema_version, values))
+    Ok(values)
 }
 
 /// A bounds-checked cursor over the row bytes.
@@ -243,6 +304,40 @@ mod tests {
             assert_eq!(format!("{decoded:?}"), format!("{row:?}"));
             assert_eq!(encode_row(9, &TYPES, &decoded).unwrap(), bytes);
         }
+    }
+
+    #[test]
+    /// Assert arrays of every element type round-trip, with NULL elements and when empty.
+    fn arrays_round_trip() {
+        use super::super::ElementType;
+        for (scalar, value) in TYPES.iter().zip(sample()) {
+            let ty = ColumnType::Array(ElementType::of(*scalar).unwrap());
+            for items in [
+                vec![],
+                vec![value.clone()],
+                vec![Datum::Null, value.clone(), Datum::Null],
+                vec![value.clone(); 9],
+            ] {
+                let row = vec![Datum::Int8(1), Datum::Array(items), Datum::Text("t".into())];
+                let types = [ColumnType::Int8, ty, ColumnType::Text];
+                let bytes = encode_row(2, &types, &row).unwrap();
+                let (_, decoded) = decode_row(&bytes, &types).unwrap();
+                assert_eq!(format!("{decoded:?}"), format!("{row:?}"));
+                assert_eq!(encode_row(2, &types, &decoded).unwrap(), bytes);
+                for len in 0..bytes.len() {
+                    assert!(decode_row(&bytes[..len], &types).is_err(), "prefix {len}");
+                }
+            }
+        }
+        let ints = ColumnType::Array(ElementType::Int4);
+        assert!(matches!(
+            encode_row(1, &[ints], &[Datum::Array(vec![Datum::Int8(1)])]),
+            Err(RowFormatError::TypeMismatch { column: 0, .. })
+        ));
+        assert!(matches!(
+            encode_row(1, &[ColumnType::Int4], &[Datum::Array(vec![])]),
+            Err(RowFormatError::TypeMismatch { column: 0, .. })
+        ));
     }
 
     #[test]

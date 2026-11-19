@@ -14,6 +14,9 @@ pub enum EncodeError {
         /// Configured limit.
         max: usize,
     },
+    /// The tuple contains an array, which has no key encoding.
+    #[error("arrays can't be part of a key")]
+    Unkeyable,
 }
 
 /// An error while decoding a key.

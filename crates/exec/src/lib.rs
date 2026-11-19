@@ -7,18 +7,28 @@
 //! gives them Postgres's atomicity and aborted-transaction semantics.
 //!
 //! Operators: table scans by primary key range or secondary index (with
-//! leakproof predicates pushed into storage), filter, project, limit, hash
-//! and nested-loop joins, correlated apply, hash aggregation, distinct,
-//! sort and top-N, set operations, values, and insert, update and delete.
-//! Expressions are compiled once per operator and evaluated by vectorized
-//! kernels with Postgres semantics ([`CompiledExpr`]). `Nest`, `Unnest` and
-//! the security operators arrive in milestone E5.
+//! leakproof predicates, policy residuals included, pushed into storage),
+//! filter, project, limit, hash and nested-loop joins, correlated apply,
+//! hash aggregation, distinct, sort and top-N, set operations, values,
+//! `Nest` and `Unnest`, the security barrier `PolicyFilter` and the
+//! per-batch `WriteCheck`, and insert, update and delete. Expressions are
+//! compiled once per operator and evaluated by vectorized kernels with
+//! Postgres semantics ([`CompiledExpr`]).
+//!
+//! Blocking operators reserve memory against the query's budget and an
+//! optional node-wide pool ([`QueryMemory`], [`MemoryPool`]), failing the
+//! query cleanly when either runs out. [`explain`] prints a plan, with
+//! policy logic hidden unless asked for, and [`explain_analyze`] runs it
+//! and adds per-operator metrics.
 
 mod access;
 mod columnar;
 mod error;
 mod exec;
+mod explain;
 mod kernels;
+mod memory;
+mod metrics;
 mod operators;
 mod physical;
 mod rowwise;
@@ -28,6 +38,10 @@ pub use access::{Access, KeyBounds};
 pub use columnar::{arrow_type, build_array, datum_at, field};
 pub use error::ExecError;
 pub use exec::{BatchStream, ExecContext, OuterColumn, collect, execute};
+pub use explain::{ExplainOptions, explain, explain_analyze};
 pub use kernels::CompiledExpr;
+pub use memory::{DEFAULT_QUERY_BUDGET, MemoryPool, MemoryScope, QueryMemory};
+pub use metrics::{Metrics, NodeMetrics, NodeStats};
+pub use operators::stored_type;
 pub use physical::{Aggregate, BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};
 pub use transaction::Transaction;

@@ -2,8 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::path::Path;
-
 use interlaken_ir::TableId;
 use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Database, Datum};
@@ -20,9 +18,11 @@ pub const FOLDERS: TableId = TableId::new(202);
 pub const DOCS: TableId = TableId::new(203);
 
 /// Load the security fixture catalog.
+///
+/// The text is embedded relative to this file, so other crates' tests can
+/// include this module by path.
 pub fn catalog() -> InMemoryCatalog {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/security/catalog.ir");
-    parse_catalog(&std::fs::read_to_string(path).unwrap()).unwrap()
+    parse_catalog(include_str!("../security/catalog.ir")).unwrap()
 }
 
 /// Construct a text datum.

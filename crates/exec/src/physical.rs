@@ -10,6 +10,12 @@
 //!   pairs. The build side is always the right input, chosen at plan time.
 //! - A limit directly above a sort makes the sort keep only the rows the
 //!   limit can return (top-N).
+//! - Security (ADR-0025): a chain of filters and policy filters directly
+//!   above a scan is planned as one. Leakproof conjuncts on the scan's own
+//!   columns, policy residual conjuncts included, run in storage, so rows
+//!   they reject never leave the storage pool. Everything else stays where
+//!   it was, so nothing that can raise runs before a policy filter above
+//!   it. A `WriteCheck` checks each batch of DML input before it is written.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -33,6 +39,9 @@ pub type Layout = Vec<(BindingId, ColumnId)>;
 /// One physical operator with its output layout and Arrow schema.
 #[derive(Clone, Debug)]
 pub struct Physical {
+    /// The operator's position in a preorder walk of the plan, from 0 at the
+    /// root; [`Metrics`](crate::Metrics) are indexed by it.
+    pub id: usize,
     /// The operator.
     pub op: Op,
     /// What each output column is.
@@ -67,6 +76,11 @@ pub enum Op {
         access: Access,
         /// Leakproof conjuncts evaluated on the storage thread (ADR-0023).
         pushed: Option<Expr>,
+        /// Policy residual conjuncts evaluated on the storage thread (ADR-0025).
+        policy: Option<Expr>,
+        /// Whether a policy filter governs the scan; `EXPLAIN` then hides
+        /// its key values from principals who may not see policies.
+        secured: bool,
         /// Rows per storage call.
         batch_rows: usize,
     },
@@ -154,6 +168,42 @@ pub enum Op {
         /// The rows' expressions.
         rows: Vec<Vec<Expr>>,
     },
+    /// One row per element of an array, after the input row's columns.
+    Unnest {
+        /// The input.
+        input: Box<Physical>,
+        /// The array expression.
+        expr: Expr,
+        /// The element's columns: a record's fields, or one for a scalar.
+        width: usize,
+    },
+    /// One row per group of `keys`, with the group's `fields` collected into a list of records.
+    Nest {
+        /// The input.
+        input: Box<Physical>,
+        /// The grouping expressions.
+        keys: Vec<Expr>,
+        /// The record fields.
+        fields: Vec<Expr>,
+    },
+    /// A security barrier: rows where the policy residual is TRUE (ADR-0025).
+    PolicyFilter {
+        /// The input.
+        input: Box<Physical>,
+        /// The residual conjuncts not run in storage.
+        residual: Expr,
+        /// The table whose rows the policy governs, for `EXPLAIN`.
+        table: String,
+    },
+    /// Fail the statement unless every input row passes the check (ADR-0025).
+    WriteCheck {
+        /// The input.
+        input: Box<Physical>,
+        /// The check.
+        check: Expr,
+        /// The table written, named in the permission error.
+        table: String,
+    },
     /// Write a row per input row (ADR-0026).
     Insert {
         /// What is written and returned.
@@ -190,6 +240,70 @@ pub struct Dml {
     pub returning: Vec<Expr>,
     /// The target row's columns as `RETURNING` sees them.
     pub target: Layout,
+}
+
+impl Op {
+    /// Return the operator's inputs, left to right.
+    #[must_use]
+    pub fn inputs(&self) -> Vec<&Physical> {
+        match self {
+            Self::TableScan { .. } | Self::Values { .. } => Vec::new(),
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::Limit { input, .. }
+            | Self::Aggregate { input, .. }
+            | Self::Distinct { input }
+            | Self::Sort { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::Nest { input, .. }
+            | Self::PolicyFilter { input, .. }
+            | Self::WriteCheck { input, .. } => vec![input],
+            Self::Join { left, right, .. } | Self::SetOp { left, right, .. } => vec![left, right],
+            Self::Apply { outer, inner, .. } => vec![outer, inner],
+            Self::Insert { dml, .. } | Self::Update { dml, .. } | Self::Delete { dml, .. } => {
+                vec![&dml.input]
+            }
+        }
+    }
+
+    /// Return the operator's inputs, left to right, for modification.
+    fn inputs_mut(&mut self) -> Vec<&mut Physical> {
+        match self {
+            Self::TableScan { .. } | Self::Values { .. } => Vec::new(),
+            Self::Filter { input, .. }
+            | Self::Project { input, .. }
+            | Self::Limit { input, .. }
+            | Self::Aggregate { input, .. }
+            | Self::Distinct { input }
+            | Self::Sort { input, .. }
+            | Self::Unnest { input, .. }
+            | Self::Nest { input, .. }
+            | Self::PolicyFilter { input, .. }
+            | Self::WriteCheck { input, .. } => vec![input],
+            Self::Join { left, right, .. } | Self::SetOp { left, right, .. } => vec![left, right],
+            Self::Apply { outer, inner, .. } => vec![outer, inner],
+            Self::Insert { dml, .. } | Self::Update { dml, .. } | Self::Delete { dml, .. } => {
+                vec![&mut dml.input]
+            }
+        }
+    }
+}
+
+impl Physical {
+    /// Return the number of operators in the plan rooted here.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        1 + self.op.inputs().iter().map(|i| i.size()).sum::<usize>()
+    }
+}
+
+/// Number the operators of `node` in preorder, starting at `next`.
+fn number(node: &mut Physical, next: &mut usize) {
+    node.id = *next;
+    *next += 1;
+    for input in node.op.inputs_mut() {
+        number(input, next);
+    }
 }
 
 /// Rows per storage call and per output batch.
@@ -339,6 +453,24 @@ fn target_row(dml: &Dml, input: &Rel) -> Result<Vec<usize>, ExecError> {
         .ok_or_else(|| ExecError::Unsupported("DML input does not carry the target row".into()))
 }
 
+/// Return the name of the table whose rows a policy filter over `rel` governs:
+/// the first table scanned along the leftmost (outer) inputs.
+fn governed_table(rel: &Rel, catalog: &dyn Catalog) -> String {
+    match rel {
+        Rel::Get {
+            table: TableRef::Id(id),
+            ..
+        } => catalog.table_by_id(*id).map_or_else(
+            || format!("table {}", id.get()),
+            |t| t.name.last().to_string(),
+        ),
+        other => other
+            .inputs()
+            .first()
+            .map_or_else(|| "?".to_owned(), |i| governed_table(i, catalog)),
+    }
+}
+
 /// Return the distinct bindings of a layout.
 fn bindings_of(layout: &Layout) -> HashSet<BindingId> {
     layout.iter().map(|(b, _)| *b).collect()
@@ -392,6 +524,7 @@ impl Planner<'_> {
     fn node(&self, op: Op, layout: Layout) -> Result<Physical, ExecError> {
         let (types, schema) = self.schema(&layout)?;
         Ok(Physical {
+            id: 0,
             op,
             layout,
             schema,
@@ -408,13 +541,15 @@ impl Planner<'_> {
         expr_type(expr, self.catalog, &columns).ok()
     }
 
-    /// Build a table scan, with `pushed` conjuncts evaluated in storage.
+    /// Build a table scan, with `pushed` and `policy` conjuncts evaluated in storage.
     fn scan(
         &self,
         table: &TableRef,
         binding: Option<BindingId>,
         access: Access,
         pushed: Option<Expr>,
+        policy: Option<Expr>,
+        secured: bool,
     ) -> Result<Physical, ExecError> {
         let def = self.table(table)?;
         let binding =
@@ -425,6 +560,8 @@ impl Planner<'_> {
                 table: def,
                 access,
                 pushed,
+                policy,
+                secured,
                 batch_rows: self.options.batch_rows.max(1),
             },
             layout,
@@ -441,62 +578,99 @@ impl Planner<'_> {
             .ok_or_else(|| ExecError::Catalog(format!("unknown table {}", id.get())))
     }
 
-    /// Build a filter, pushing what it can into a scan directly below.
-    fn filter(&self, input: &Rel, predicate: &Expr) -> Result<Physical, ExecError> {
-        if let Rel::Get {
-            table,
-            binding: Some(binding),
-            ..
-        } = input
-        {
-            // The best key bounds the scan; the filter is still applied to what it returns.
-            let own = HashSet::from([*binding]);
-            let conjuncts = conjuncts(predicate);
-            let def = self.table(table)?;
-            let access = choose(
-                &def,
-                *binding,
-                &conjuncts,
-                |e| !reads_any(e, &own) && is_leakproof(e, self.plan, self.catalog),
-                |e| {
-                    expr_type(e, self.catalog, &self.columns)
-                        .ok()
-                        .map(|t| t.data)
-                },
-            );
-            // Leakproof conjuncts on the scan's own columns run in storage, except
-            // under an index scan, which cannot filter there; the rest run above it.
-            let (pushed, kept): (Vec<Expr>, Vec<Expr>) = if matches!(access, Access::Index { .. }) {
-                (Vec::new(), conjuncts)
-            } else {
-                conjuncts
-                    .into_iter()
-                    .partition(|c| reads_only(c, &own) && is_leakproof(c, self.plan, self.catalog))
-            };
-            let scan = self.scan(table, Some(*binding), access, conjoin(pushed))?;
-            return match conjoin(kept) {
-                None => Ok(scan),
-                Some(predicate) => {
-                    let layout = scan.layout.clone();
-                    self.node(
-                        Op::Filter {
-                            input: Box::new(scan),
-                            predicate,
-                        },
-                        layout,
-                    )
+    /// Build a chain of filters and policy filters, pushing what it can into a scan directly below.
+    ///
+    /// The best key bounds the scan, and leakproof conjuncts on the scan's
+    /// own columns (from any filter of the chain, since they can't raise)
+    /// run in storage, except under an index scan, which can't filter
+    /// there. The remaining conjuncts stay in their own filter, in their
+    /// original order, so a policy filter still runs before anything above
+    /// it. Conjuncts used as keys are kept too: the access path only has to
+    /// return a superset of the matching rows.
+    fn filters(&self, rel: &Rel) -> Result<Physical, ExecError> {
+        // (is a policy filter, conjuncts), top first.
+        let mut stages: Vec<(bool, Vec<Expr>)> = Vec::new();
+        let mut base = rel;
+        loop {
+            match base {
+                Rel::Filter { input, predicate } => {
+                    stages.push((false, conjuncts(predicate)));
+                    base = input;
                 }
-            };
+                Rel::PolicyFilter { input, residual } => {
+                    stages.push((true, conjuncts(residual)));
+                    base = input;
+                }
+                _ => break,
+            }
         }
-        let input = self.build(input)?;
-        let layout = input.layout.clone();
-        self.node(
-            Op::Filter {
-                input: Box::new(input),
-                predicate: predicate.clone(),
-            },
-            layout,
-        )
+        let mut node = match base {
+            Rel::Get {
+                table,
+                binding: Some(binding),
+                ..
+            } => {
+                let own = HashSet::from([*binding]);
+                let def = self.table(table)?;
+                let all: Vec<Expr> = stages.iter().flat_map(|(_, c)| c.clone()).collect();
+                let access = choose(
+                    &def,
+                    *binding,
+                    &all,
+                    |e| !reads_any(e, &own) && is_leakproof(e, self.plan, self.catalog),
+                    |e| {
+                        expr_type(e, self.catalog, &self.columns)
+                            .ok()
+                            .map(|t| t.data)
+                    },
+                );
+                let pushable = |c: &Expr| {
+                    !matches!(access, Access::Index { .. })
+                        && reads_only(c, &own)
+                        && is_leakproof(c, self.plan, self.catalog)
+                };
+                let (mut pushed, mut policy) = (Vec::new(), Vec::new());
+                for (is_policy, conjuncts) in &mut stages {
+                    let (moved, kept): (Vec<Expr>, Vec<Expr>) =
+                        std::mem::take(conjuncts).into_iter().partition(pushable);
+                    if *is_policy {
+                        policy.extend(moved);
+                    } else {
+                        pushed.extend(moved);
+                    }
+                    *conjuncts = kept;
+                }
+                let secured = stages.iter().any(|(is_policy, _)| *is_policy);
+                self.scan(
+                    table,
+                    Some(*binding),
+                    access,
+                    conjoin(pushed),
+                    conjoin(policy),
+                    secured,
+                )?
+            }
+            other => self.build(other)?,
+        };
+        let table = governed_table(base, self.catalog);
+        for (is_policy, conjuncts) in stages.into_iter().rev() {
+            let Some(predicate) = conjoin(conjuncts) else {
+                continue;
+            };
+            let layout = node.layout.clone();
+            let input = Box::new(node);
+            let op = if is_policy {
+                Op::PolicyFilter {
+                    input,
+                    residual: predicate,
+                    table: table.clone(),
+                }
+            } else {
+                Op::Filter { input, predicate }
+            };
+            node = self.node(op, layout)?;
+        }
+        Ok(node)
     }
 
     /// Build a join, extracting hash keys from its condition.
@@ -582,8 +756,12 @@ impl Planner<'_> {
                 ));
             }
         };
+        let mut input = self.build(input)?;
+        if let Op::WriteCheck { table: checked, .. } = &mut input.op {
+            *checked = table.name.last().to_string();
+        }
         Ok(Dml {
-            input: Box::new(self.build(input)?),
+            input: Box::new(input),
             returning: returning.iter().map(|e| e.expr.clone()).collect(),
             target: target_layout,
             table,
@@ -593,8 +771,59 @@ impl Planner<'_> {
     /// Build the physical form of `rel`.
     fn build(&self, rel: &Rel) -> Result<Physical, ExecError> {
         match rel {
-            Rel::Get { table, binding, .. } => self.scan(table, *binding, Access::Full, None),
-            Rel::Filter { input, predicate } => self.filter(input, predicate),
+            Rel::Get { table, binding, .. } => {
+                self.scan(table, *binding, Access::Full, None, None, false)
+            }
+            Rel::Filter { .. } | Rel::PolicyFilter { .. } => self.filters(rel),
+            Rel::WriteCheck { input, check } => {
+                let input = self.build(input)?;
+                let layout = input.layout.clone();
+                // The DML operator above names its target table (see `dml`).
+                self.node(
+                    Op::WriteCheck {
+                        input: Box::new(input),
+                        check: check.clone(),
+                        table: String::new(),
+                    },
+                    layout,
+                )
+            }
+            Rel::Unnest {
+                input,
+                expr,
+                columns,
+                binding,
+            } => {
+                let input = self.build(input)?;
+                let mut layout = input.layout.clone();
+                layout.extend(columns_of(*binding, columns.len())?);
+                self.node(
+                    Op::Unnest {
+                        input: Box::new(input),
+                        expr: expr.clone(),
+                        width: columns.len(),
+                    },
+                    layout,
+                )
+            }
+            Rel::Nest {
+                input,
+                keys,
+                fields,
+                binding,
+                ..
+            } => {
+                let input = self.build(input)?;
+                let layout = columns_of(*binding, keys.len() + 1)?;
+                self.node(
+                    Op::Nest {
+                        input: Box::new(input),
+                        keys: keys.iter().map(|k| k.expr.clone()).collect(),
+                        fields: fields.iter().map(|f| f.expr.clone()).collect(),
+                    },
+                    layout,
+                )
+            }
             Rel::Project {
                 input,
                 exprs,
@@ -824,14 +1053,6 @@ impl Planner<'_> {
                 let layout = columns_of(*binding, columns.len())?;
                 self.node(Op::Values { rows: rows.clone() }, layout)
             }
-            other => Err(ExecError::Unsupported(format!(
-                "operator {} (later executor milestones)",
-                interlaken_ir::text::print_rel(other)
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("?")
-                    .trim_start_matches('(')
-            ))),
         }
     }
 }
@@ -840,7 +1061,8 @@ impl Planner<'_> {
 ///
 /// # Errors
 ///
-/// Returns [`ExecError::Unsupported`] for operators later milestones add,
+/// Returns [`ExecError::Unsupported`] for plans the executor can't run
+/// (unresolved names, operators without bindings, DML into system tables),
 /// or [`ExecError::Catalog`] if the plan refers to unknown tables.
 pub fn plan(plan: &Plan, catalog: &dyn Catalog) -> Result<Physical, ExecError> {
     plan_with(plan, catalog, PlanOptions::default())
@@ -868,5 +1090,7 @@ pub fn plan_with(
         columns,
         options,
     };
-    planner.build(&plan.root)
+    let mut root = planner.build(&plan.root)?;
+    number(&mut root, &mut 0);
+    Ok(root)
 }

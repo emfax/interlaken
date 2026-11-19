@@ -610,3 +610,70 @@ async fn read_committed_ddl_dependency_survives_refresh() {
         Err(Error::SerializationFailure(Conflict::DependencyChanged))
     ));
 }
+
+#[tokio::test]
+/// Assert array columns store, update and survive a restart, and can't be keys or indexed.
+async fn array_columns() {
+    use interlaken_storage::encoding::ElementType;
+    let dir = tempfile::tempdir().unwrap();
+    let tags = ColumnType::Array(ElementType::Text);
+    let spec = |key: &str| TableSpec {
+        name: "docs".into(),
+        columns: vec![
+            ColumnDef::new("id", ColumnType::Int8),
+            ColumnDef::new("tags", tags),
+        ],
+        primary_key: vec![key.into()],
+    };
+    let text = |s: &str| Datum::Text(s.into());
+    {
+        let storage = open(&dir);
+        let txn = begin(&storage, Isolation::Serializable).await;
+        let err = catalog::create_table(&txn, spec("tags")).await.unwrap_err();
+        assert!(err.to_string().contains("text[]"), "{err}");
+        let def = catalog::create_table(&txn, spec("id")).await.unwrap();
+        let err = catalog::create_index(
+            &txn,
+            IndexSpec {
+                name: "docs_tags".into(),
+                table: "docs".into(),
+                columns: vec![("tags".into(), SortOrder::ASC)],
+                unique: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("can't be indexed"), "{err}");
+        let rows_in = [
+            vec![Datum::Int8(1), Datum::Array(vec![text("a"), Datum::Null])],
+            vec![Datum::Int8(2), Datum::Array(vec![])],
+            vec![Datum::Int8(3), Datum::Null],
+        ];
+        for row in &rows_in {
+            rows::insert(&txn, &def, row.clone()).await.unwrap();
+        }
+        let wrong = vec![Datum::Int8(4), Datum::Array(vec![Datum::Int8(1)])];
+        assert!(rows::insert(&txn, &def, wrong).await.is_err());
+        rows::update(
+            &txn,
+            &def,
+            &[Datum::Int8(2)],
+            vec![Datum::Int8(2), Datum::Array(vec![text("b")])],
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    }
+    let storage = open(&dir);
+    let txn = begin(&storage, Isolation::Serializable).await;
+    let def = catalog::table(&txn, "docs").await.unwrap().unwrap();
+    assert_eq!(def.columns()[1].ty, tags);
+    assert_eq!(
+        all_rows(&txn, &def).await,
+        [
+            vec![Datum::Int8(1), Datum::Array(vec![text("a"), Datum::Null])],
+            vec![Datum::Int8(2), Datum::Array(vec![text("b")])],
+            vec![Datum::Int8(3), Datum::Null],
+        ]
+    );
+}

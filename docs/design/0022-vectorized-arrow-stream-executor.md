@@ -63,8 +63,8 @@ flowchart TB
 
 - [x] **Phase 1: Stream framework, Arrow batches, TableScan, Filter, Project, Limit, reference interpreter** - E1
   - *As implemented:* crate `interlaken-exec` (arrow-rs 60). Operators are boxed `Stream`s of `RecordBatch`; `execute` is lazy and dropping the stream cancels. Expressions are evaluated row at a time by the reference interpreter's public `RowEvaluator`, so E1 semantics are the reference semantics by construction; E2's vectorized kernels will be tested against this path. A property-based differential test runs random scan/filter/project/limit queries (optimized or not, with storage batches of 1 to 5 rows) against real storage and the interpreter, and planted bugs in limit, scan resumption and the pushed filter are caught.
-- [ ] **Phase 2: Remaining operators on the framework** - E3 (see [ADR-0028](0028-physical-operators-planning-and-explain.md))
-  - *Progress:* E3 added joins, applies, aggregation, distinct, sort and top-N, set operations and `VALUES`. Index scans (E4), `Nest`, `Unnest`, DML and the security operators (E5) remain.
+- [x] **Phase 2: Remaining operators on the framework** - E3–E5 (see [ADR-0028](0028-physical-operators-planning-and-explain.md))
+  - *As implemented:* E3 added joins, applies, aggregation, distinct, sort and top-N, set operations and `VALUES`. E4 added index scans and DML, and E5 added `Nest`, `Unnest`, `PolicyFilter` and `WriteCheck` ([ADR-0025](0025-runtime-security-enforcement-in-executor.md)). Every IR operator now runs in the executor.
 
 ## Consequences
 

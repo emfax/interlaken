@@ -37,7 +37,7 @@ mod row;
 mod tags;
 mod versioned;
 
-pub use column_type::ColumnType;
+pub use column_type::{ColumnType, ElementType};
 pub use datum::Datum;
 pub use decode::{TupleDecoder, decode_tuple};
 pub use encode::{DEFAULT_MAX_KEY_LEN, KeyBuilder, MAX_TUPLE_LEN, encode_tuple};
