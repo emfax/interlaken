@@ -76,9 +76,11 @@ pub fn verify(plan: &Plan, catalog: &dyn Catalog, options: &VerifyOptions) -> Re
 
 /// Return the type of every column a plan introduces, as far as the plan verifies.
 ///
-/// Used by the optimizer, whose input is a verified plan; for a plan that
-/// fails verification the map covers the part checked before the failure.
-pub(crate) fn column_types(
+/// Used by the optimizer and the executor's planner, whose input is a
+/// verified plan; for a plan that fails verification the map covers the
+/// part checked before the failure.
+#[must_use]
+pub fn column_types(
     plan: &Plan,
     catalog: &dyn Catalog,
 ) -> HashMap<(BindingId, ColumnId), Type> {

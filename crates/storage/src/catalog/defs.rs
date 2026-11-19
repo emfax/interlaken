@@ -172,7 +172,8 @@ impl TableDef {
     }
 
     /// Return the column types in order.
-    pub(crate) fn types(&self) -> Vec<ColumnType> {
+    #[must_use]
+    pub fn types(&self) -> Vec<ColumnType> {
         self.columns.iter().map(|c| c.ty).collect()
     }
 }

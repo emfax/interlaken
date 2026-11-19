@@ -26,4 +26,4 @@ mod run;
 pub use datum::{Datum, RowKey};
 pub use error::EvalError;
 pub(crate) use run::eval_constant;
-pub use run::{Database, ExecOptions, execute};
+pub use run::{Database, ExecOptions, RowEvaluator, execute};

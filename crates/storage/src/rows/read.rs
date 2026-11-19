@@ -10,8 +10,9 @@ use super::keys::{
 use super::write::Row;
 use crate::catalog::{IndexDef, IndexId, TableDef};
 use crate::encoding::{Datum, decode_row};
-use crate::scan::{DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, ScanRequest};
+use crate::scan::{DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, RowFilter, ScanRequest};
 use crate::{Result, Txn};
+use std::sync::Arc;
 
 /// Return the row whose primary key is `pk`, or `None`.
 ///
@@ -106,8 +107,40 @@ pub struct IndexBatch {
 /// Returns an error if the prefix can't be encoded, a stored row is
 /// corrupt, or the storage read fails.
 pub async fn scan(txn: &Txn, table: &TableDef, scan: &RowScan) -> Result<RowBatch> {
+    scan_with(txn, table, scan, None).await
+}
+
+/// Scan one batch like [`scan`], keeping only rows `filter` accepts.
+///
+/// The filter runs on the storage thread on each encoded row (decode it
+/// with [`decode_row`](crate::encoding::decode_row) and
+/// [`TableDef::types`]), so rejected rows never leave the storage pool.
+/// It must be pure and must not fail on any data (ADR-0006); rejected rows
+/// still enter the read set.
+///
+/// # Errors
+///
+/// As for [`scan`].
+pub async fn scan_filtered(
+    txn: &Txn,
+    table: &TableDef,
+    scan: &RowScan,
+    filter: Arc<dyn RowFilter>,
+) -> Result<RowBatch> {
+    scan_with(txn, table, scan, Some(filter)).await
+}
+
+/// Scan one batch, optionally filtered on the storage thread.
+async fn scan_with(
+    txn: &Txn,
+    table: &TableDef,
+    scan: &RowScan,
+    filter: Option<Arc<dyn RowFilter>>,
+) -> Result<RowBatch> {
     let prefix = pk_key(table, &scan.prefix)?;
-    let batch = txn.scan(request(&prefix, scan)).await?;
+    let mut request = request(&prefix, scan);
+    request.filter = filter;
+    let batch = txn.scan(request).await?;
     let types = table.types();
     let rows = batch
         .rows

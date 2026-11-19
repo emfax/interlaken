@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/ir", "crates/storage"]
+members = ["crates/engine", "crates/exec", "crates/ir", "crates/storage"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,12 +9,18 @@ rust-version = "1.90"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+interlaken-exec = { path = "crates/exec" }
 interlaken-ir = { path = "crates/ir" }
 interlaken-storage = { path = "crates/storage" }
 fjall = { version = "3.1", features = ["bytes_1"] }
 bytes = "1"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 thiserror = "2"
+arrow-array = "60"
+arrow-buffer = "60"
+arrow-schema = "60"
+arrow-select = "60"
+futures = "0.3"
 # Pinned exactly: type-aware partial evaluation (tpe) is experimental (ADR-0020).
 cedar-policy = { version = "=4.15.0", default-features = false, features = ["tpe"] }
 smol_str = "0.3"

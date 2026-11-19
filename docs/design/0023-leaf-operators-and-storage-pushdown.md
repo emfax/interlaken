@@ -47,7 +47,8 @@ The storage trait ([ADR-0006](0006-batched-async-storage-trait.md)) is coarse-gr
 
 ## Implementation Phases
 
-- [ ] **Phase 1: TableScan with ScanRequest pushdown and async-side decode** - E1
+- [x] **Phase 1: TableScan with ScanRequest pushdown and async-side decode** - E1
+  - *As implemented:* the planner splits a filter directly above a scan into leakproof conjuncts, run on the storage thread through a `RowFilter` (new `rows::scan_filtered`), and the rest, which run in a `Filter` above the scan. Because pushed conjuncts can discard a row before a raising conjunct sees it, a query the interpreter fails may succeed in the executor; this matches Postgres, which does not fix conjunct order. Stored tables are found by name until the storage-backed catalog (ADR-0013 phase 3) exists.
 - [ ] **Phase 2: IndexScan and IndexLookup** - E4
 - [ ] **Phase 3: BatchDecoder on the storage thread** - post-MVP (sooner if decode shows up in profiles)
 

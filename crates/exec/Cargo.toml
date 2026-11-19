@@ -1,0 +1,25 @@
+[package]
+name = "interlaken-exec"
+description = "Vectorized, pull-based query executor over Arrow record batches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-buffer.workspace = true
+arrow-schema.workspace = true
+arrow-select.workspace = true
+futures.workspace = true
+interlaken-ir.workspace = true
+interlaken-storage.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -8,6 +8,5 @@
 mod check;
 mod error;
 
-pub(crate) use check::column_types;
-pub use check::{VerifyOptions, verify};
+pub use check::{VerifyOptions, column_types, verify};
 pub use error::VerifyError;

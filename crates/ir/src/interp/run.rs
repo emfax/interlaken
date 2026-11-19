@@ -95,3 +95,43 @@ pub(crate) fn eval_constant(
     let mut db = Database::new();
     Interp::new(catalog, &mut db, &[], ExecOptions::default()).eval(expr, &[])
 }
+
+/// Evaluates expressions on individual rows with the reference semantics.
+///
+/// The executor uses it wherever it needs row-at-a-time evaluation (filters
+/// pushed into storage, and expressions until vectorized kernels cover
+/// them), so there is one implementation of the semantics (ADR-0023).
+pub struct RowEvaluator<'a> {
+    /// The catalog, for function definitions.
+    catalog: &'a dyn Catalog,
+    /// Parameter values, `$1` first.
+    params: Vec<Datum>,
+    /// Settings such as the transaction time.
+    options: ExecOptions,
+    /// An empty database: expressions read no tables.
+    db: Database,
+}
+
+impl<'a> RowEvaluator<'a> {
+    /// Construct an evaluator.
+    #[must_use]
+    pub fn new(catalog: &'a dyn Catalog, params: Vec<Datum>, options: ExecOptions) -> Self {
+        Self { catalog, params, options, db: Database::new() }
+    }
+
+    /// Evaluate `expr` on `row`, whose values are the columns `layout` names, in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`EvalError`] for errors Postgres would raise, or
+    /// [`EvalError::Unsupported`] if `expr` references a column not in `layout`.
+    pub fn eval(
+        &mut self,
+        expr: &crate::expr::Expr,
+        layout: &[(crate::names::BindingId, crate::names::ColumnId)],
+        row: &[Datum],
+    ) -> Result<Datum, EvalError> {
+        let frame = super::eval::Frame { layout, row };
+        Interp::new(self.catalog, &mut self.db, &self.params, self.options).eval(expr, &[frame])
+    }
+}
