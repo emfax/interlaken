@@ -487,6 +487,10 @@ pub(crate) fn expr(e: &Expr) -> Sexp {
         }
         Expr::Coalesce(items) => form("coalesce", items.iter().map(expr)),
         Expr::Array(items) => form("array", items.iter().map(expr)),
+        Expr::Try {
+            expr: inner,
+            default,
+        } => form("try", [expr(inner), expr(default)]),
         Expr::NullIf { left, right } => form("nullif", [expr(left), expr(right)]),
         Expr::Cast { expr: operand, to } => form("cast", [expr(operand), data_type(to)]),
         Expr::Subquery { kind, rel: r } => match kind {

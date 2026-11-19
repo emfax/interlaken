@@ -1,0 +1,34 @@
+; Hierarchy tests: ann is not in group 1, so that permit drops out; the
+; folder test becomes an EXISTS on the closure table, a join after optimizing.
+(policies
+  (permit (read) Doc (in principal (entity Group 1)))
+  (permit (read) Doc (in resource (entity Folder 1))))
+(plan (project (get docs :as d) d.id))
+;; secured
+(plan :schema-version 3
+  (project :bind 4
+    (policy-filter
+      (apply left
+        (get (tid 203) :as d :bind 1)
+        (project :bind 3
+          (limit :count 1
+            (filter
+              (get (tid 209) :as |sec$1| :bind 2)
+              (and (= #2.0 #1.0) (= #2.1 1))))
+          (as true present)))
+      (try (is-not-null #3.0) false))
+    (as #1.0 id)))
+;; optimized
+(plan :schema-version 3
+  (project :bind 4
+    (policy-filter
+      (join left
+        (get (tid 203) :as d :bind 1)
+        (distinct
+          (project :bind 3
+            (filter (get (tid 209) :as |sec$1| :bind 2) (= #2.1 1))
+            (as true present)
+            #2.0))
+        (= #3.1 #1.0))
+      (try (is-not-null #3.0) false))
+    (as #1.0 id)))

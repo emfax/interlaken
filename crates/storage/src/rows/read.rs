@@ -226,3 +226,19 @@ pub async fn check_indexes(txn: &Txn, table: &TableDef) -> Result<Vec<String>> {
     }
     Ok(problems)
 }
+
+/// Register a dependency on the row of `table` with primary key `pk`.
+///
+/// The transaction's commit then fails with
+/// [`Conflict::DependencyChanged`](crate::Conflict::DependencyChanged) if a
+/// transaction that committed after its snapshot wrote that row, at every
+/// isolation level. The engine uses this for data a transaction's
+/// authorization relied on, such as the policy set.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`](crate::Error::Encode) if `pk` does not encode as a key of `table`.
+pub fn register_row_dependency(txn: &Txn, table: &TableDef, pk: &[Datum]) -> Result<()> {
+    txn.register_dependency(super::keys::pk_key(table, pk)?);
+    Ok(())
+}

@@ -1,0 +1,35 @@
+; The fixture catalog for security tests: users in groups, documents in
+; nested folders, and an ungoverned notes table.
+(catalog :schema-version 3
+  (builtins)
+  (table users :id 200
+    (column id (not-null int8)) (column name (not-null text)) (column dept text) (column level int8)
+    (primary-key id))
+  (table groups :id 201 (column id (not-null int8)) (column name (not-null text)) (primary-key id))
+  (table folders :id 202 (column id (not-null int8)) (column name (not-null text)) (primary-key id))
+  (table docs :id 203
+    (column id (not-null int8)) (column owner_id (not-null int8)) (column folder_id int8)
+    (column title (not-null text)) (column secret int8) (column tags (array (not-null text)))
+    (primary-key id))
+  (table user_groups :id 204 (column member (not-null int8)) (column grp (not-null int8)) (primary-key member grp))
+  (table user_groups_closure :id 205
+    (column member (not-null int8)) (column grp (not-null int8)) (column paths (not-null int8))
+    (primary-key member grp))
+  (table folder_parents :id 206 (column child (not-null int8)) (column parent (not-null int8)) (primary-key child parent))
+  (table folder_closure :id 207
+    (column descendant (not-null int8)) (column ancestor (not-null int8)) (column paths (not-null int8))
+    (primary-key descendant ancestor))
+  (table doc_folders :id 208 (column doc (not-null int8)) (column folder (not-null int8)) (primary-key doc folder))
+  (table doc_folders_closure :id 209
+    (column doc (not-null int8)) (column folder (not-null int8)) (column paths (not-null int8))
+    (primary-key doc folder))
+  (table notes :id 210 (column id (not-null int8)) (column body text) (primary-key id))
+  (entity User :table users :key id (attr name) (attr dept) (attr level))
+  (entity Group :table groups :key id (attr name))
+  (entity Folder :table folders :key id (attr name))
+  (entity Doc :table docs :key id
+    (attr owner owner_id :references User) (attr folder folder_id :references Folder)
+    (attr title) (attr secret) (attr tags))
+  (membership User Group :edges user_groups (member grp) :closure user_groups_closure (member grp paths))
+  (membership Folder Folder :edges folder_parents (child parent) :closure folder_closure (descendant ancestor paths))
+  (membership Doc Folder :edges doc_folders (doc folder) :closure doc_folders_closure (doc folder paths)))

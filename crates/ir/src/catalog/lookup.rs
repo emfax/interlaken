@@ -3,14 +3,14 @@
 use std::sync::Arc;
 
 use super::defs::{FunctionDef, TableDef};
-use crate::names::{FunctionId, QualifiedName, SchemaVersion, TableId};
+use super::entities::{EntityDef, MembershipDef};
+use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
 use crate::types::DataType;
 
 /// Catalog metadata at one schema version (ADR-0013).
 ///
-/// Implementations must be internally consistent: every table and
-/// function they return belongs to [`Catalog::schema_version`]. Entity
-/// lookups (ADR-0017) join this trait with the security core in I4.
+/// Implementations must be internally consistent: every table, function
+/// and entity declaration they return belongs to [`Catalog::schema_version`].
 pub trait Catalog: Send + Sync {
     /// Return the schema version this view of the catalog describes.
     fn schema_version(&self) -> SchemaVersion;
@@ -26,6 +26,30 @@ pub trait Catalog: Send + Sync {
 
     /// Look up a function overload by ID.
     fn function_by_id(&self, id: FunctionId) -> Option<Arc<FunctionDef>>;
+
+    /// Look up an entity type by name (ADR-0017). None by default.
+    fn entity_by_name(&self, name: &Ident) -> Option<Arc<EntityDef>> {
+        let _ = name;
+        None
+    }
+
+    /// Look up the entity type backed by `table`. None by default.
+    fn entity_for_table(&self, table: TableId) -> Option<Arc<EntityDef>> {
+        let _ = table;
+        None
+    }
+
+    /// Look up the membership of `member` entities in `group` entities. None by default.
+    fn membership(&self, member: &Ident, group: &Ident) -> Option<Arc<MembershipDef>> {
+        let _ = (member, group);
+        None
+    }
+
+    /// Return every membership whose member type is `member`. None by default.
+    fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
+        let _ = member;
+        Vec::new()
+    }
 
     /// Look up the overload of `name` whose argument types are exactly `args`.
     ///

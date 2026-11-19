@@ -8,7 +8,11 @@
 //!     [(primary-key NAME...)])
 //!   (function NAME :id N [:aggregate true] (args DATATYPE...) (returns TYPE)
 //!     [:volatility immutable|stable|volatile] [:strict B] [:leakproof B]
-//!     [:deterministic B] [:cost F] [:selectivity F]))
+//!     [:deterministic B] [:cost F] [:selectivity F])
+//!   (entity TYPE :table TABLE :key COLUMN
+//!     (attr NAME [COLUMN] [:references TYPE])...)
+//!   (membership MEMBER GROUP :edges TABLE (MEMBER-COLUMN GROUP-COLUMN)
+//!     :closure TABLE (DESCENDANT-COLUMN ANCESTOR-COLUMN PATHS-COLUMN)))
 //! ```
 
 use super::error::ParseError;
@@ -16,10 +20,10 @@ use super::read;
 use super::read::{Form, boolean, ident, list_of, qualified, uint};
 use super::sexp::{Sexp, SexpKind, read_one};
 use crate::catalog::{
-    FunctionDef, FunctionKind, FunctionProperties, InMemoryCatalog, TableDef, Volatility,
-    install_builtins,
+    AttributeDef, EntityDef, FunctionDef, FunctionKind, FunctionProperties, InMemoryCatalog,
+    MembershipDef, TableDef, Volatility, install_builtins,
 };
-use crate::names::{FunctionId, SchemaVersion, TableId};
+use crate::names::{ColumnId, FunctionId, Ident, SchemaVersion, TableId};
 
 /// Shorthand for results in this module.
 type Result<T> = std::result::Result<T, ParseError>;
@@ -142,6 +146,101 @@ fn function(sexp: &Sexp) -> Result<FunctionDef> {
     })
 }
 
+/// Look up a table by name in `catalog`, returning its definition.
+fn table_named(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<std::sync::Arc<TableDef>> {
+    use crate::catalog::Catalog;
+    let name = qualified(sexp)?;
+    catalog
+        .table_by_name(&name)
+        .ok_or_else(|| ParseError::at(sexp.pos, format!("unknown table {name}")))
+}
+
+/// Look up a column of `table` by name.
+fn column_named(table: &TableDef, sexp: &Sexp) -> Result<ColumnId> {
+    let name = ident(sexp)?;
+    table
+        .column_by_name(name.as_str())
+        .map(|c| c.id)
+        .ok_or_else(|| ParseError::at(sexp.pos, format!("no column {name} in {}", table.name)))
+}
+
+/// Read `(entity ...)`, resolving table and column names against `catalog`.
+fn entity(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<EntityDef> {
+    let mut form = Form::expect(sexp, "entity")?;
+    let name = ident(form.next("the entity type")?)?;
+    let table_sexp = form
+        .keyword("table")
+        .ok_or_else(|| ParseError::at(sexp.pos, "(entity ...) needs :table"))?;
+    let table = table_named(catalog, table_sexp)?;
+    let key_sexp = form
+        .keyword("key")
+        .ok_or_else(|| ParseError::at(sexp.pos, "(entity ...) needs :key"))?;
+    let key = column_named(&table, key_sexp)?;
+    let mut attributes = Vec::new();
+    for item in form.rest() {
+        let mut attr = Form::expect(item, "attr")?;
+        let attr_name_sexp = attr.next("the attribute name")?;
+        let attr_name = ident(attr_name_sexp)?;
+        let references = attr.keyword("references").map(ident).transpose()?;
+        let column_sexp = attr.rest().into_iter().next().unwrap_or(attr_name_sexp);
+        attributes.push(AttributeDef {
+            name: attr_name,
+            column: column_named(&table, column_sexp)?,
+            references,
+        });
+        attr.finish()?;
+    }
+    form.finish()?;
+    Ok(EntityDef {
+        name,
+        table: table.id,
+        key,
+        attributes,
+    })
+}
+
+/// Read a list of column names of `table`.
+fn columns_named(table: &TableDef, sexp: &Sexp, n: usize) -> Result<Vec<ColumnId>> {
+    let SexpKind::List(items) = &sexp.kind else {
+        return Err(ParseError::at(
+            sexp.pos,
+            format!("expected a list of {n} columns"),
+        ));
+    };
+    if items.len() != n {
+        return Err(ParseError::at(sexp.pos, format!("expected {n} columns")));
+    }
+    items.iter().map(|c| column_named(table, c)).collect()
+}
+
+/// Read `(membership ...)`.
+fn membership(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<MembershipDef> {
+    let mut form = Form::expect(sexp, "membership")?;
+    let member: Ident = ident(form.next("the member type")?)?;
+    let group: Ident = ident(form.next("the group type")?)?;
+    let edges = table_named(
+        catalog,
+        form.keyword("edges")
+            .ok_or_else(|| ParseError::at(sexp.pos, "needs :edges"))?,
+    )?;
+    let edge_columns = columns_named(&edges, form.next("the edge columns")?, 2)?;
+    let closure = table_named(
+        catalog,
+        form.keyword("closure")
+            .ok_or_else(|| ParseError::at(sexp.pos, "needs :closure"))?,
+    )?;
+    let closure_columns = columns_named(&closure, form.next("the closure columns")?, 3)?;
+    form.finish()?;
+    Ok(MembershipDef {
+        member,
+        group,
+        edges: edges.id,
+        edge_columns: (edge_columns[0], edge_columns[1]),
+        closure: closure.id,
+        closure_columns: (closure_columns[0], closure_columns[1], closure_columns[2]),
+    })
+}
+
 /// Parse a catalog in the text form above.
 ///
 /// # Errors
@@ -183,6 +282,14 @@ pub fn parse_catalog(text: &str) -> Result<InMemoryCatalog> {
             }
             "table" => catalog.add_table(table(item)?).map_err(conflict)?,
             "function" => catalog.add_function(function(item)?).map_err(conflict)?,
+            "entity" => {
+                let def = entity(&catalog, item)?;
+                catalog.add_entity(def).map_err(conflict)?;
+            }
+            "membership" => {
+                let def = membership(&catalog, item)?;
+                catalog.add_membership(def).map_err(conflict)?;
+            }
             other => {
                 return Err(ParseError::at(
                     item.pos,

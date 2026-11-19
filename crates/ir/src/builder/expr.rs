@@ -85,6 +85,16 @@ pub fn array(items: impl IntoIterator<Item = Expr>) -> Expr {
     Expr::Array(items.into_iter().collect())
 }
 
+/// Construct `TRY(expr, default)`: `default` when `expr` raises an error.
+/// Privileged: only engine passes may use it.
+#[must_use]
+pub fn try_or(expr: Expr, default: Expr) -> Expr {
+    Expr::Try {
+        expr: Box::new(expr),
+        default: Box::new(default),
+    }
+}
+
 /// Start a searched `CASE WHEN ... THEN ...`.
 pub fn case() -> Case {
     Case {

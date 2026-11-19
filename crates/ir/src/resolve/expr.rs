@@ -422,6 +422,22 @@ impl Resolver<'_> {
                     ty: Some(ty.with_nullable(all_nullable)),
                 }
             }
+            Expr::Try {
+                expr: inner,
+                default,
+            } => {
+                let typed = vec![self.expr(inner, cx)?, self.expr(default, cx)?];
+                let (mut exprs, ty) = unify(typed, ScalarType::Text)?;
+                let default = exprs.pop().expect("two operands");
+                let inner = exprs.pop().expect("two operands");
+                Typed {
+                    expr: Expr::Try {
+                        expr: Box::new(inner),
+                        default: Box::new(default),
+                    },
+                    ty: Some(ty),
+                }
+            }
             Expr::Array(items) => {
                 if items.is_empty() {
                     return Err(ResolveError::Type(

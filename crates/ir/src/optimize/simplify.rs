@@ -1,9 +1,12 @@
 //! Phase 1: simplification (ADR-0014).
 //!
 //! Constant folding of immutable expressions, boolean normalization, and
-//! removal or merging of filters.
+//! removal or merging of filters. Boolean simplification never removes an
+//! operand that would have been evaluated, because one that raises an
+//! error decides the result of an enclosing `TRY` (a policy condition):
+//! `x OR true` stays as it is, while `true OR x` becomes `true`.
 
-use super::util::{Types, conjoin, conjuncts, data_type, take, take_expr};
+use super::util::{Types, conjoin, conjuncts, data_type, leakproof, take, take_expr};
 use crate::catalog::{Catalog, Volatility};
 use crate::expr::{Expr, UnaryOp};
 use crate::interp::{Datum, eval_constant};
@@ -86,7 +89,14 @@ pub(crate) fn simplify_expr(expr: &mut Expr, types: &Types, catalog: &dyn Catalo
                 match item {
                     Expr::Literal(Value::Bool(true)) => {}
                     Expr::Literal(Value::Bool(false)) => {
-                        kept = vec![item];
+                        // Operands before it still run first and may raise, which
+                        // matters inside TRY; the ones after never run. Earlier
+                        // operands can go only if none can raise: a non-raising one
+                        // still decides whether a later raising one runs.
+                        if kept.iter().all(|e| leakproof(e, types, catalog)) {
+                            kept.clear();
+                        }
+                        kept.push(item);
                         break;
                     }
                     other => kept.push(other),
@@ -107,7 +117,10 @@ pub(crate) fn simplify_expr(expr: &mut Expr, types: &Types, catalog: &dyn Catalo
                 match item {
                     Expr::Literal(Value::Bool(false)) => {}
                     Expr::Literal(Value::Bool(true)) => {
-                        kept = vec![item];
+                        if kept.iter().all(|e| leakproof(e, types, catalog)) {
+                            kept.clear();
+                        }
+                        kept.push(item);
                         break;
                     }
                     other => kept.push(other),

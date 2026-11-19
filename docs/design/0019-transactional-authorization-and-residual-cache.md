@@ -33,6 +33,14 @@ If authorization reads policy data outside the transaction, a role can be revoke
 - **Versioned policies.** Policy sets are stored in the catalog with a version and changed in transactions like DDL ([ADR-0007](0007-minimal-catalog-and-row-layer.md)). A transaction uses the policy version from its snapshot.
 - **Consistency.** The authorization decision and the data it governs always come from the same snapshot.
 
+**As implemented (I4).**
+- **Principal data.** `interlaken_engine::load_principal` reads the principal's entity row and closure rows through the transaction, so they join its read set.
+- **Policies.** The policy set is one row of the `policy_set` table: its text and a version. `store_policies` validates the text and bumps the version. `load_policies` reads the row and registers a dependency on it, so a writing transaction conflicts with a concurrent policy change at every isolation level.
+- **Tests:**
+  - a concurrent role revocation fails a SERIALIZABLE writer that relied on the role, and commits under REPEATABLE READ (authorization used the snapshot);
+  - another principal's revocation does not conflict;
+  - a concurrent policy change fails writers at all three isolation levels.
+
 ### Residual cache
 
 - **Key:** (principal, action, table, policy version, version of the principal's entity data, the context fields the residual depends on).
@@ -42,7 +50,7 @@ If authorization reads policy data outside the transaction, a role can be revoke
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Read-set registration and versioned policies** - I4
+- [x] **Phase 1: Read-set registration and versioned policies** - I4
 - [ ] **Phase 2: Residual cache** - I5
 
 ## Consequences

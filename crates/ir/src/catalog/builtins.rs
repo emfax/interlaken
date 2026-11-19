@@ -30,7 +30,8 @@ fn s(scalar: ScalarType) -> DataType {
 /// Return every built-in function overload, with IDs from 1 in a fixed order.
 ///
 /// Scalar functions: `lower`, `upper`, `length`, `substr`, `abs`, `now`,
-/// `random` and `gen_random_uuid`. Aggregates: `count` (with no argument
+/// `random`, `gen_random_uuid`, and `assert_present` (its argument, or an
+/// error if it is NULL; security lowering uses it for absent attributes). Aggregates: `count` (with no argument
 /// for `count(*)`, or one argument of any scalar type), `sum`, `avg`,
 /// `min`, `max`, `bool_and` and `bool_or`. No built-in function is
 /// leakproof yet: each needs an audit first (ADR-0011).
@@ -176,6 +177,16 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             vec![s(S::Bool)],
             s(S::Bool).nullable(),
             pure(true, false),
+        );
+    }
+    // Added in I4; later built-ins go after it so earlier IDs never change.
+    for t in ScalarType::ALL {
+        add(
+            "assert_present",
+            scalar,
+            vec![s(t)],
+            s(t).not_null(),
+            pure(false, false),
         );
     }
     out

@@ -1,0 +1,46 @@
+; Set containment on an array attribute becomes EXISTS over UNNEST, guarded
+; so an absent set is an error rather than "not contained".
+(policies (permit (read) Doc (contains resource.tags "a")))
+(plan (project (get docs :as d) d.id))
+;; secured
+(plan :schema-version 3
+  (project :bind 5
+    (policy-filter
+      (apply left
+        (get (tid 203) :as d :bind 1)
+        (project :bind 4
+          (limit :count 1
+            (filter
+              (unnest :bind 3
+                (values (columns one) (row true) :bind 2)
+                #1.5
+                (columns |sec$1|))
+              (= #3.0 "a")))
+          (as true present)))
+      (try
+        (and
+          (call (fid 54) (nullif (is-not-null #1.5) false))
+          (is-not-null #4.0))
+        false))
+    (as #1.0 id)))
+;; optimized
+(plan :schema-version 3
+  (project :bind 5
+    (policy-filter
+      (apply left
+        (get (tid 203) :as d :bind 1)
+        (project :bind 4
+          (limit :count 1
+            (filter
+              (unnest :bind 3
+                (values (columns one) (row true) :bind 2)
+                #1.5
+                (columns |sec$1|))
+              (= #3.0 "a")))
+          (as true present)))
+      (try
+        (and
+          (call (fid 54) (nullif (is-not-null #1.5) false))
+          (is-not-null #4.0))
+        false))
+    (as #1.0 id)))

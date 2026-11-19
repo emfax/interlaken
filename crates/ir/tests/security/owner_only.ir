@@ -1,0 +1,15 @@
+; Owners read their documents: the residual compares the owner with the principal's key.
+(policies (permit (read) Doc (== resource.owner principal)))
+(plan (project (get docs :as d) d.id d.title))
+;; secured
+(plan :schema-version 3
+  (project :bind 2
+    (policy-filter (get (tid 203) :as d :bind 1) (try (= #1.1 1) false))
+    (as #1.0 id)
+    (as #1.3 title)))
+;; optimized
+(plan :schema-version 3
+  (project :bind 2
+    (policy-filter (get (tid 203) :as d :bind 1) (try (= #1.1 1) false))
+    (as #1.0 id)
+    (as #1.3 title)))

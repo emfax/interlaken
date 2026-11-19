@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use super::defs::{FunctionDef, TableDef};
+use super::entities::{EntityDef, MembershipDef};
 use super::lookup::Catalog;
-use crate::names::{FunctionId, QualifiedName, SchemaVersion, TableId};
+use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
 
 /// A definition that conflicts with the catalog's contents.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -23,6 +24,14 @@ pub enum CatalogError {
     /// An overload with the same name and argument types already exists.
     #[error("function {0} already has an overload with these argument types")]
     DuplicateOverload(QualifiedName),
+    /// The entity or membership declaration conflicts with another or refers to missing tables or columns.
+    #[error("invalid entity declaration {name}: {reason}")]
+    InvalidEntity {
+        /// The entity type or membership.
+        name: String,
+        /// What is wrong.
+        reason: String,
+    },
     /// The table definition is internally inconsistent.
     #[error("invalid definition of table {table}: {reason}")]
     InvalidTable {
@@ -63,6 +72,10 @@ pub struct InMemoryCatalog {
     functions: BTreeMap<FunctionId, Arc<FunctionDef>>,
     /// Function IDs by name, in ID order.
     function_names: HashMap<QualifiedName, Vec<FunctionId>>,
+    /// Entity types by name.
+    entities: HashMap<Ident, Arc<EntityDef>>,
+    /// Memberships by (member, group).
+    memberships: HashMap<(Ident, Ident), Arc<MembershipDef>>,
 }
 
 impl InMemoryCatalog {
@@ -75,6 +88,8 @@ impl InMemoryCatalog {
             table_names: HashMap::new(),
             functions: BTreeMap::new(),
             function_names: HashMap::new(),
+            entities: HashMap::new(),
+            memberships: HashMap::new(),
         }
     }
 
@@ -165,7 +180,124 @@ impl InMemoryCatalog {
     }
 }
 
+impl InMemoryCatalog {
+    /// Fail unless `table` exists and has every column in `columns`.
+    fn check_columns(
+        &self,
+        name: &str,
+        table: TableId,
+        columns: &[crate::names::ColumnId],
+    ) -> Result<(), CatalogError> {
+        let invalid = |reason: String| CatalogError::InvalidEntity {
+            name: name.to_owned(),
+            reason,
+        };
+        let def = self
+            .tables
+            .get(&table)
+            .ok_or_else(|| invalid(format!("table {} does not exist", table.get())))?;
+        for column in columns {
+            if def.column_by_id(*column).is_none() {
+                return Err(invalid(format!(
+                    "column {} of {} does not exist",
+                    column.get(),
+                    def.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Declare an entity type (ADR-0017). At most one entity type per table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::InvalidEntity`] if the name or table is
+    /// already declared, or the table or a column does not exist.
+    pub fn add_entity(&mut self, entity: EntityDef) -> Result<(), CatalogError> {
+        let name = entity.name.to_string();
+        if self.entities.contains_key(&entity.name) {
+            return Err(CatalogError::InvalidEntity {
+                name,
+                reason: "already declared".into(),
+            });
+        }
+        if self.entities.values().any(|e| e.table == entity.table) {
+            return Err(CatalogError::InvalidEntity {
+                name,
+                reason: "its table already backs an entity type".into(),
+            });
+        }
+        let columns: Vec<_> = std::iter::once(entity.key)
+            .chain(entity.attributes.iter().map(|a| a.column))
+            .collect();
+        self.check_columns(&name, entity.table, &columns)?;
+        self.entities.insert(entity.name.clone(), Arc::new(entity));
+        Ok(())
+    }
+
+    /// Declare a membership between two entity types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::InvalidEntity`] if either entity type is
+    /// undeclared, the membership exists, or a table or column is missing.
+    pub fn add_membership(&mut self, membership: MembershipDef) -> Result<(), CatalogError> {
+        let name = format!("{} in {}", membership.member, membership.group);
+        for ty in [&membership.member, &membership.group] {
+            if !self.entities.contains_key(ty) {
+                return Err(CatalogError::InvalidEntity {
+                    name,
+                    reason: format!("entity type {ty} is not declared"),
+                });
+            }
+        }
+        let key = (membership.member.clone(), membership.group.clone());
+        if self.memberships.contains_key(&key) {
+            return Err(CatalogError::InvalidEntity {
+                name,
+                reason: "already declared".into(),
+            });
+        }
+        let (m, g) = membership.edge_columns;
+        self.check_columns(&name, membership.edges, &[m, g])?;
+        let (d, a, p) = membership.closure_columns;
+        self.check_columns(&name, membership.closure, &[d, a, p])?;
+        self.memberships.insert(key, Arc::new(membership));
+        Ok(())
+    }
+}
+
 impl Catalog for InMemoryCatalog {
+    /// Look up an entity type by name.
+    fn entity_by_name(&self, name: &Ident) -> Option<Arc<EntityDef>> {
+        self.entities.get(name).cloned()
+    }
+
+    /// Look up the entity type backed by `table`.
+    fn entity_for_table(&self, table: TableId) -> Option<Arc<EntityDef>> {
+        self.entities.values().find(|e| e.table == table).cloned()
+    }
+
+    /// Return every membership of `member` entities, ordered by group type.
+    fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
+        let mut out: Vec<_> = self
+            .memberships
+            .values()
+            .filter(|m| &m.member == member)
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.group.cmp(&b.group));
+        out
+    }
+
+    /// Look up a membership.
+    fn membership(&self, member: &Ident, group: &Ident) -> Option<Arc<MembershipDef>> {
+        self.memberships
+            .get(&(member.clone(), group.clone()))
+            .cloned()
+    }
+
     /// Return the configured schema version.
     fn schema_version(&self) -> SchemaVersion {
         self.version

@@ -15,4 +15,6 @@ mod pushdown;
 mod simplify;
 mod util;
 
-pub use api::optimize;
+pub use api::{is_leakproof, optimize};
+pub(crate) use prune::{positional, referenced};
+pub(crate) use util::{output_columns, take};

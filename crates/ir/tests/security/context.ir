@@ -1,0 +1,12 @@
+; Context is known before the query runs: tenant t1 allows everything,
+; tenant t2 would deny; the residual is Allow and no barrier is added.
+(policies
+  (permit (read) Doc (== context.app.tenant "t1"))
+  (forbid (read) Doc (== context.app.tenant "t2")))
+(plan (project (get docs :as d) d.id))
+;; secured
+(plan :schema-version 3
+  (project (get (tid 203) :as d :bind 1) (as #1.0 id) :bind 2))
+;; optimized
+(plan :schema-version 3
+  (project (get (tid 203) :as d :bind 1) (as #1.0 id) :bind 2))

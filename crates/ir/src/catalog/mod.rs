@@ -7,6 +7,7 @@
 
 mod builtins;
 mod defs;
+mod entities;
 mod lookup;
 mod memory;
 
@@ -15,5 +16,6 @@ pub use builtins::{
     install_builtins, unary_op_properties,
 };
 pub use defs::{ColumnDef, FunctionDef, FunctionKind, FunctionProperties, TableDef, Volatility};
+pub use entities::{AttributeDef, EntityDef, MembershipDef};
 pub use lookup::Catalog;
 pub use memory::{CatalogError, InMemoryCatalog};

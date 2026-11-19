@@ -1,0 +1,18 @@
+; Inserted rows are checked against the insert policy; columns the insert
+; leaves out are absent.
+(policies (permit (insert) Doc (and (== resource.owner principal) (has resource.secret))))
+(plan (insert docs (values (columns i o t) (row 20 1 "mine")) (columns id owner_id title)))
+;; secured
+(plan :schema-version 3
+  (insert :target 2 :bind 3
+    (tid 203)
+    (write-check
+      (values (columns i o t) (row 20 1 "mine") :bind 1)
+      (try (and (= #1.1 1) (is-not-null (cast null int8))) false))
+    (columns (cid 0) (cid 1) (cid 3))))
+;; optimized
+(plan :schema-version 3
+  (insert :target 2 :bind 3
+    (tid 203)
+    (write-check (values (columns i o t) (row 20 1 "mine") :bind 1) false)
+    (columns (cid 0) (cid 1) (cid 3))))

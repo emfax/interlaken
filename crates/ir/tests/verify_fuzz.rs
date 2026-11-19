@@ -157,9 +157,13 @@ fn mutated_plans_never_panic() {
                 );
             }
             if let Err(VerifyError::Privileged(_)) = outcome {
+                let text = print_plan(&mutated);
                 prop_assert!(
-                    print_plan(&mutated).contains("policy-filter")
-                        || print_plan(&mutated).contains("write-check")
+                    ["(policy-filter", "(write-check", "(try"]
+                        .iter()
+                        .any(|op| text.contains(op)),
+                    "rejected as privileged without a privileged operator:\n{}",
+                    text
                 );
             }
             Ok(())

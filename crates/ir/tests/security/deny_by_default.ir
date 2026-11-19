@@ -1,0 +1,16 @@
+; No permit applies to folders, so nothing is readable; notes back no entity
+; type and are not governed.
+(policies (permit (read) Doc true))
+(plan (join inner (get folders :as f) (get notes :as n) true))
+;; secured
+(plan :schema-version 3
+  (join inner
+    (policy-filter (get (tid 202) :as f :bind 1) false)
+    (get (tid 210) :as n :bind 2)
+    true))
+;; optimized
+(plan :schema-version 3
+  (join inner
+    (policy-filter (get (tid 202) :as f :bind 1) false)
+    (get (tid 210) :as n :bind 2)
+    true))

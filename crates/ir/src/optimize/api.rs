@@ -54,3 +54,11 @@ pub fn optimize(plan: &Plan, catalog: &dyn Catalog) -> Plan {
     order(&mut plan.root, catalog);
     plan
 }
+
+/// Return `true` if `expr`, evaluated within `plan`, can run below a
+/// security barrier: every function, operator and cast in it is leakproof
+/// (ADR-0011, ADR-0018), judged from the catalog and the plan's column types.
+#[must_use]
+pub fn is_leakproof(expr: &crate::expr::Expr, plan: &Plan, catalog: &dyn Catalog) -> bool {
+    super::util::leakproof(expr, &column_types(plan, catalog), catalog)
+}

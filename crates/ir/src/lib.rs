@@ -2,7 +2,7 @@
 //!
 //! Every query language lowers into this IR, which is then resolved,
 //! verified, rewritten for security and optimized. This crate currently
-//! provides milestones I1 to I3:
+//! provides milestones I1 to I4:
 //!
 //! - The type system: [`ScalarType`], [`DataType`] and [`Type`], with
 //!   explicit nullability.
@@ -23,6 +23,9 @@
 //!   pushdown under the security barrier, pruning and order (ADR-0014).
 //! - [`interp`]: the reference interpreter that defines what a plan means
 //!   and serves as the oracle for optimizer and executor tests.
+//! - [`security`]: the security core: the policy sublanguage, the provider
+//!   contract with an RLS-style provider, and security lowering into
+//!   `PolicyFilter` and `WriteCheck` (ADR-0015 to ADR-0018).
 
 pub mod builder;
 pub mod catalog;
@@ -33,6 +36,7 @@ pub mod optimize;
 mod rel;
 pub mod resolve;
 mod schema;
+pub mod security;
 pub mod text;
 mod types;
 mod typing;

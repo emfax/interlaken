@@ -863,6 +863,17 @@ impl Verifier<'_> {
                     .ok_or_else(|| structure("COALESCE needs at least one argument"))?
                     .with_nullable(all_nullable)
             }
+            Expr::Try {
+                expr: inner,
+                default,
+            } => {
+                if !self.options.trusted {
+                    return Err(VerifyError::Privileged("try".into()));
+                }
+                let ty = self.expr(inner, env)?;
+                let default = self.expr(default, env)?;
+                merge(Some(ty), default).map_err(mismatch)?
+            }
             Expr::Array(items) => {
                 let mut element: Option<Type> = None;
                 for item in items {

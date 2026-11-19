@@ -157,6 +157,35 @@ fn pull(rel: Rel, outer: &HashSet<BindingId>, counts_matter: bool) -> Option<(Re
     }
 }
 
+/// Trace `(binding, column)` of `rel`'s output back to a column of the
+/// single table `rel` reads, through filters, sorts and column-passing
+/// projections. `None` if `rel` is not such a chain or the column is computed.
+fn base_column(
+    rel: &Rel,
+    binding: BindingId,
+    column: ColumnId,
+) -> Option<(crate::names::TableId, ColumnId)> {
+    match rel {
+        Rel::Get {
+            table: crate::names::TableRef::Id(t),
+            binding: Some(b),
+            ..
+        } if *b == binding => Some((*t, column)),
+        Rel::Filter { input, .. } | Rel::Sort { input, .. } => base_column(input, binding, column),
+        Rel::Project {
+            input,
+            exprs,
+            binding: Some(p),
+        } if *p == binding => match &exprs.get(usize::try_from(column.get()).ok()?)?.expr {
+            Expr::Column(crate::names::ColumnRef::Bound { binding, column }) => {
+                base_column(input, *binding, *column)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Collect every bound column reference in `expr`.
 fn collect_refs(expr: &Expr, out: &mut Vec<(BindingId, ColumnId)>) {
     if let Expr::Column(crate::names::ColumnRef::Bound { binding, column }) = expr {
@@ -203,8 +232,10 @@ fn equalities(
                 (false, true) => (*right, *left),
                 _ => return None,
             };
-            typing::is_comparable(&data_type(&inner_side, types, catalog)?)
-                .then_some((inner_side, outer_side))
+            // Columns exposed by pulling are not in `types` yet; both sides of `=` share a type.
+            let ty = data_type(&inner_side, types, catalog)
+                .or_else(|| data_type(&outer_side, types, catalog))?;
+            typing::is_comparable(&ty).then_some((inner_side, outer_side))
         })
         .collect()
 }
@@ -286,6 +317,11 @@ impl Decorrelator<'_> {
                 return Ok(join(join_kind, outer, inner, conjoin(pulled)));
             }
         }
+        if kind == ApplyKind::Single
+            && let Some(rel) = self.single_by_key(&outer, &inner, &outer_bindings)
+        {
+            return Ok(join(JoinKind::Left, outer, rel.0, rel.1));
+        }
         if matches!(kind, ApplyKind::Inner | ApplyKind::Left | ApplyKind::Single) {
             match inner {
                 Rel::Aggregate { ref keys, .. } if keys.is_empty() => {
@@ -317,6 +353,43 @@ impl Decorrelator<'_> {
         let inside = produced(&input);
         let pairs = equalities(pulled, &inside, &self.types, self.catalog)?;
         Some((input, pairs))
+    }
+
+    /// Decorrelate a single apply whose correlation fixes the inner table's primary key.
+    ///
+    /// Equalities on every primary key column of the one table the inner
+    /// side reads mean at most one inner row per outer row, so the single
+    /// apply is a left join. Returns the uncorrelated inner side and the
+    /// join condition.
+    fn single_by_key(
+        &self,
+        _outer: &Rel,
+        inner: &Rel,
+        outer: &HashSet<BindingId>,
+    ) -> Option<(Rel, Expr)> {
+        let (input, pulled) = pull(inner.clone(), outer, true)?;
+        if pulled.is_empty() {
+            return None;
+        }
+        let pairs = equalities(pulled.clone(), &produced(&input), &self.types, self.catalog)?;
+        let mut table = None;
+        let mut fixed = HashSet::new();
+        for (inner_side, _) in &pairs {
+            let Expr::Column(crate::names::ColumnRef::Bound { binding, column }) = inner_side
+            else {
+                continue;
+            };
+            let (t, c) = base_column(&input, *binding, *column)?;
+            if table.is_some_and(|known| known != t) {
+                return None;
+            }
+            table = Some(t);
+            fixed.insert(c);
+        }
+        let def = self.catalog.table_by_id(table?)?;
+        let unique =
+            !def.primary_key.is_empty() && def.primary_key.iter().all(|c| fixed.contains(c));
+        unique.then(|| (input, conjoin(pulled)))
     }
 
     /// Rewrite an apply over a keyless aggregate as a left join to a grouped aggregate.

@@ -15,7 +15,7 @@ use crate::names::{BindingId, ColumnId, ColumnRef};
 use crate::rel::{ApplyKind, JoinKind, Rel};
 
 /// Collect every column reference in `rel` and below.
-fn referenced(rel: &Rel, out: &mut HashSet<(BindingId, ColumnId)>) {
+pub(crate) fn referenced(rel: &Rel, out: &mut HashSet<(BindingId, ColumnId)>) {
     /// Collect references in one expression.
     fn walk(e: &Expr, out: &mut HashSet<(BindingId, ColumnId)>) {
         if let Expr::Column(ColumnRef::Bound { binding, column }) = e {
@@ -28,7 +28,7 @@ fn referenced(rel: &Rel, out: &mut HashSet<(BindingId, ColumnId)>) {
 }
 
 /// Collect the bindings whose outputs are consumed by position, given whether `rel`'s are.
-fn positional(rel: &Rel, consumed: bool, out: &mut HashSet<BindingId>) {
+pub(crate) fn positional(rel: &Rel, consumed: bool, out: &mut HashSet<BindingId>) {
     if consumed {
         out.extend(rel.bindings());
     }

@@ -1,0 +1,29 @@
+; An update must read and update the target rows (USING) and write rows that
+; still pass the update policy (WITH CHECK).
+(policies
+  (permit (read update) Doc (== resource.owner principal)))
+(plan (update docs (filter (get docs :as d) (= d.id 10)) (set title "new") (set owner_id 2)))
+;; secured
+(plan :schema-version 3
+  (update :target 2 :bind 3
+    (tid 203)
+    (write-check
+      (filter
+        (policy-filter
+          (get (tid 203) :as d :bind 1)
+          (and (try (= #1.1 1) false) (try (= #1.1 1) false)))
+        (= #1.0 10))
+      (try (= 2 1) false))
+    (set (cid 3) "new")
+    (set (cid 1) 2)))
+;; optimized
+(plan :schema-version 3
+  (update :target 2 :bind 3
+    (tid 203)
+    (write-check
+      (policy-filter
+        (filter (get (tid 203) :as d :bind 1) (= #1.0 10))
+        (and (try (= #1.1 1) false) (try (= #1.1 1) false)))
+      false)
+    (set (cid 3) "new")
+    (set (cid 1) 2)))

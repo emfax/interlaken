@@ -79,6 +79,17 @@ Residuals are expressed in the security sublanguage ([ADR-0016](0016-security-ex
 
 An RLS-style provider is built first (I4) to prove the core independently of Cedar.
 
+### As implemented (I4)
+
+The security core lives in `interlaken_ir::security`.
+- **`SecurityContext`** holds the principal and the standard fields (`time`, `ip`, `auth_method`, `session_id`). The application record is visible to policies as `context.app`.
+- **`PolicyProvider`** follows the contract above, with three adjustments:
+  - `authorize` takes the resource as data (`ResourceData`), so rows not yet written can be checked;
+  - `dependencies` takes the partial request, because the residual no longer mentions the context it consumed;
+  - a `column_access` method decides column-level reads ([ADR-0018](0018-policy-barrier-and-write-check-plan-constructs.md)).
+- **`RlsProvider`** holds sublanguage policies, written in the text form `(permit (read update) Doc COND)`. Its `partial_eval` partially evaluates each applicable policy and combines the results as `OR(permits) AND NOT OR(forbids)`. A table with no applicable permit is denied.
+- **`secure(plan, catalog, provider, context, entities)`** is security lowering ([ADR-0018](0018-policy-barrier-and-write-check-plan-constructs.md)). It fails closed: if a policy cannot be lowered, the query does not run.
+
 ### Hand-built IR and WASM
 
 - Hand-built IR and WASM query builders enter through the same resolve, verify and lower pipeline. The privileged-node check stops clients injecting a fake `PolicyFilter` or claiming a function is leakproof.
@@ -87,7 +98,7 @@ An RLS-style provider is built first (I4) to prove the core independently of Ced
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Security context, provider contract, RLS-style provider** - I4
+- [x] **Phase 1: Security context, provider contract, RLS-style provider** - I4
 - [ ] **Phase 2: Cedar provider** - I5
 
 ## Consequences

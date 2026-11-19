@@ -47,9 +47,27 @@ Providers need a common target for partial evaluation. If residuals could contai
 
 Errors raised while evaluating a residual are contained per row by `Try` and never surface; the executor implements this with an error mask ([ADR-0024](0024-expression-evaluation-with-postgres-semantics.md)).
 
+### As implemented (I4)
+
+- **Evaluation.**
+  - **Concrete evaluation** follows Cedar: reading an absent attribute or a missing entity is an error; `==` between values of different kinds is false; integer arithmetic is checked; `&&`, `||` and `if` short-circuit left to right. It is the security oracle's ground truth.
+  - **Partial evaluation** substitutes the principal (its attributes and ancestors) and the context. It simplifies only where errors cannot change the outcome: `false && x` becomes `false`, but `x || true` stays, because `x` may fail first.
+- **Lowering to IR.** The residual becomes an IR expression over the resource row.
+  - **IR additions.** Lowering added two things to the IR:
+    - **`Try(expr, default)`**, a privileged expression that the verifier rejects from clients;
+    - **the built-in `assert_present`**, which raises on NULL. Every nullable attribute is read through it, so an absent attribute fails the policy as in Cedar rather than propagating as SQL NULL, which behaves differently under `AND`/`OR`.
+  - **Attribute paths through references** become scalar subqueries on the referenced entity's table. The optimizer turns these into primary-key left joins.
+  - **Hierarchy `in`** becomes an `EXISTS` on the closure table, or key equalities when the principal (whose ancestors are known) is the member.
+  - **Set containment** becomes `EXISTS` over `UNNEST`.
+  - **`if`** becomes `(c && a) || (!c && b)`, which is equal including errors, so no subquery lands in a `CASE` branch.
+  - **Globs** become `LIKE` patterns.
+- **Safety rules.** The oracle found that both of these are needed:
+  - **Nothing raises inside a policy subquery.** Subqueries are evaluated as applies outside the `Try`, so presence checks go outside them.
+  - **Boolean simplification never removes an evaluated operand that could decide the result.** An operand that cannot raise can still decide whether a later one runs.
+
 ## Implementation Phases
 
-- [ ] **Phase 1: Sublanguage and lowering** - I4
+- [x] **Phase 1: Sublanguage and lowering** - I4
 
 ## Consequences
 

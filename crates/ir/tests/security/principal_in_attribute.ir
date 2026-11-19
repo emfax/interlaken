@@ -1,0 +1,16 @@
+; The principal's ancestors are known, so "principal in resource.owner"
+; compares the owner key with the principal and its ancestors of that type.
+(policies (permit (read) User (in principal resource)) (permit (read) Doc (in principal resource.owner)))
+(plan (join inner (get docs :as d) (get users :as u) (= d.owner_id u.id)))
+;; secured
+(plan :schema-version 3
+  (join inner
+    (policy-filter (get (tid 203) :as d :bind 1) (try (= #1.1 1) false))
+    (policy-filter (get (tid 200) :as u :bind 2) (try (= #2.0 1) false))
+    (= #1.1 #2.0)))
+;; optimized
+(plan :schema-version 3
+  (join inner
+    (policy-filter (get (tid 203) :as d :bind 1) (try (= #1.1 1) false))
+    (policy-filter (get (tid 200) :as u :bind 2) (try (= #2.0 1) false))
+    (= #1.1 #2.0)))

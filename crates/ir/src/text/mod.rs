@@ -49,7 +49,7 @@
 //!          (+ E E) (- E E) (* E E) (/ E E) (% E E) (concat E E) (like E E)
 //!          (is-distinct-from E E) (is-not-distinct-from E E)
 //!          (case (when E E)... [(else E)] [:on E]) (coalesce E...) (nullif E E)
-//!          (array E...)
+//!          (array E...) (try E E)
 //!          (scalar REL) (exists REL) (in E REL) (any OP E REL) (all OP E REL)
 //! FUNC     name | schema.name | (fid N)
 //! TYPE     DATATYPE | (not-null DATATYPE)
@@ -61,10 +61,10 @@ mod api;
 mod catalog;
 mod error;
 pub(crate) mod literal;
-mod pretty;
-mod read;
-mod sexp;
-mod write;
+pub(crate) mod pretty;
+pub(crate) mod read;
+pub(crate) mod sexp;
+pub(crate) mod write;
 
 pub use api::{
     parse_expr, parse_plan, parse_rel, parse_type, print_expr, print_plan, print_rel, print_type,

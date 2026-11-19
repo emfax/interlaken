@@ -1,0 +1,20 @@
+; A forbid overrides permits. A document without a secret makes the forbid
+; fail, and a failing policy is ignored, so that document stays readable.
+(policies
+  (permit (read) Doc true)
+  (forbid (read) Doc (< resource.secret 6)))
+(plan (project (get docs :as d) d.id))
+;; secured
+(plan :schema-version 3
+  (project :bind 2
+    (policy-filter
+      (get (tid 203) :as d :bind 1)
+      (not (try (< (call (fid 57) #1.4) 6) false)))
+    (as #1.0 id)))
+;; optimized
+(plan :schema-version 3
+  (project :bind 2
+    (policy-filter
+      (get (tid 203) :as d :bind 1)
+      (not (try (< (call (fid 57) #1.4) 6) false)))
+    (as #1.0 id)))

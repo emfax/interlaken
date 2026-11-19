@@ -366,6 +366,10 @@ impl Interp<'_> {
                     .collect::<Result<_, _>>()?,
             ),
             Expr::Cast { expr, to } => cast(self.eval(expr, frames)?, to)?,
+            Expr::Try { expr, default } => match self.eval(expr, frames) {
+                Ok(v) => v,
+                Err(_) => self.eval(default, frames)?,
+            },
             Expr::Subquery { .. } => {
                 return Err(EvalError::Unsupported(
                     "subquery in an unresolved plan".into(),

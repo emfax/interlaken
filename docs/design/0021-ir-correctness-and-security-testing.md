@@ -64,6 +64,18 @@ The IR is the single enforcement point for access control, so a bug in lowering 
   - **Optimizer golden files** in `crates/ir/tests/optimize/` show each rule. Each optimized plan is also run against its unoptimized plan on sample data.
   - **Differential test:** 4,000 random queries over random data. Whenever the unoptimized plan succeeds, the optimized plan must succeed with the same rows (as a bag) and must verify. About 70% of cases compare, and correlated applies fall from about 1,450 to 200.
   - **Planted bugs**, each caught: dropping the count-bug `coalesce`, pushing a predicate into the padded side of a left join, and dropping the empty-array fallback for nesting.
+- **Phase 4 as implemented (I4):**
+  - **Security oracle:**
+    - **The cases:** random RLS-style policies over documents and users use every sublanguage feature (attribute paths, hierarchy, sets, absent attributes, arithmetic, context, `if`), with random data, principals, tenants and queries.
+    - **The property:** the secured plan, optimized and not, must return what the unsecured query returns over only the rows the provider's concrete `authorize` permits. Whenever that succeeds, the secured plan must succeed too, so hidden rows never cause errors.
+    - **Coverage:** 3,000 cases per run, and 20,000 once.
+    - **What it found** (all fixed):
+      - presence checks raising inside policy subqueries, outside `Try`;
+      - the optimizer simplifying `x OR true` to `true`, which dropped `x`'s error inside a policy's `Try`;
+      - then dropping a non-raising operand that decided whether a raising one ran. This one is pinned as a regression test.
+    - **Planted bugs**, each caught: removing `Try`, letting non-leakproof predicates below the barrier, and a wrong principal-membership comparison.
+  - **Leak suite:** probes through division by zero and invalid `LIKE` patterns in hidden rows, scalar-subquery cardinality, aggregates, `LIMIT`, join conditions, `EXISTS`, grouping and nesting, plus write checks, column-level denial, and injected privileged operators. In every optimized plan, only leakproof expressions run below a `PolicyFilter`.
+  - **Transactional tests:** in `interlaken-engine`, against real storage ([ADR-0019](0019-transactional-authorization-and-residual-cache.md)).
 
 ### MVP success criteria
 
@@ -89,7 +101,7 @@ Roughly 14 weeks for one engineer. I1–I3 start after storage milestone M2 and 
 - [x] **Phase 1: Golden tests and builder/text round-trip** - I1
 - [x] **Phase 2: Verifier fuzzing** - I2
 - [x] **Phase 3: Reference interpreter and differential testing** - I3
-- [ ] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4
+- [x] **Phase 4: Security oracle, leak suite, transactional tests with RLS provider** - I4
 - [ ] **Phase 5: Oracle with Cedar, deployment gate tests** - I5
 
 ## Consequences

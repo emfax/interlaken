@@ -44,6 +44,8 @@ impl Interp<'_> {
                 scalar_type_of(d).expect("integer"),
             )?,
             ("now", []) => Datum::Timestamptz(self.options.now),
+            ("assert_present", [Datum::Null]) => return Err(EvalError::Absent),
+            ("assert_present", [v]) => v.clone(),
             ("random", []) => {
                 #[allow(clippy::cast_precision_loss)]
                 let v = (self.next_random() >> 11) as f64 / (1u64 << 53) as f64;

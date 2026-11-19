@@ -154,6 +154,16 @@ impl Datum {
     }
 }
 
+impl PartialEq for Datum {
+    /// Compare with `IS NOT DISTINCT FROM`: NULLs are equal, NaN equals NaN,
+    /// and values of different types are unequal.
+    fn eq(&self, other: &Self) -> bool {
+        self.not_distinct(other)
+    }
+}
+
+impl Eq for Datum {}
+
 /// A row used as a grouping or duplicate-elimination key: rows are equal
 /// when every column is not distinct (NULLs equal, NaN equal to NaN).
 #[derive(Clone, Debug)]

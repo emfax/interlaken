@@ -43,6 +43,10 @@ pub enum EvalError {
     /// A duplicate primary key (23505).
     #[error("duplicate key value violates the primary key of \"{0}\"")]
     UniqueViolation(String),
+    /// A required value is absent: `assert_present` of NULL, used for
+    /// policy attributes that are not set (22004).
+    #[error("attribute is absent")]
+    Absent,
     /// A row failed a `WriteCheck` (42501).
     #[error("new row violates the security policy")]
     PermissionDenied,
@@ -75,6 +79,7 @@ impl EvalError {
             Self::NegativeLimit(_) => "2201X",
             Self::NotNull { .. } => "23502",
             Self::UniqueViolation(_) => "23505",
+            Self::Absent => "22004",
             Self::PermissionDenied => "42501",
             Self::Unsupported(_) => "0A000",
         }

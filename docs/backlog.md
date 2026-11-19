@@ -68,6 +68,27 @@ Entry format:
 - **Size:** About 2–4 days, depending on the conditional-branch design.
 - **Status:** open
 
+### closure-maintenance-in-dml: Maintain closure tables in the same transaction as edge changes
+- **Origin:** ADR-0017, I4
+- **Why:** `security::Closure` implements path-counted maintenance, and principal loading reads the closure tables. Nothing yet writes closure rows when an edges table changes. Until something does, closure tables must be maintained by whoever changes memberships.
+- **When:** Executor milestone E4 (DML sinks), which is the natural hook. Required before memberships change through SQL.
+- **Size:** About 3 days, including tests that interleave edge changes with authorization.
+- **Status:** open
+
+### column-masking: Per-row column access and masking functions
+- **Origin:** ADR-0018, I4
+- **Why:** A column policy that depends on the row denies the column outright (fail closed). Returning redacted values per row needs masking functions.
+- **When:** When an application needs per-row column visibility.
+- **Size:** About 1 week.
+- **Status:** open
+
+### entity-loading-beyond-principal: Load entities other than the principal for partial evaluation
+- **Origin:** ADR-0017, I4
+- **Why:** `load_principal` loads only the principal's attributes and ancestors. A policy reading another entity through the principal (`principal.manager.dept`) fails, and the policy is then ignored.
+- **When:** When policies need it. Load referenced entities on demand through the transaction.
+- **Size:** About 1–2 days.
+- **Status:** open
+
 ### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
 - **Origin:** ADR-0012 (decorrelation), I3
 - **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.

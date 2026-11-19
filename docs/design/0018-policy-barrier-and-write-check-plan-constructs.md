@@ -62,11 +62,20 @@ Both parts are engine-produced and leakproof; the split only changes where they 
 - **Actions:** one per operation per table: `read`, `insert`, `update`, `delete`.
 - **Column-level control (MVP):** per-column read actions, enforced by projection. A column the principal can't read can't be referenced: the query fails with a permission error rather than returning NULL, so a NULL never means "hidden" and predicates on hidden columns can't behave surprisingly. Masking functions (later) are the explicit way to return redacted values.
 
+**As implemented (I4).**
+- **Lowering.** `security::secure` adds the operators:
+  - a `PolicyFilter` above each `Get` of a governed table (one backing an entity type) with the read residual, and also the update or delete residual for a DML target (`USING`);
+  - a `WriteCheck` on insert and update input testing the new row (`WITH CHECK`), where columns an insert omits are absent.
+  The plan is then resolved again, which lowers the policies' subqueries to applies below each barrier.
+- **Barrier rule.** The optimizer moves a predicate below a `PolicyFilter` only if every function, operator and cast in it is leakproof. `Try` counts as leakproof when its operand calls nothing volatile.
+- **Residual split.** Splitting the residual into a storage `RowFilter` is part of physical planning (executor).
+- **Column-level reads.** A column becomes governed once a column-level policy names it (`(permit (read) Doc COND :column secret)`). The principal may read it only if those policies allow every row; a decision that depends on the row denies, failing closed. A plan that references a denied column, in any expression or by consuming whole rows (plan output, set operations, `DISTINCT`, inserts), fails with a permission error naming the column. Masking functions remain future work.
+
 Both nodes are privileged: the verifier rejects them in client IR ([ADR-0013](0013-ir-forms-formats-resolver-and-verifier.md)). The executor enforces these rules at run time ([ADR-0025](0025-runtime-security-enforcement-in-executor.md)).
 
 ## Implementation Phases
 
-- [ ] **Phase 1: PolicyFilter, WriteCheck, barrier rules, column-level actions** - I4
+- [x] **Phase 1: PolicyFilter, WriteCheck, barrier rules, column-level actions** - I4
 
 ## Consequences
 

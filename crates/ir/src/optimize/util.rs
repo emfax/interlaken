@@ -169,6 +169,7 @@ pub(crate) fn data_type(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> Op
         Expr::Array(items) => DataType::Array(Box::new(
             data_type(items.first()?, types, catalog)?.nullable(),
         )),
+        Expr::Try { expr, .. } => data_type(expr, types, catalog)?,
         _ => return None,
     })
 }
@@ -178,6 +179,14 @@ pub(crate) fn data_type(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> Op
 ///
 /// Conservative: anything whose properties cannot be established is not leakproof.
 pub(crate) fn leakproof(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> bool {
+    if let Expr::Try {
+        expr: inner,
+        default,
+    } = expr
+    {
+        // Errors inside are contained; only side effects could leak.
+        return !volatile(inner, catalog) && leakproof(default, types, catalog);
+    }
     let this = match expr {
         Expr::Column(_) | Expr::Literal(_) | Expr::Param { .. } => true,
         Expr::And(_) | Expr::Or(_) | Expr::Case { .. } | Expr::Coalesce(_) | Expr::Array(_) => true,
@@ -198,7 +207,7 @@ pub(crate) fn leakproof(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> bo
             operand => data_type(operand, types, catalog)
                 .is_some_and(|from| cast_properties(&from, to).leakproof),
         },
-        Expr::Call { .. } | Expr::Subquery { .. } => false,
+        Expr::Call { .. } | Expr::Subquery { .. } | Expr::Try { .. } => false,
     };
     this && expr
         .children()

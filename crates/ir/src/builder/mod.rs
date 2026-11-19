@@ -26,6 +26,6 @@ mod rel;
 
 pub use expr::{
     Case, agg, and, array, bound, call, case, case_on, coalesce, col, count_star, exists, lit,
-    null, or, param, scalar,
+    null, or, param, scalar, try_or,
 };
 pub use rel::{RelBuilder, get, values};

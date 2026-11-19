@@ -66,6 +66,16 @@ pub enum Expr {
     /// no element type, so resolved IR writes it under a cast, as
     /// `(cast (array) T)`, the way it writes a typed NULL.
     Array(Vec<Expr>),
+    /// **Privileged.** `expr`, or `default` if evaluating `expr` raises an
+    /// error. Security lowering wraps each policy condition in it, so a
+    /// policy that fails on a row is ignored rather than failing the query
+    /// (ADR-0016); the verifier rejects it from clients.
+    Try {
+        /// The expression whose errors are contained.
+        expr: Box<Expr>,
+        /// The result when `expr` raises an error.
+        default: Box<Expr>,
+    },
     /// `NULLIF(left, right)`.
     NullIf {
         /// The value returned unless it equals `right`.
@@ -221,6 +231,7 @@ impl Expr {
             Self::Call { args, .. } => args.iter().collect(),
             Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
+            Self::Try { expr, default } => vec![expr, default],
             Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {
                 items.iter().collect()
             }
@@ -250,6 +261,7 @@ impl Expr {
             Self::Call { args, .. } => args.iter_mut().collect(),
             Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
+            Self::Try { expr, default } => vec![expr, default],
             Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {
                 items.iter_mut().collect()
             }
