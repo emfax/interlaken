@@ -10,6 +10,25 @@ use super::rel::Interp;
 use crate::catalog::FunctionDef;
 use crate::types::ScalarType;
 
+/// Compute aggregate `def` over the argument tuples of a group's rows.
+///
+/// `rows` holds one argument tuple per row that passed the `FILTER`.
+/// Strict aggregates skip tuples containing NULL; `distinct` keeps one of
+/// each distinct tuple. The executor finalizes its aggregates with this,
+/// so both compute them identically.
+///
+/// # Errors
+///
+/// Returns [`EvalError::OutOfRange`] if an integer sum overflows `int8`, or
+/// [`EvalError::Unsupported`] for an aggregate the interpreter lacks.
+pub fn aggregate_values(
+    def: &FunctionDef,
+    rows: Vec<Vec<Datum>>,
+    distinct: bool,
+) -> Result<Datum, EvalError> {
+    Interp::aggregate(def, rows, distinct)
+}
+
 impl Interp<'_> {
     /// Call the scalar function `def` on non-NULL (if strict) arguments.
     pub(crate) fn call(&mut self, def: &FunctionDef, args: Vec<Datum>) -> Result<Datum, EvalError> {

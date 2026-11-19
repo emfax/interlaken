@@ -80,8 +80,26 @@ fn counts(rows: &[Vec<Datum>]) -> HashMap<RowKey, usize> {
     counts
 }
 
-/// Compare two rows by sort keys already evaluated for each.
-fn compare_keys(a: &[Datum], b: &[Datum], keys: &[SortKey]) -> Ordering {
+/// Compare two rows by the values of their sort keys, as `ORDER BY` does.
+///
+/// `a` and `b` hold one value per key. NULLs go first or last per key, and
+/// descending keys reverse the order of non-NULL values only. The executor's
+/// `Sort` uses this so both order rows identically.
+///
+/// # Examples
+///
+/// ```
+/// use std::cmp::Ordering;
+/// use interlaken_ir::interp::{Datum, compare_sort_keys};
+/// use interlaken_ir::{Expr, SortKey, Value};
+///
+/// let key = [SortKey::desc(Expr::Literal(Value::Int4(0)))];
+/// // Descending keys put NULLs first by default.
+/// assert_eq!(compare_sort_keys(&[Datum::Null], &[Datum::Int4(1)], &key), Ordering::Less);
+/// assert_eq!(compare_sort_keys(&[Datum::Int4(2)], &[Datum::Int4(1)], &key), Ordering::Less);
+/// ```
+#[must_use]
+pub fn compare_sort_keys(a: &[Datum], b: &[Datum], keys: &[SortKey]) -> Ordering {
     for ((x, y), key) in a.iter().zip(b).zip(keys) {
         let ordering = match (x.is_null(), y.is_null()) {
             (true, true) => Ordering::Equal,
@@ -599,7 +617,7 @@ impl<'a> Interp<'a> {
                         .collect::<Result<_, _>>()?;
                     keyed.push((values, row));
                 }
-                keyed.sort_by(|(a, _), (b, _)| compare_keys(a, b, keys));
+                keyed.sort_by(|(a, _), (b, _)| compare_sort_keys(a, b, keys));
                 Relation {
                     layout: input.layout,
                     rows: keyed.into_iter().map(|(_, r)| r).collect(),

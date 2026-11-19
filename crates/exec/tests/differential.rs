@@ -302,12 +302,12 @@ fn executor_agrees_with_interpreter() {
                 rows::insert(&txn, &table, stored).await.unwrap();
             }
             txn.next_statement();
-            let ctx = ExecContext {
-                txn: txn.clone(),
-                catalog: shared.clone(),
-                params: Vec::new(),
-                options: ExecOptions::default(),
-            };
+            let ctx = ExecContext::new(
+                txn.clone(),
+                shared.clone(),
+                Vec::new(),
+                ExecOptions::default(),
+            );
             let result = collect(&physical, &ctx).await;
             txn.abort();
             result

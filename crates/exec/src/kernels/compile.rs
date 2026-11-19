@@ -12,6 +12,7 @@ use interlaken_ir::{BindingId, ColumnId, ColumnRef, DataType, FunctionRef, Type,
 use super::eval::State;
 use super::input::Input;
 use crate::error::ExecError;
+use crate::exec::OuterColumn;
 
 /// The built-in functions the kernels implement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +125,10 @@ pub(crate) struct Node {
 struct Compiler<'a> {
     /// The input columns and their types.
     columns: &'a [(BindingId, ColumnId, Type)],
+    /// Columns of enclosing rows, which compile to their values.
+    outer: &'a [OuterColumn],
+    /// Every visible column with its type: the input's, then the outer ones.
+    scope: Vec<(BindingId, ColumnId, Type)>,
     /// The catalog.
     catalog: &'a dyn Catalog,
     /// Parameter values.
@@ -188,7 +193,7 @@ impl Node {
 impl Compiler<'_> {
     /// Return the result type of `expr`.
     fn type_of(&self, expr: &Expr) -> Result<DataType, ExecError> {
-        expr_type(expr, self.catalog, self.columns)
+        expr_type(expr, self.catalog, &self.scope)
             .map(|t| t.data)
             .map_err(|e| unsupported(format!("expression does not type-check: {e}")))
     }
@@ -223,18 +228,27 @@ impl Compiler<'_> {
         let ty = self.type_of(expr)?;
         let kind = match expr {
             Expr::Column(ColumnRef::Bound { binding, column }) => {
-                let position = self
+                if let Some(position) = self
                     .columns
                     .iter()
                     .position(|(b, c, _)| b == binding && c == column)
-                    .ok_or_else(|| {
-                        unsupported(format!(
-                            "column #{}.{} is not in the input",
-                            binding.get(),
-                            column.get()
-                        ))
-                    })?;
-                Kind::Column(position)
+                {
+                    Kind::Column(position)
+                } else {
+                    // A column of an enclosing row is a constant for this subplan.
+                    let outer = self
+                        .outer
+                        .iter()
+                        .find(|o| o.binding == *binding && o.column == *column)
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "column #{}.{} is not in scope",
+                                binding.get(),
+                                column.get()
+                            ))
+                        })?;
+                    Kind::Constant(outer.value.clone())
+                }
             }
             Expr::Column(ColumnRef::Named { .. }) => {
                 return Err(unsupported("named column in an unresolved plan"));
@@ -326,22 +340,31 @@ pub struct CompiledExpr {
 impl CompiledExpr {
     /// Compile `expr` for inputs whose columns are `columns`, in order.
     ///
-    /// Parameters are bound and constant `LIKE` patterns compiled here, so
-    /// each batch only runs kernels.
+    /// Parameters are bound, references to `outer` columns (enclosing rows
+    /// of a correlated subplan) replaced by their values, and constant
+    /// `LIKE` patterns compiled here, so each batch only runs kernels.
     ///
     /// # Errors
     ///
     /// Returns [`ExecError::Unsupported`] if `expr` is unresolved, reads a
-    /// column not in `columns`, or does not type-check.
+    /// column in neither `columns` nor `outer`, or does not type-check.
     pub fn compile(
         expr: &Expr,
         columns: &[(BindingId, ColumnId, Type)],
+        outer: &[OuterColumn],
         catalog: &dyn Catalog,
         params: &[Datum],
         options: ExecOptions,
     ) -> Result<Self, ExecError> {
+        let scope = columns
+            .iter()
+            .cloned()
+            .chain(outer.iter().map(|o| (o.binding, o.column, o.ty.clone())))
+            .collect();
         let root = Compiler {
             columns,
+            outer,
+            scope,
             catalog,
             params,
             options,

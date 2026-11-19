@@ -27,6 +27,8 @@ mod run;
 pub use cast::cast_value;
 pub use datum::{Datum, RowKey};
 pub use error::EvalError;
+pub use functions::aggregate_values;
 pub use like::LikePattern;
+pub use rel::compare_sort_keys;
 pub(crate) use run::eval_constant;
 pub use run::{Database, ExecOptions, RowEvaluator, execute};

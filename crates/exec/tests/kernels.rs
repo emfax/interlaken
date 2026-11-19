@@ -563,7 +563,8 @@ fn kernels_agree_with_interpreter() {
             .iter()
             .map(|r| reference.eval(&expr, &layout, r))
             .collect();
-        let mut compiled = CompiledExpr::compile(&expr, &columns, &catalog, &[], options).unwrap();
+        let mut compiled =
+            CompiledExpr::compile(&expr, &columns, &[], &catalog, &[], options).unwrap();
         let actual = compiled.eval(&arrays, n);
         let describe = || {
             format!(
@@ -692,7 +693,7 @@ fn run(text: &str, rows: &[(Option<i32>, Option<&str>)]) -> Result<Vec<Datum>, E
         .map(|((_, _, ty), values)| build_array(&ty.data, values).unwrap())
         .collect::<Vec<_>>();
     let mut compiled =
-        CompiledExpr::compile(&expr, &columns, &catalog, &[], ExecOptions::default())?;
+        CompiledExpr::compile(&expr, &columns, &[], &catalog, &[], ExecOptions::default())?;
     let array = compiled.eval(&arrays, rows.len())?;
     Ok((0..rows.len())
         .map(|i| datum_at(array.as_ref(), i).unwrap())

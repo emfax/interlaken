@@ -1,11 +1,11 @@
 ---
 id: 0028
 title: Physical Operators, Planning and EXPLAIN
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [executor, planner, observability, graphql]
 feature-flag:
 created: 2026-11-17
-accepted:
+accepted: 2026-11-19
 implemented:
 spec-sections: ["executor-design.md#physical-operators", "executor-design.md#physical-planning-mvp", "executor-design.md#nest-and-graphql-output", "executor-design.md#observability"]
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal
+Accepted
 
 ## Summary
 
@@ -65,7 +65,13 @@ The rule-based optimizer ([ADR-0014](0014-rule-based-optimizer.md)) emits logica
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Joins, aggregation, sort, top-N, set operations, Values** - E3
+- [x] **Phase 1: Joins, aggregation, sort, top-N, set operations, Values** - E3
+  - *As implemented:* one `Join` operator serves all six kinds: equality conjuncts between leakproof expressions of each side become hash keys (NULL keys never match), the rest of the condition is a residual evaluated with the kernels on key-matching pairs in chunks, and with no keys it loops over all pairs. The build side is always the right input, chosen at plan time. Semi and anti joins stop at a row's first passing pair.
+  - `Apply` runs the inner plan once per outer row with that row's columns visible as constants (`ExecContext::correlated`); semi and anti applies stop at the first inner row, and single applies fail on the second.
+  - `Aggregate` is hash-based. Plain `count` accumulates as rows arrive; other aggregates keep their argument tuples and are finished by the interpreter's `aggregate_values`, so results (including float summation order within a group) match exactly. Incremental accumulators are future work. `StreamAggregate` is not built: nothing produces sorted input yet.
+  - `Sort` uses the interpreter's `compare_sort_keys`, stably; a limit directly above makes it a top-N that compacts to the rows the limit can return. `Distinct`, `UNION`, `INTERSECT` and `EXCEPT` hash rows by value. `Values` may read an enclosing row.
+  - Arrow fields are all nullable, since outer joins and applies pad NOT NULL columns with NULLs.
+  - *Testing:* a differential test runs 3,000 random plans over three stored tables, optimized or not, against real storage and the interpreter, with every join and apply kind, aggregates with `DISTINCT` and `FILTER`, set operations, `VALUES`, subqueries and top-N; rows compare as bags, and in order under a limit over a total sort. Planted bugs in outer-join padding (left and right), semi joins, NULL key matching, empty aggregation, aggregate filters, top-N offsets, `EXCEPT ALL`, left-apply padding and `DISTINCT` are each caught.
 - [ ] **Phase 2: Index scans and lookups** - E4
 - [ ] **Phase 3: Nest, Unnest, EXPLAIN ANALYZE** - E5
 

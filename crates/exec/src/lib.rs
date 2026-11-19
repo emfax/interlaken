@@ -18,6 +18,6 @@ mod rowwise;
 
 pub use columnar::{arrow_type, build_array, datum_at, field};
 pub use error::ExecError;
-pub use exec::{BatchStream, ExecContext, collect, execute};
+pub use exec::{BatchStream, ExecContext, OuterColumn, collect, execute};
 pub use kernels::CompiledExpr;
-pub use physical::{BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};
+pub use physical::{Aggregate, BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};

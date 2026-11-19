@@ -126,13 +126,6 @@ Entry format:
 - **Size:** About 1 day of measurement, plus an ADR update.
 - **Status:** open
 
-### hash-join-build-side: Choose the hash join build side at planning time or at run time
-- **Origin:** `executor-design.md` open questions
-- **Why:** Choosing at run time, after seeing input sizes, avoids bad plans when estimates are poor, but complicates the operator.
-- **When:** During executor milestone E3.
-- **Size:** A decision during E3.
-- **Status:** open
-
 ### wasm-wit-interface: Define the WIT interface for WASM UDFs
 - **Origin:** ADR-0029 open questions
 - **Why:** Guests need an interface for Arrow batches and host calls. The executor's batch format must not rule it out, but the interface itself is deferred.
@@ -148,3 +141,10 @@ Entry format:
 - **When:** Before executor milestone E5.
 - **Size:** A decision, plus an ADR update.
 - **Status:** dropped: already decided in ADR-0012 (typed `array(record(...))`, Arrow list-of-struct at run time, JSON only at serialization). The open question in `executor-design.md` predates that ADR.
+
+### hash-join-build-side: Choose the hash join build side at planning time or at run time
+- **Origin:** `executor-design.md` open questions
+- **Why:** Choosing at run time, after seeing input sizes, avoids bad plans when estimates are poor, but complicates the operator.
+- **When:** During executor milestone E3.
+- **Size:** A decision during E3.
+- **Status:** done (E3): chosen at plan time, always the right input, read completely before the left side probes it. Revisit with statistics (ADR-0028 future work).

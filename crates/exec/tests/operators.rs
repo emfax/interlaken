@@ -68,8 +68,10 @@ fn planning_pushes_only_leakproof_conjuncts() {
     ));
 
     // Later milestones' operators are reported, not mis-executed.
-    let join = resolved("(plan (join inner (get t :as x) (get t :as y) true))");
-    assert!(matches!(plan(&join, &catalog), Err(ExecError::Unsupported(m)) if m.contains("join")));
+    let unnest = resolved("(plan (unnest (get t) (array a) (columns v)))");
+    assert!(
+        matches!(plan(&unnest, &catalog), Err(ExecError::Unsupported(m)) if m.contains("unnest"))
+    );
 }
 
 #[test]
@@ -184,12 +186,12 @@ async fn limits_and_cancellation() {
     let storage = storage_with(dir.path(), 500).await;
     let catalog: Arc<dyn Catalog> = Arc::new(ir_catalog());
     let txn = storage.begin(TxnOptions::default()).await.unwrap();
-    let ctx = ExecContext {
-        txn: txn.clone(),
-        catalog: catalog.clone(),
-        params: Vec::new(),
-        options: ExecOptions::default(),
-    };
+    let ctx = ExecContext::new(
+        txn.clone(),
+        catalog.clone(),
+        Vec::new(),
+        ExecOptions::default(),
+    );
     let options = PlanOptions { batch_rows: 10 };
 
     let limited = plan_with(
@@ -230,6 +232,71 @@ async fn limits_and_cancellation() {
         Err(ExecError::Eval(EvalError::NegativeLimit("LIMIT")))
     ));
     // Every stream and the context release their clones of the transaction before it commits.
+    drop(ctx);
+    txn.commit().await.unwrap();
+}
+
+#[tokio::test]
+/// Assert top-N compaction and multi-chunk hash joins give exact results on larger inputs.
+async fn large_inputs() {
+    let n = 3000_i64;
+    let dir = tempfile::tempdir().unwrap();
+    let storage = storage_with(dir.path(), n).await;
+    let catalog: Arc<dyn Catalog> = Arc::new(ir_catalog());
+    let txn = storage.begin(TxnOptions::default()).await.unwrap();
+    let ctx = ExecContext::new(
+        txn.clone(),
+        catalog.clone(),
+        Vec::new(),
+        ExecOptions::default(),
+    );
+    let values = |batches: &[arrow_array::RecordBatch], column: usize| -> Vec<Datum> {
+        batches
+            .iter()
+            .flat_map(|b| {
+                (0..b.num_rows()).map(move |r| datum_at(b.column(column).as_ref(), r).unwrap())
+            })
+            .collect()
+    };
+
+    // Top-N over more rows than it buffers: it compacts repeatedly and must keep the right rows.
+    let top = plan(
+        &resolved("(plan (limit (sort (get t) (desc a) (desc id)) :count 3 :offset 2))"),
+        catalog.as_ref(),
+    )
+    .unwrap();
+    assert!(
+        matches!(&top.op, Op::Limit { input, .. } if matches!(input.op, Op::Sort { fetch: Some(_), .. }))
+    );
+    let ids = values(&collect(&top, &ctx).await.unwrap(), 0);
+    // a = id % 7 is 6 for ids 2995, 2988, 2981, 2974, 2967; skip two.
+    assert_eq!(
+        ids,
+        [Datum::Int8(2981), Datum::Int8(2974), Datum::Int8(2967)]
+    );
+
+    // A self-join on a = id % 7 produces far more pairs than one evaluation chunk.
+    let join = plan(
+        &resolved("(plan (aggregate (join inner (get t :as x) (get t :as y) (and (= x.a y.a) (< x.id y.id))) (keys) (aggs (as (agg count) n))))"),
+        catalog.as_ref(),
+    )
+    .unwrap();
+    let Op::Aggregate { input, .. } = &join.op else {
+        panic!("expected an aggregate")
+    };
+    assert!(
+        matches!(&input.op, Op::Join { keys, residual: Some(_), .. } if keys.len() == 1),
+        "expected a hash join with one key and a residual: {:?}",
+        input.op
+    );
+    let groups: Vec<i64> = (0..7)
+        .map(|g| (0..n).filter(|i| i % 7 == g).count() as i64)
+        .collect();
+    let expected: i64 = groups.iter().map(|k| k * (k - 1) / 2).sum();
+    assert_eq!(
+        values(&collect(&join, &ctx).await.unwrap(), 0),
+        [Datum::Int8(expected)]
+    );
     drop(ctx);
     txn.commit().await.unwrap();
 }
