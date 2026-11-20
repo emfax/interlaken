@@ -2,9 +2,9 @@
 
 Scalar functions are called with `call`, and aggregates appear in an `aggregate` operator's `aggs` list:
 
-```text
-(call lower d.title)
-(aggregate (get docs :as d) (keys d.folder) (aggs (agg count) (agg max d.updated)))
+```ir
+(plan (project (get docs :as d) (call lower d.title)))
+(plan (aggregate (get docs :as d) (keys d.folder) (aggs (agg count) (agg max d.updated))))
 ```
 
 Each entry below lists the function's signatures and properties:

@@ -60,6 +60,20 @@ pub async fn tables(txn: &Txn) -> Result<Vec<TableDef>> {
     Ok(defs)
 }
 
+/// Return the definitions of the built-in system tables that hold the
+/// catalog (`sys_tables`, `sys_columns`, `sys_indexes`, `sys_counters`,
+/// ADR-0007), which [`tables`] does not list.
+#[must_use]
+pub fn system_tables() -> Vec<TableDef> {
+    let sys = sys();
+    vec![
+        sys.tables.clone(),
+        sys.columns.clone(),
+        sys.indexes.clone(),
+        sys.counters.clone(),
+    ]
+}
+
 /// Return the primary key of the row whose unique-indexed name is `name`, in a system table.
 pub(crate) async fn lookup_unique(
     txn: &Txn,

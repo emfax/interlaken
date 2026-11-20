@@ -16,7 +16,7 @@ pub use load::load_catalog;
 pub use specs::{
     AttributeSpec, ColumnSpec, EntitySpec, IndexKey, IndexSpec, MembershipSpec, TableSpec,
 };
-pub use tables::{ENGINE_PREFIX, is_engine_table};
+pub use tables::{ENGINE_PREFIX, catalog_table_description, is_engine_table};
 pub(crate) use tables::{
     PRIVILEGES, create_catalog_tables, read_all, schema_version, stored, text_at,
 };

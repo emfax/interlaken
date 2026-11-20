@@ -13,14 +13,21 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use interlaken_engine::SQLSTATES;
+use interlaken_engine::catalog::catalog_table_description;
+use interlaken_engine::catalog::{ColumnSpec, TableSpec};
+use interlaken_engine::{Engine, EngineOptions, SQLSTATES, Session};
 use interlaken_ir::catalog::{
     FunctionDef, FunctionKind, FunctionProperties, Volatility, builtin_description,
     builtin_functions,
 };
-use interlaken_ir::text::print_type;
+use interlaken_ir::security::{EntityUid, SecurityContext};
+use interlaken_ir::text::{parse_expr, parse_plan, parse_rel, parse_type, print_type};
 use interlaken_ir::{DataType, ScalarType};
+use interlaken_storage::catalog::{self, TableDef};
+use interlaken_storage::encoding::{Direction, NullOrder};
+use interlaken_storage::{Durability, Storage, StorageOptions, TxnOptions};
 
 /// Return the path of a file relative to the repository root.
 fn repo(path: &str) -> PathBuf {
@@ -229,6 +236,582 @@ fn errors() -> String {
         .unwrap();
     }
     out
+}
+
+/// Render one catalog table's reference entry.
+fn table_entry(out: &mut String, def: &TableDef) {
+    let name = def.name();
+    let description = catalog_table_description(name)
+        .unwrap_or_else(|| panic!("catalog table {name} has no description"));
+    writeln!(out, "### `{name}`\n\n{description}\n").unwrap();
+    writeln!(out, "| Column | Type | Nullable | Primary key |").unwrap();
+    writeln!(out, "| --- | --- | --- | --- |").unwrap();
+    for (i, column) in def.columns().iter().enumerate() {
+        let key = def
+            .primary_key()
+            .iter()
+            .position(|&k| k == i)
+            .map_or(String::new(), |p| (p + 1).to_string());
+        writeln!(
+            out,
+            "| `{}` | `{}` | {} | {key} |",
+            column.name,
+            column.ty,
+            if column.nullable { "yes" } else { "no" }
+        )
+        .unwrap();
+    }
+    for index in def.indexes() {
+        let columns: Vec<String> = index
+            .columns()
+            .iter()
+            .map(|c| {
+                let mut s = format!("`{}`", def.columns()[c.column].name);
+                if c.order.direction == Direction::Desc {
+                    s.push_str(" desc");
+                }
+                if c.order.nulls == NullOrder::First && c.order.direction == Direction::Asc {
+                    s.push_str(" nulls first");
+                }
+                s
+            })
+            .collect();
+        writeln!(
+            out,
+            "\n{} index `{}` on {}.",
+            if index.is_unique() { "Unique" } else { "An" },
+            index.name(),
+            columns.join(", ")
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+/// Render the catalog table reference from a new database's tables.
+async fn catalog_tables() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::create(dir.path(), throwaway(), &EntityUid::str("Admin", "root"))
+        .await
+        .unwrap();
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let mut engine_tables = catalog::tables(&txn).await.unwrap();
+    txn.commit().await.unwrap();
+    engine_tables.sort_by(|a, b| a.name().cmp(b.name()));
+    let mut out = String::from("## Storage's system tables\n\n");
+    for def in catalog::system_tables() {
+        table_entry(&mut out, &def);
+    }
+    out.push_str("## The engine's tables\n\n");
+    for def in &engine_tables {
+        assert!(
+            def.name().starts_with("engine_"),
+            "a new database holds {}",
+            def.name()
+        );
+        table_entry(&mut out, def);
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert the book's catalog table reference matches a new database's tables.
+async fn catalog_table_reference_is_current() {
+    check_section(
+        "reference/catalog-tables.md",
+        "tables",
+        &catalog_tables().await,
+    );
+}
+
+/// One public field of an options struct, as its source declares it.
+struct Field {
+    /// The field name.
+    name: String,
+    /// The field type, as written.
+    ty: String,
+    /// The field's doc comment, with intra-doc links reduced to code spans.
+    doc: String,
+}
+
+/// Return the public fields of `pub struct NAME` in the source file `path`,
+/// with their doc comments.
+fn fields(path: &str, name: &str) -> Vec<Field> {
+    let text = std::fs::read_to_string(repo(path)).unwrap();
+    let start = text
+        .find(&format!("pub struct {name} {{"))
+        .unwrap_or_else(|| panic!("{path} has no struct {name}"));
+    let body = &text[start..];
+    let body = &body[..body.find("\n}").expect("the struct ends")];
+    let mut out = Vec::new();
+    let mut doc: Vec<&str> = Vec::new();
+    for line in body.lines().skip(1).map(str::trim) {
+        if let Some(d) = line.strip_prefix("///") {
+            doc.push(d.strip_prefix(' ').unwrap_or(d));
+        } else if let Some(field) = line.strip_prefix("pub ") {
+            let (field, ty) = field.split_once(':').expect("a field has a type");
+            out.push(Field {
+                name: field.trim().to_owned(),
+                ty: ty.trim().trim_end_matches(',').to_owned(),
+                doc: plain_links(&doc.join("\n")),
+            });
+            doc.clear();
+        }
+    }
+    out
+}
+
+/// Reduce rustdoc intra-doc links (``[`X`](path)`` and ``[`X`]``) to code spans.
+fn plain_links(doc: &str) -> String {
+    let mut out = String::new();
+    let mut rest = doc;
+    while let Some(open) = rest.find("[`") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("`]") else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        out.push('`');
+        out.push_str(&after[..close]);
+        out.push('`');
+        rest = &after[close + 2..];
+        if rest.starts_with('(')
+            && let Some(end) = rest.find(')')
+        {
+            rest = &rest[end + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Render a byte count in the largest binary unit that divides it.
+fn bytes(n: u64) -> String {
+    for (unit, size) in [("GiB", 1u64 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)] {
+        if n >= size && n.is_multiple_of(size) {
+            return format!("{} {unit}", n / size);
+        }
+    }
+    format!("{n} bytes")
+}
+
+/// Render a duration in whole minutes or seconds, as the field docs write them.
+fn duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    let plural = |n: u64, unit: &str| format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
+    if d.subsec_nanos() == 0 && secs.is_multiple_of(60) && secs > 0 {
+        plural(secs / 60, "minute")
+    } else if d.subsec_nanos() == 0 {
+        plural(secs, "second")
+    } else {
+        format!("{d:?}")
+    }
+}
+
+/// Render the fields of an options struct with their defaults.
+///
+/// A field whose doc states its default (`Defaults to ...`) must state the
+/// actual one, which is then not repeated; other fields get a default line.
+fn options_section(out: &mut String, title: &str, fields: &[Field], defaults: &[(&str, String)]) {
+    let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+    let defaulted: Vec<&str> = defaults.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        names, defaulted,
+        "{title}: the fields and their rendered defaults differ"
+    );
+    writeln!(out, "## `{title}`\n").unwrap();
+    for (field, (_, default)) in fields.iter().zip(defaults) {
+        let doc = field.doc.replace('\n', " ").replace('`', "");
+        let stated = if doc.contains("Defaults to") {
+            let needle = format!("Defaults to {}", default.replace('`', ""));
+            assert!(
+                doc.contains(&needle),
+                "{title}::{}'s doc should say \"{needle}\": {doc}",
+                field.name
+            );
+            String::new()
+        } else {
+            format!(" Default: {default}.")
+        };
+        writeln!(
+            out,
+            "### `{}`\n\nType `{}`.{stated}\n\n{}\n",
+            field.name, field.ty, field.doc
+        )
+        .unwrap();
+    }
+}
+
+/// Render the configuration reference from the options structs' source and defaults.
+fn configuration() -> String {
+    // Destructured without `..`, so a new field fails to compile here until
+    // its default is rendered.
+    let EngineOptions {
+        storage: _,
+        query_budget,
+        node_memory_limit,
+        residual_cache_capacity,
+        policy_settings,
+    } = EngineOptions::default();
+    let StorageOptions {
+        pool_threads: _,
+        queue_capacity,
+        durability,
+        max_commit_group,
+        commit_queue_capacity,
+        max_write_set_bytes,
+        max_transaction_age,
+        gc_interval,
+        gc_chunk_versions,
+        max_journal_bytes,
+        memtable_bytes,
+    } = StorageOptions::default();
+    let count = |n: usize| {
+        let s = n.to_string();
+        if n >= 1_000 {
+            let (a, b) = s.split_at(s.len() - 3);
+            format!("{a},{b}")
+        } else {
+            s
+        }
+    };
+    let as_bytes = |n: usize| bytes(u64::try_from(n).unwrap());
+    let engine = [
+        ("storage", "`StorageOptions::default()` (below)".to_owned()),
+        ("query_budget", as_bytes(query_budget)),
+        (
+            "node_memory_limit",
+            node_memory_limit.map_or("none".to_owned(), as_bytes),
+        ),
+        ("residual_cache_capacity", count(residual_cache_capacity)),
+        (
+            "policy_settings",
+            format!(
+                "mode `{}`, application context `{}`",
+                policy_settings.mode.name(),
+                policy_settings.app_context
+            ),
+        ),
+    ];
+    let storage = [
+        ("pool_threads", "the number of cores, at least 2".to_owned()),
+        ("queue_capacity", count(queue_capacity)),
+        ("durability", format!("`Durability::{durability:?}`")),
+        ("max_commit_group", count(max_commit_group)),
+        ("commit_queue_capacity", count(commit_queue_capacity)),
+        ("max_write_set_bytes", as_bytes(max_write_set_bytes)),
+        ("max_transaction_age", duration(max_transaction_age)),
+        (
+            "gc_interval",
+            gc_interval.map_or("none".to_owned(), duration),
+        ),
+        ("gc_chunk_versions", count(gc_chunk_versions)),
+        ("max_journal_bytes", bytes(max_journal_bytes)),
+        ("memtable_bytes", bytes(memtable_bytes)),
+    ];
+    let mut out = String::new();
+    options_section(
+        &mut out,
+        "EngineOptions",
+        &fields("crates/engine/src/session/engine.rs", "EngineOptions"),
+        &engine,
+    );
+    options_section(
+        &mut out,
+        "StorageOptions",
+        &fields("crates/storage/src/storage.rs", "StorageOptions"),
+        &storage,
+    );
+    out
+}
+
+#[test]
+/// Assert the book's configuration reference matches the options structs.
+fn configuration_reference_is_current() {
+    check_section("operations/configuration.md", "options", &configuration());
+}
+
+/// An example table: its name, columns as `(name, IR type text)` and primary key.
+type ExampleTable = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static [&'static str],
+);
+
+/// The example database the book's IR examples run against: each table's
+/// name, columns as `(name, IR type text)` and primary key.
+const EXAMPLE_TABLES: &[ExampleTable] = &[
+    (
+        "users",
+        &[
+            ("id", "(not-null int8)"),
+            ("name", "(not-null text)"),
+            ("dept", "text"),
+        ],
+        &["id"],
+    ),
+    (
+        "folders",
+        &[
+            ("id", "(not-null int8)"),
+            ("name", "(not-null text)"),
+            ("owner", "int8"),
+        ],
+        &["id"],
+    ),
+    (
+        "docs",
+        &[
+            ("id", "(not-null int8)"),
+            ("folder", "int8"),
+            ("title", "text"),
+            ("owner", "int8"),
+            ("updated", "timestamptz"),
+            ("tags", "(array text)"),
+        ],
+        &["id"],
+    ),
+];
+
+/// Return engine options for a throwaway database.
+fn throwaway() -> EngineOptions {
+    EngineOptions {
+        storage: StorageOptions {
+            durability: Durability::Buffered,
+            gc_interval: None,
+            ..StorageOptions::default()
+        },
+        ..EngineOptions::default()
+    }
+}
+
+/// Create the example database in `dir`; return the engine and an administrator's session.
+async fn example_database(dir: &std::path::Path) -> (Engine, Session) {
+    let admin = EntityUid::str("Admin", "root");
+    let engine = Engine::create(dir, throwaway(), &admin).await.unwrap();
+    let mut session = engine.session(SecurityContext::new(admin));
+    for (name, columns, key) in EXAMPLE_TABLES {
+        session
+            .create_table(&TableSpec {
+                name: (*name).into(),
+                columns: columns
+                    .iter()
+                    .map(|(c, t)| ColumnSpec::new(*c, parse_type(t).unwrap()))
+                    .collect(),
+                primary_key: key.iter().map(|k| (*k).into()).collect(),
+            })
+            .await
+            .unwrap();
+    }
+    (engine, session)
+}
+
+/// Render the example database's schema.
+fn example_schema() -> String {
+    let mut out = String::new();
+    for (name, columns, key) in EXAMPLE_TABLES {
+        writeln!(out, "- `{name}`: ").unwrap();
+        let cols: Vec<String> = columns
+            .iter()
+            .map(|(c, t)| {
+                let k = if key.contains(c) { ", primary key" } else { "" };
+                format!("`{c}` `{t}`{k}")
+            })
+            .collect();
+        out.pop();
+        writeln!(out, "{}.", cols.join("; ")).unwrap();
+    }
+    out
+}
+
+#[test]
+/// Assert the book's description of the example database matches the fixture.
+fn example_schema_is_current() {
+    check_section("ir/syntax.md", "example-schema", &example_schema());
+}
+
+/// One fenced code block of a book chapter.
+struct Block {
+    /// The chapter, relative to `docs/book/src`.
+    chapter: String,
+    /// The 1-based line of the opening fence.
+    line: usize,
+    /// The fence's info string, such as `ir,error=42P01`.
+    info: String,
+    /// The block's text.
+    text: String,
+}
+
+/// Return every fenced code block in the book's chapters.
+fn book_blocks() -> Vec<Block> {
+    let root = repo("docs/book/src");
+    let mut chapters = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                chapters.push(path);
+            }
+        }
+    }
+    chapters.sort();
+    let mut blocks = Vec::new();
+    for path in chapters {
+        let chapter = path.strip_prefix(&root).unwrap().display().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut open: Option<Block> = None;
+        for (i, line) in text.lines().enumerate() {
+            match (&mut open, line.trim_start().strip_prefix("```")) {
+                (None, Some(info)) => {
+                    open = Some(Block {
+                        chapter: chapter.clone(),
+                        line: i + 1,
+                        info: info.trim().to_owned(),
+                        text: String::new(),
+                    });
+                }
+                (Some(_), Some(_)) => blocks.push(open.take().unwrap()),
+                (Some(block), None) => {
+                    block.text.push_str(line);
+                    block.text.push('\n');
+                }
+                (None, None) => {}
+            }
+        }
+        assert!(open.is_none(), "{chapter} has an unclosed code block");
+    }
+    blocks
+}
+
+/// Return the top-level S-expressions of `text`, by balancing parentheses
+/// outside strings and `;` comments.
+///
+/// # Errors
+///
+/// Returns a message if the parentheses don't balance, or text other than
+/// whitespace and comments sits outside the forms.
+fn forms(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0usize, None);
+    let (mut in_string, mut escaped, mut in_comment) = (false, false, false);
+    for (i, c) in text.char_indices() {
+        if in_comment {
+            in_comment = c != '\n';
+            continue;
+        }
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            ';' => in_comment = true,
+            '"' if depth > 0 => in_string = true,
+            '(' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            ')' if depth == 0 => return Err(format!("unbalanced `)` at byte {i}")),
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(text[start.take().expect("a form started")..=i].to_owned());
+                }
+            }
+            c if depth == 0 && !c.is_whitespace() => {
+                return Err(format!("`{c}` outside a form at byte {i}"));
+            }
+            _ => {}
+        }
+    }
+    if depth > 0 {
+        return Err("unbalanced `(`: a form is not closed".to_owned());
+    }
+    Ok(out)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert every IR example in the book does what its fence says, against
+/// the example database:
+///
+/// - `ir`: each form is a plan that parses, resolves and verifies;
+/// - `ir,parse`: each form parses as a plan, an operator or an expression;
+/// - `ir,error=CODE`: the block is one plan that fails with SQLSTATE `CODE`
+///   (run in a transaction that is rolled back).
+///
+/// Other fences (`text`, `rust`, `sh`, ...) are not checked here.
+async fn ir_examples_are_valid() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_engine, mut session) = example_database(dir.path()).await;
+    let mut checked = 0;
+    for block in book_blocks() {
+        let mut parts = block.info.split(',');
+        if parts.next() != Some("ir") {
+            continue;
+        }
+        let mode = parts.next().unwrap_or("");
+        let at = format!("docs/book/src/{}:{}", block.chapter, block.line);
+        let forms = forms(&block.text).unwrap_or_else(|e| panic!("{at}: {e}"));
+        assert!(!forms.is_empty(), "{at}: an ir block with no forms");
+        if let Some(code) = mode.strip_prefix("error=") {
+            assert_eq!(forms.len(), 1, "{at}: an error example holds one plan");
+            session.begin(TxnOptions::default()).await.unwrap();
+            let result = session.query(&forms[0], Vec::new()).await;
+            session.rollback().unwrap();
+            match result {
+                Ok(_) => panic!("{at}: expected SQLSTATE {code}, but the plan ran"),
+                Err(e) => assert_eq!(e.sqlstate(), code, "{at}: {e}"),
+            }
+        } else {
+            for form in &forms {
+                match mode {
+                    "" => {
+                        if let Err(e) = session.prepare(form).await {
+                            panic!("{at}: {e}\n{form}");
+                        }
+                    }
+                    "parse" => assert!(
+                        parse_plan(form).is_ok()
+                            || parse_rel(form).is_ok()
+                            || parse_expr(form).is_ok(),
+                        "{at}: does not parse: {form}"
+                    ),
+                    other => panic!("{at}: unknown ir block mode `{other}`"),
+                }
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "the book has no ir examples");
+}
+
+#[test]
+/// Assert every book chapter with a Rust example that isn't `ignore`d is
+/// compiled as a doc test: listed in the engine's `book` doctest module.
+fn rust_examples_are_doc_tested() {
+    let lib = std::fs::read_to_string(repo("crates/engine/src/lib.rs")).unwrap();
+    for block in book_blocks() {
+        let mut parts = block.info.split(',');
+        if parts.next() != Some("rust") || parts.any(|p| p == "ignore") {
+            continue;
+        }
+        let path = format!("docs/book/src/{}", block.chapter);
+        assert!(
+            lib.contains(&format!("\"../../../{path}\"")),
+            "{path}:{} has a Rust example, but crates/engine/src/lib.rs doesn't doc test the chapter",
+            block.line
+        );
+    }
 }
 
 /// Return every SQLSTATE literal in the `sqlstate` method of the source file `path`.

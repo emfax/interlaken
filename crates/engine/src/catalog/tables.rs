@@ -53,6 +53,83 @@ pub fn is_engine_table(name: &str) -> bool {
     name.starts_with(ENGINE_PREFIX)
 }
 
+/// Return a description of the catalog table `name`, for documentation:
+/// storage's `sys_*` tables and the engine's `engine_*` tables, the policy
+/// tables among them; `None` for any other name.
+///
+/// Every table a new database holds has a description; the book's catalog
+/// table reference is generated from these and the tables' definitions.
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_engine::catalog::catalog_table_description;
+///
+/// assert!(catalog_table_description("engine_catalog").is_some());
+/// assert!(catalog_table_description("docs").is_none());
+/// ```
+#[must_use]
+pub fn catalog_table_description(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "sys_tables" => {
+            "One row per table: its ID, name, storage schema version and primary key column \
+             positions. Storage's own definitions; the engine's IR types are in \
+             `engine_columns`."
+        }
+        "sys_columns" => {
+            "One row per column: its table, position, name, storage type and nullability."
+        }
+        "sys_indexes" => {
+            "One row per secondary index: its table, name, key columns with their order, and \
+             whether it is unique."
+        }
+        "sys_counters" => "Named counters; `object_id` hands out table and index IDs.",
+        "engine_catalog" => {
+            "One row holding the catalog-wide schema version. Every DDL statement increments it, \
+             and every statement reads it, so concurrent DDL and writes conflict, and prepared \
+             plans pinned to an older version are rejected."
+        }
+        "engine_columns" => {
+            "The IR type, as type text (for example `(not-null int8)`), of each column created \
+             through the engine; a column without a row, such as the catalog tables' own, has \
+             its storage type's IR namesake."
+        }
+        "engine_entities" => {
+            "Entity type declarations: the table holding each type and its key column."
+        }
+        "engine_attributes" => {
+            "The attributes of each entity type, in order: the column holding each, and the \
+             entity type it refers to, for references."
+        }
+        "engine_memberships" => {
+            "Membership declarations between entity types: the edges table and its member and \
+             group columns, and the closure table and its descendant, ancestor and path-count \
+             columns."
+        }
+        "engine_functions" => {
+            "Function properties set by administrators: whether each function is leakproof."
+        }
+        "engine_privileges" => "Privileges (`admin`, `read-policies`) granted to principals.",
+        "engine_policy_set" => {
+            "One row holding the active policy set: its version, language and text."
+        }
+        "engine_policy_settings" => {
+            "One row holding the policy settings: the verification mode and the Cedar type of \
+             `context.app`."
+        }
+        "engine_policy_proposals" => {
+            "Proposed policy changes: the version each is based on, its language, text and \
+             invariants, who proposed it, its state, the version it became when activated and \
+             who confirmed it."
+        }
+        "engine_policy_verifications" => {
+            "The result of each deployment gate a verifier ran on a proposal: whether it passed, \
+             with details."
+        }
+        _ => return None,
+    })
+}
+
 /// Return the stored definition of engine table `name`.
 pub(crate) async fn stored(txn: &Txn, name: &str) -> Result<TableDef, EngineError> {
     catalog::table(txn, name)

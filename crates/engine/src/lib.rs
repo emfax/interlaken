@@ -35,3 +35,13 @@ pub use sqlstate::{SQLSTATES, SqlState};
 #[cfg(doctest)]
 #[doc = include_str!("../../../README.md")]
 struct ReadmeDoctests;
+
+/// The book's Rust examples (`docs/book`), compiled and run as doc tests so
+/// they stay correct. `tests/book_reference.rs` checks every chapter with a
+/// Rust example is listed here.
+#[cfg(doctest)]
+mod book {
+    /// Operations: configuration.
+    #[doc = include_str!("../../../docs/book/src/operations/configuration.md")]
+    struct Configuration;
+}

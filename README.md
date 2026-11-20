@@ -86,7 +86,7 @@ The slow durability checks are scripts in [`scripts/`](scripts):
 
 ## Documentation
 
-- **[The Interlaken book](docs/book)** (`mdbook serve docs/book`): how to use the database, the IR text language, the security model, transactions and operations.
+- **[The Interlaken book](docs/book)** (`mdbook serve docs/book`): how to use the database, the IR text language, the security model, transactions and operations. Its reference sections (functions, error codes, catalog tables, configuration) are generated from the code. Its IR examples are checked against an example database, and its Rust examples are compiled, all by `cargo test`.
 - **API reference:** `cargo doc --workspace --no-deps --open`.
 - **[Design records](docs/design):** the architectural decisions (ADRs) and design documents, with their history. They describe why things are the way they are; the book describes how they behave now.
 - **[Backlog](docs/backlog.md):** known follow-up work.
