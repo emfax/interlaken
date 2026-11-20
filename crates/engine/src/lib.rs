@@ -45,6 +45,26 @@ mod book {
     #[doc = include_str!("../../../docs/book/src/ir/parameters.md")]
     struct Parameters;
 
+    /// Data definition: tables.
+    #[doc = include_str!("../../../docs/book/src/ddl/tables.md")]
+    struct Tables;
+
+    /// Data definition: indexes.
+    #[doc = include_str!("../../../docs/book/src/ddl/indexes.md")]
+    struct Indexes;
+
+    /// Data definition: entities and memberships.
+    #[doc = include_str!("../../../docs/book/src/ddl/entities.md")]
+    struct Entities;
+
+    /// Security: privileges.
+    #[doc = include_str!("../../../docs/book/src/security/privileges.md")]
+    struct Privileges;
+
+    /// Security: changing policies.
+    #[doc = include_str!("../../../docs/book/src/security/proposals.md")]
+    struct Proposals;
+
     /// Operations: configuration.
     #[doc = include_str!("../../../docs/book/src/operations/configuration.md")]
     struct Configuration;

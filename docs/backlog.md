@@ -98,6 +98,23 @@ Entry format:
 - **Size:** About 1 day in `typing` (implicit and assignment rules), the cast kernels and the interpreter.
 - **Status:** open
 
+### undeclared-principal-types: Let principals of undeclared types be authorized
+- **Origin:** writing the book's security chapters
+- **Why:** Once a table backs an entity type, every principal's access to it goes through the policies. A principal whose type isn't a declared entity type, such as the `Admin::"root"` principal a database is typically created with, can't be named by Cedar policies, because the generated Cedar schema lists only declared entity types. While the default empty Cedar policy set is active, its queries on governed tables fail with `42501` "secured plan is invalid: Cedar partial request: principal type `Admin` is not valid for `Action::\"read\"`" rather than being plainly denied. So the first administrator can't load data into a newly governed table until an RLS policy set permits `(is principal Admin)`. Options:
+  - add principal-only entity types (with no table) to the generated Cedar schema;
+  - decide requests from undeclared principal types as denied rather than invalid;
+  - require `Engine::create`'s administrator to be of a declared type.
+- **When:** Before applications rely on Cedar policies with an administrator principal, or before the SQL front end, where roles are principals.
+- **Size:** About 1–2 days, mostly in the Cedar schema and provider.
+- **Status:** open
+
+### last-admin-guard: Refuse to revoke the last administrator
+- **Origin:** writing the book's privileges chapter
+- **Why:** `Session::revoke` lets an administrator revoke `admin` from every principal, themselves included. Nobody could then run DDL, change policies or grant privileges, and there is no recovery short of editing storage.
+- **When:** Before production use.
+- **Size:** A few hours: count remaining admins in the revoking transaction (registering the read so a concurrent revoke conflicts) and fail with `42501` or `55000`.
+- **Status:** open
+
 ## Executor and IR open questions
 
 ### wasm-wit-interface: Define the WIT interface for WASM UDFs

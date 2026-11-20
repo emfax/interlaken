@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use interlaken_engine::catalog::catalog_table_description;
-use interlaken_engine::catalog::{ColumnSpec, TableSpec};
+use interlaken_engine::catalog::{
+    AttributeSpec, ColumnSpec, EntitySpec, MembershipSpec, TableSpec,
+};
+use interlaken_engine::policy::{PolicyDocument, PolicyLanguage};
 use interlaken_engine::{Engine, EngineOptions, SQLSTATES, Session};
 use interlaken_ir::catalog::{
     FunctionDef, FunctionKind, FunctionProperties, Volatility, builtin_description,
@@ -572,7 +575,75 @@ const EXAMPLE_TABLES: &[ExampleTable] = &[
         ],
         &["id"],
     ),
+    (
+        "groups",
+        &[("id", "(not-null int8)"), ("name", "(not-null text)")],
+        &["id"],
+    ),
+    (
+        "user_groups",
+        &[("member", "(not-null int8)"), ("grp", "(not-null int8)")],
+        &["member", "grp"],
+    ),
+    (
+        "user_group_closure",
+        &[
+            ("descendant", "(not-null int8)"),
+            ("ancestor", "(not-null int8)"),
+            ("paths", "(not-null int8)"),
+        ],
+        &["descendant", "ancestor"],
+    ),
 ];
+
+/// An example entity type: its name, table, key column, and attributes as
+/// `(name, column, referenced entity type)`.
+type ExampleEntity = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static [(&'static str, &'static str, Option<&'static str>)],
+);
+
+/// The example database's entity types.
+const EXAMPLE_ENTITIES: &[ExampleEntity] = &[
+    (
+        "User",
+        "users",
+        "id",
+        &[("name", "name", None), ("dept", "dept", None)],
+    ),
+    ("Group", "groups", "id", &[("name", "name", None)]),
+    (
+        "Folder",
+        "folders",
+        "id",
+        &[("name", "name", None), ("owner", "owner", Some("User"))],
+    ),
+    (
+        "Doc",
+        "docs",
+        "id",
+        &[
+            ("title", "title", None),
+            ("owner", "owner", Some("User")),
+            ("folder", "folder", Some("Folder")),
+            ("tags", "tags", None),
+        ],
+    ),
+];
+
+/// Return the example database's one membership: users in groups.
+fn example_membership() -> MembershipSpec {
+    MembershipSpec {
+        member: "User".into(),
+        group: "Group".into(),
+        edges: "user_groups".into(),
+        edge_columns: ("member".into(), "grp".into()),
+        closure: "user_group_closure".into(),
+        closure_columns: ("descendant".into(), "ancestor".into(), "paths".into()),
+    }
+}
 
 /// Return engine options for a throwaway database.
 fn throwaway() -> EngineOptions {
@@ -604,6 +675,31 @@ async fn example_database(dir: &std::path::Path) -> (Engine, Session) {
             .await
             .unwrap();
     }
+    for (name, table, key, attributes) in EXAMPLE_ENTITIES {
+        session
+            .declare_entity(&EntitySpec {
+                name: (*name).into(),
+                table: (*table).into(),
+                key: (*key).into(),
+                attributes: attributes
+                    .iter()
+                    .map(|(a, c, r)| match r {
+                        Some(entity) => AttributeSpec::reference(*a, *c, *entity),
+                        None => AttributeSpec {
+                            name: (*a).into(),
+                            column: (*c).into(),
+                            references: None,
+                        },
+                    })
+                    .collect(),
+            })
+            .await
+            .unwrap();
+    }
+    session
+        .declare_membership(&example_membership())
+        .await
+        .unwrap();
     (engine, session)
 }
 
@@ -622,6 +718,29 @@ fn example_schema() -> String {
         out.pop();
         writeln!(out, "{}.", cols.join("; ")).unwrap();
     }
+    out.push_str("\nEntity types, for policies:\n\n");
+    for (name, table, key, attributes) in EXAMPLE_ENTITIES {
+        let attrs: Vec<String> = attributes
+            .iter()
+            .map(|(a, _, r)| match r {
+                Some(entity) => format!("`{a}` (a `{entity}`)"),
+                None => format!("`{a}`"),
+            })
+            .collect();
+        writeln!(
+            out,
+            "- `{name}`: rows of `{table}`, keyed by `{key}`, with attributes {}.",
+            attrs.join(", ")
+        )
+        .unwrap();
+    }
+    let m = example_membership();
+    writeln!(
+        out,
+        "\nMembership: a `{}` can be in a `{}`. Direct memberships are rows of `{}` (`{}`, `{}`), and `{}` holds every transitive pair with its path count.",
+        m.member, m.group, m.edges, m.edge_columns.0, m.edge_columns.1, m.closure
+    )
+    .unwrap();
     out
 }
 
@@ -740,6 +859,33 @@ fn forms(text: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Submit, verify and activate `body` as the active policies in a
+/// transaction that is then rolled back, confirming any flagged gate.
+///
+/// # Errors
+///
+/// Returns the first step's error.
+async fn activate_policies(
+    session: &mut Session,
+    language: PolicyLanguage,
+    body: &str,
+) -> Result<(), interlaken_engine::EngineError> {
+    session.begin(TxnOptions::default()).await?;
+    let document = PolicyDocument {
+        language,
+        body: body.to_owned(),
+    };
+    let result = async {
+        let id = session.submit_policies(&document, "").await?;
+        session.verify_policies(id).await?;
+        session.activate_policies(id, true).await?;
+        Ok(())
+    }
+    .await;
+    session.rollback()?;
+    result
+}
+
 #[tokio::test(flavor = "multi_thread")]
 /// Assert every IR example in the book does what its fence says, against
 /// the example database:
@@ -756,10 +902,27 @@ async fn ir_examples_are_valid() {
     let mut checked = 0;
     for block in book_blocks() {
         let mut parts = block.info.split(',');
-        if parts.next() != Some("ir") {
+        let language = match parts.next() {
+            Some("ir") => None,
+            Some("rls") => Some(PolicyLanguage::Rls),
+            Some("cedar") => Some(PolicyLanguage::Cedar),
+            _ => continue,
+        };
+        let mode = parts.next().unwrap_or("");
+        if let Some(language) = language {
+            let at = format!("docs/book/src/{}:{}", block.chapter, block.line);
+            let result = activate_policies(&mut session, language, &block.text).await;
+            match (mode.strip_prefix("error="), result) {
+                (None, Ok(())) => {}
+                (None, Err(e)) => panic!("{at}: {e}"),
+                (Some(code), Ok(())) => {
+                    panic!("{at}: expected SQLSTATE {code}, but the policies activated")
+                }
+                (Some(code), Err(e)) => assert_eq!(e.sqlstate(), code, "{at}: {e}"),
+            }
+            checked += 1;
             continue;
         }
-        let mode = parts.next().unwrap_or("");
         let at = format!("docs/book/src/{}:{}", block.chapter, block.line);
         let forms = forms(&block.text).unwrap_or_else(|e| panic!("{at}: {e}"));
         assert!(!forms.is_empty(), "{at}: an ir block with no forms");

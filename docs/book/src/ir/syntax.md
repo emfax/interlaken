@@ -144,6 +144,18 @@ The examples in this book run against a small database. A test checks that every
 - `users`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`; `dept` `text`.
 - `folders`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`; `owner` `int8`.
 - `docs`: `id` `(not-null int8)`, primary key; `folder` `int8`; `title` `text`; `owner` `int8`; `updated` `timestamptz`; `tags` `(array text)`.
+- `groups`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`.
+- `user_groups`: `member` `(not-null int8)`, primary key; `grp` `(not-null int8)`, primary key.
+- `user_group_closure`: `descendant` `(not-null int8)`, primary key; `ancestor` `(not-null int8)`, primary key; `paths` `(not-null int8)`.
+
+Entity types, for policies:
+
+- `User`: rows of `users`, keyed by `id`, with attributes `name`, `dept`.
+- `Group`: rows of `groups`, keyed by `id`, with attributes `name`.
+- `Folder`: rows of `folders`, keyed by `id`, with attributes `name`, `owner` (a `User`).
+- `Doc`: rows of `docs`, keyed by `id`, with attributes `title`, `owner` (a `User`), `folder` (a `Folder`), `tags`.
+
+Membership: a `User` can be in a `Group`. Direct memberships are rows of `user_groups` (`member`, `grp`), and `user_group_closure` holds every transitive pair with its path count.
 <!-- end generated: example-schema -->
 
 Code blocks in this book are marked by what they need to do:
