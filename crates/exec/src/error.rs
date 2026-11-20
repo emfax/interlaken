@@ -70,13 +70,10 @@ impl ExecError {
     /// ```
     #[must_use]
     pub fn sqlstate(&self) -> &'static str {
-        use interlaken_storage::{ConstraintViolation, Error};
         match self {
             Self::Eval(e) => e.sqlstate(),
-            Self::Storage(Error::SerializationFailure(_)) => "40001",
-            Self::Storage(Error::Constraint(ConstraintViolation::NotNull { .. })) => "23502",
-            Self::Storage(Error::Constraint(_)) => "23505",
-            Self::Storage(_) | Self::Arrow(_) | Self::Catalog(_) => "XX000",
+            Self::Storage(e) => e.sqlstate(),
+            Self::Arrow(_) | Self::Catalog(_) => "XX000",
             Self::Unsupported(_) => "0A000",
             Self::TransactionAborted => "25P02",
             Self::PermissionDenied { .. } => "42501",

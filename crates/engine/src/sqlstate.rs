@@ -2,8 +2,8 @@
 //!
 //! [`EngineError::sqlstate`](crate::EngineError::sqlstate) maps every error
 //! to one of these codes. The table documents them; a test checks it lists
-//! exactly the codes the `sqlstate` methods of the engine, executor and
-//! interpreter can return, and the book's error reference is generated
+//! exactly the codes the `sqlstate` methods of the engine, executor,
+//! interpreter and storage can return, and the book's error reference is generated
 //! from it.
 
 /// One SQLSTATE code the engine returns.
@@ -95,6 +95,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "`begin` was called with a transaction already open.",
     ),
     state(
+        "25006",
+        "read_only_sql_transaction",
+        "A read-only transaction tried to write.",
+    ),
+    state(
         "25P01",
         "no_active_sql_transaction",
         "A transaction operation was called with no transaction open.",
@@ -103,6 +108,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "25P02",
         "in_failed_sql_transaction",
         "An earlier statement in the transaction failed; only a rollback (to a savepoint or entirely) is accepted.",
+    ),
+    state(
+        "25P04",
+        "transaction_timeout",
+        "The transaction stayed open longer than `StorageOptions::max_transaction_age`; versions it needs may have been garbage-collected, so it can't continue.",
     ),
     state(
         "40001",
@@ -166,6 +176,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "53200",
         "out_of_memory",
         "An operator needed more memory than the query's budget or the node's pool allows.",
+    ),
+    state(
+        "54000",
+        "program_limit_exceeded",
+        "The transaction's buffered writes exceed `StorageOptions::max_write_set_bytes`.",
     ),
     state(
         "55000",

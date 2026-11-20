@@ -21,8 +21,10 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `23505` | `unique_violation` | A row duplicates another's primary key or unique index key. |
 | `23514` | `check_violation` | A membership edge written by DML would make its hierarchy cyclic. |
 | `25001` | `active_sql_transaction` | `begin` was called with a transaction already open. |
+| `25006` | `read_only_sql_transaction` | A read-only transaction tried to write. |
 | `25P01` | `no_active_sql_transaction` | A transaction operation was called with no transaction open. |
 | `25P02` | `in_failed_sql_transaction` | An earlier statement in the transaction failed; only a rollback (to a savepoint or entirely) is accepted. |
+| `25P04` | `transaction_timeout` | The transaction stayed open longer than `StorageOptions::max_transaction_age`; versions it needs may have been garbage-collected, so it can't continue. |
 | `40001` | `serialization_failure` | The transaction conflicted with a concurrent one, detected when it commits; retry it. |
 | `42000` | `syntax_error_or_access_rule_violation` | The plan failed resolution or verification for a reason without a more specific code. |
 | `42501` | `insufficient_privilege` | The principal may not do this: a column its policies deny, a row its write checks reject, a masked column a write can't carry, an operation that needs a privilege it lacks, or a privileged operator or system table in a client plan. |
@@ -38,6 +40,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `42P07` | `duplicate_table` | A table or index of that name already exists. |
 | `42P16` | `invalid_table_definition` | A DDL definition is invalid: an empty or reserved name, a type tables can't hold, a table that backs an entity type, a declaration that is missing, duplicated or doesn't fit the others, or a function overload that doesn't match exactly. |
 | `53200` | `out_of_memory` | An operator needed more memory than the query's budget or the node's pool allows. |
+| `54000` | `program_limit_exceeded` | The transaction's buffered writes exceed `StorageOptions::max_write_set_bytes`. |
 | `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation. |
 | `57014` | `query_canceled` | The statement ran past its `statement_timeout`. |
 | `XX000` | `internal_error` | An internal error: a storage failure, or the stored catalog disagrees with itself. |

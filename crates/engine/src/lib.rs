@@ -65,6 +65,18 @@ mod book {
     #[doc = include_str!("../../../docs/book/src/security/proposals.md")]
     struct Proposals;
 
+    /// Transactions: isolation.
+    #[doc = include_str!("../../../docs/book/src/transactions/isolation.md")]
+    struct Isolation;
+
+    /// Transactions: statements and savepoints.
+    #[doc = include_str!("../../../docs/book/src/transactions/statements.md")]
+    struct Statements;
+
+    /// Transactions: streaming results.
+    #[doc = include_str!("../../../docs/book/src/transactions/streaming.md")]
+    struct Streaming;
+
     /// Operations: configuration.
     #[doc = include_str!("../../../docs/book/src/operations/configuration.md")]
     struct Configuration;

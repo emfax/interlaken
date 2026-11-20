@@ -652,3 +652,47 @@ async fn uncommitted_policies_are_not_shared() {
     let mut c = session(&engine, admin());
     assert!(rows(&mut c, docs).await.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert storage's transaction limits reach clients with their SQLSTATEs:
+/// a write in a read-only transaction (`25006`), a write set over the
+/// limit (`54000`) and a transaction past its maximum age (`25P04`).
+async fn transaction_limits_have_their_sqlstates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options();
+    opts.storage.max_write_set_bytes = 4096;
+    opts.storage.max_transaction_age = Duration::from_millis(200);
+    let engine = Engine::create(dir.path(), opts, &admin()).await.unwrap();
+    let mut root = session(&engine, admin());
+    root.create_table(&table(
+        "t",
+        &[("id", "(not-null int8)"), ("v", "text")],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    let insert = |n: usize| {
+        let rows: Vec<String> = (0..n)
+            .map(|i| format!("(row {i} \"{}\")", "x".repeat(100)))
+            .collect();
+        format!(
+            "(plan (insert t (values (columns id v) {}) (columns id v)))",
+            rows.join(" ")
+        )
+    };
+
+    root.begin(TxnOptions::default().read_only()).await.unwrap();
+    let err = root.query(&insert(1), Vec::new()).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "25006", "{err}");
+    root.rollback().unwrap();
+
+    let err = root.query(&insert(100), Vec::new()).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "54000", "{err}");
+
+    root.begin(TxnOptions::default()).await.unwrap();
+    root.query(&insert(1), Vec::new()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let err = root.query("(plan (get t))", Vec::new()).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "25P04", "{err}");
+    root.rollback().unwrap();
+}

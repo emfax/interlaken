@@ -1019,6 +1019,7 @@ fn sqlstate_table_matches_the_code() {
         "crates/engine/src/error.rs",
         "crates/exec/src/error.rs",
         "crates/ir/src/interp/error.rs",
+        "crates/storage/src/error.rs",
     ]
     .into_iter()
     .flat_map(returned_codes)

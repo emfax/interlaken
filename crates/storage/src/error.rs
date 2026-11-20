@@ -190,6 +190,32 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::SerializationFailure(_))
     }
+
+    /// Return the Postgres SQLSTATE code for this error.
+    ///
+    /// Catalog errors are `XX000` here; the engine maps them to their own
+    /// codes, since it knows which object a lookup was for.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interlaken_storage::{Conflict, Error};
+    ///
+    /// assert_eq!(Error::SerializationFailure(Conflict::WriteWrite).sqlstate(), "40001");
+    /// assert_eq!(Error::ReadOnlyTransaction.sqlstate(), "25006");
+    /// ```
+    #[must_use]
+    pub fn sqlstate(&self) -> &'static str {
+        match self {
+            Self::SerializationFailure(_) => "40001",
+            Self::Constraint(ConstraintViolation::NotNull { .. }) => "23502",
+            Self::Constraint(_) => "23505",
+            Self::ReadOnlyTransaction => "25006",
+            Self::TransactionTooOld { .. } => "25P04",
+            Self::WriteSetTooLarge { .. } => "54000",
+            _ => "XX000",
+        }
+    }
 }
 
 /// Why commit validation rejected a transaction (ADR-0004).

@@ -113,12 +113,7 @@ impl EngineError {
                 C::InvalidDefinition(_) => "42P16",
                 _ => "XX000",
             },
-            Self::Storage(interlaken_storage::Error::SerializationFailure(_)) => "40001",
-            Self::Storage(interlaken_storage::Error::Constraint(
-                interlaken_storage::ConstraintViolation::NotNull { .. },
-            )) => "23502",
-            Self::Storage(interlaken_storage::Error::Constraint(_)) => "23505",
-            Self::Storage(_) => "XX000",
+            Self::Storage(e) => e.sqlstate(),
             Self::Syntax(_) | Self::Policies(_) => "42601",
             Self::Resolve(e) => match e {
                 R::UnknownTable(_) => "42P01",
