@@ -41,6 +41,14 @@ struct ReadmeDoctests;
 /// Rust example is listed here.
 #[cfg(doctest)]
 mod book {
+    /// Getting started: your first database.
+    #[doc = include_str!("../../../docs/book/src/getting-started/first-database.md")]
+    struct FirstDatabase;
+
+    /// Getting started: sessions and principals.
+    #[doc = include_str!("../../../docs/book/src/getting-started/sessions.md")]
+    struct Sessions;
+
     /// The IR text language: parameters and prepared plans.
     #[doc = include_str!("../../../docs/book/src/ir/parameters.md")]
     struct Parameters;
