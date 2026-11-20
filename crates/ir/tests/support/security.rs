@@ -45,11 +45,14 @@ pub type DocRow = (
     Option<Vec<String>>,
 );
 
+/// A user: id, name, dept, level, manager.
+pub type User = (i64, String, Option<String>, Option<i64>, Option<i64>);
+
 /// Entity data for building a database.
 #[derive(Clone, Debug, Default)]
 pub struct Data {
-    /// Users: id, name, dept, level.
-    pub users: Vec<(i64, String, Option<String>, Option<i64>)>,
+    /// Users: id, name, dept, level, manager.
+    pub users: Vec<User>,
     /// Group IDs.
     pub groups: Vec<i64>,
     /// Folders: id and parent.
@@ -99,12 +102,13 @@ impl Data {
             USERS,
             self.users
                 .iter()
-                .map(|(id, name, dept, level)| {
+                .map(|(id, name, dept, level, manager)| {
                     vec![
                         Datum::Int8(*id),
                         t(name),
                         dept.as_deref().map_or(Datum::Null, t),
                         opt(*level),
+                        opt(*manager),
                     ]
                 })
                 .collect(),
@@ -194,7 +198,8 @@ impl Data {
 
 /// Return the sample data.
 ///
-/// users: 1 ann (eng, level 3) in staff; 2 bob (ops); 3 cy (level 1) in admins.
+/// users: 1 ann (eng, level 3) in staff, managed by bob; 2 bob (ops);
+///        3 cy (level 1) in admins, managed by ann.
 /// folders: 1 root; 2 and 3 inside 1.
 /// docs: 10 by ann in folder 2 "a plan" secret 5 tags {a,b};
 ///       11 by bob in folder 3 "bad\" secret 42; 12 by bob, no folder, "notanumber" secret 7 tags {};
@@ -203,9 +208,9 @@ pub fn sample() -> Data {
     let s = |x: &str| x.to_owned();
     Data {
         users: vec![
-            (1, s("ann"), Some(s("eng")), Some(3)),
-            (2, s("bob"), Some(s("ops")), None),
-            (3, s("cy"), None, Some(1)),
+            (1, s("ann"), Some(s("eng")), Some(3), Some(2)),
+            (2, s("bob"), Some(s("ops")), None, None),
+            (3, s("cy"), None, Some(1), Some(1)),
         ],
         groups: vec![1, 2],
         folders: vec![(1, None), (2, Some(1)), (3, Some(1))],

@@ -19,16 +19,14 @@ use interlaken_engine::Engine;
 use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Database, Datum, ExecOptions, execute as interpret};
 use interlaken_ir::resolve::resolve;
-use interlaken_ir::security::{
-    Effect, EntityUid, Policy, RlsProvider, SecValue, SecurityContext, print_sec_expr,
-};
+use interlaken_ir::security::{EntityUid, Policy, RlsProvider, SecValue, SecurityContext};
 use interlaken_ir::text::parse_plan;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use security::{catalog, sample};
 use security_gen::{bag, data, doc_atom, policies_for, query, user_atom, visible};
-use support::session::{activate_rls, admin, create, install, replace_rows, session};
+use support::session::{activate_rls, admin, create, install, replace_rows, rls_text, session};
 
 /// The engine with the fixture's catalog, and a runtime to drive it.
 struct Fixture {
@@ -97,27 +95,6 @@ impl Fixture {
             session.query(query, Vec::new()).await.map(|r| r.rows())
         })
     }
-}
-
-/// Render policies in the RLS text form.
-fn rls_text(policies: &[Policy]) -> String {
-    let items: Vec<String> = policies
-        .iter()
-        .map(|p| {
-            let effect = match p.effect {
-                Effect::Permit => "permit",
-                Effect::Forbid => "forbid",
-            };
-            let actions: Vec<&str> = p.actions.iter().map(|a| a.name()).collect();
-            format!(
-                "({effect} ({}) {} {})",
-                actions.join(" "),
-                p.resource_type,
-                print_sec_expr(&p.condition)
-            )
-        })
-        .collect();
-    format!("(policies {})", items.join(" "))
 }
 
 #[test]
@@ -194,7 +171,9 @@ fn security_oracle_through_the_api() {
         compared * 10 >= cases * 8,
         "only {compared} of {cases} cases compared"
     );
-    assert!(nonempty >= compared / 4, "too few cases returned rows");
+    // Atoms over entities beyond the principal (F2) are often false, so a
+    // fifth rather than a quarter of the cases return rows.
+    assert!(nonempty >= compared / 5, "too few cases returned rows");
 }
 
 /// The leak suite's policies: owners do anything with their documents; users are readable.

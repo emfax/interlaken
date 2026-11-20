@@ -101,7 +101,7 @@ A prover implements `Prover::prove(current, proposal)` and records its results w
 ### Negative
 - Without a prover, guarantees cover current data only, plus whatever the lint catches syntactically.
 - In `proof-required` mode, policy changes stall while no prover is reachable.
-- Impact analysis evaluates every principal against every governed row, so its cost grows with the product of the two. That is acceptable for policy changes, which are rare, but it will need sampling or indexing at scale.
+- Impact analysis evaluates every principal against every governed row, so its cost grows with the product of the two. F2 prunes it to the changed policies' actions and resource types, decides incrementally per changed policy, and samples above a threshold ([ADR-0032](0032-authorization-completeness.md)); a sampled analysis can miss changes.
 
 ## Open Questions
 
@@ -110,7 +110,7 @@ A prover implements `Prover::prove(current, proposal)` and records its results w
 ## Future Work
 
 - Prover nodes that subscribe to proposal changes once replication exists.
-- Sampling and incremental impact analysis for large datasets.
+- ~~Sampling and incremental impact analysis for large datasets.~~ Done in F2: [ADR-0032](0032-authorization-completeness.md).
 - Checking impact under several representative contexts, such as different times and tenants.
 
 ## References

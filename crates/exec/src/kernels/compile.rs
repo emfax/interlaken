@@ -35,6 +35,10 @@ pub(crate) enum Builtin {
     Random,
     /// `gen_random_uuid()`.
     GenRandomUuid,
+    /// `redact(text)`: always `****` (ADR-0032).
+    Redact,
+    /// `mask_last4(text)`: every character but the last four replaced by `*`.
+    MaskLast4,
 }
 
 impl Builtin {
@@ -50,6 +54,8 @@ impl Builtin {
             "assert_present" => Self::AssertPresent,
             "random" => Self::Random,
             "gen_random_uuid" => Self::GenRandomUuid,
+            "redact" => Self::Redact,
+            "mask_last4" => Self::MaskLast4,
             _ => return None,
         })
     }
@@ -275,6 +281,17 @@ impl Compiler<'_> {
                     .function_by_id(*id)
                     .ok_or_else(|| unsupported(format!("unknown function {}", id.get())))?;
                 let name = def.name.to_string();
+                if name == interlaken_ir::security::POLICY_MASK
+                    && let [visible, value, masked] = args.as_slice()
+                {
+                    // The masked value is computed only for the rows it replaces.
+                    let kind = Kind::Case {
+                        operand: None,
+                        branches: vec![(self.compile(visible)?, self.compile(value)?)],
+                        otherwise: Some(self.boxed(masked)?),
+                    };
+                    return Ok(Node::new(kind, ty));
+                }
                 match Builtin::named(&name) {
                     Some(Builtin::Now) => Kind::Constant(Datum::Timestamptz(self.options.now)),
                     Some(builtin) => Kind::Call(builtin, self.all(args)?),

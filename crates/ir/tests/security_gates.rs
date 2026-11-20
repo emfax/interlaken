@@ -3,14 +3,18 @@
 use std::sync::Arc;
 
 use interlaken_ir::security::{
-    Action, CedarProvider, DatabaseEntities, EntityStore, EntityUid, PartialRequest,
-    PolicyProvider, ResidualCache, RlsProvider, SecValue, SecurityContext, impact_analysis,
-    parse_policies,
+    Action, CedarProvider, CombiningRule, DatabaseEntities, Decision, Dependencies, EntityStore,
+    EntityUid, ImpactOptions, ImpactReport, PartialRequest, Policy, PolicyProvider, Request,
+    Residual, ResidualCache, RlsProvider, SecValue, SecurityContext, SecurityError,
+    impact_analysis, impact_analysis_with, parse_policies,
 };
+use proptest::prelude::*;
+use proptest::test_runner::{Config, TestRunner};
 
 mod support;
 
 use support::security::{catalog, sample};
+use support::security_gen::{data, doc_atom, policies_for, user_atom};
 
 /// Return a context for user `principal` in tenant `tenant`.
 fn context(principal: i64, tenant: &str) -> SecurityContext {
@@ -119,7 +123,9 @@ fn impact_analysis_reports_changes() {
     let unchanged =
         impact_analysis(&owner_only, &owner_only, &catalog, &db, &context(1, "t1")).unwrap();
     assert!(unchanged.is_unchanged());
-    assert!(unchanged.decisions > 0);
+    // Nothing changed, so every decision is pruned without evaluation.
+    assert_eq!(unchanged.decisions, 0);
+    assert!(unchanged.pruned > 0);
     // Add: members of group 1 (cy) read everything.
     let broader = rls("(policies
         (permit (read) Doc (or (== resource.owner principal) (in principal (entity Group 1))))
@@ -194,4 +200,205 @@ fn forbid_lint() {
     let warnings = cedar.lint();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(warnings[0].contains("overflow"));
+}
+
+/// A provider that hides its policies, so impact analysis can't prune or
+/// evaluate incrementally and compares every decision.
+struct Opaque<'a>(&'a RlsProvider);
+
+impl PolicyProvider for Opaque<'_> {
+    /// Pass through.
+    fn partial_eval(
+        &self,
+        req: &PartialRequest<'_>,
+        entities: &dyn EntityStore,
+    ) -> Result<Residual, SecurityError> {
+        self.0.partial_eval(req, entities)
+    }
+
+    /// Pass through.
+    fn authorize(
+        &self,
+        req: &Request<'_>,
+        entities: &dyn EntityStore,
+    ) -> Result<Decision, SecurityError> {
+        self.0.authorize(req, entities)
+    }
+
+    /// Pass through.
+    fn dependencies(&self, req: &PartialRequest<'_>) -> Dependencies {
+        self.0.dependencies(req)
+    }
+
+    /// Pass through.
+    fn combining_rule(&self) -> CombiningRule {
+        self.0.combining_rule()
+    }
+
+    /// Pass through.
+    fn column_access(
+        &self,
+        context: &SecurityContext,
+        resource_type: &interlaken_ir::Ident,
+        column: &interlaken_ir::Ident,
+        entities: &dyn EntityStore,
+    ) -> Result<Decision, SecurityError> {
+        self.0
+            .column_access(context, resource_type, column, entities)
+    }
+}
+
+/// Render a report's changes, for comparison.
+fn changes(report: &ImpactReport) -> (Vec<String>, Vec<String>) {
+    let show = |cs: &[interlaken_ir::security::Change]| -> Vec<String> {
+        cs.iter().map(|c| format!("{c:?}")).collect()
+    };
+    (show(&report.newly_allowed), show(&report.newly_denied))
+}
+
+#[test]
+/// Assert pruning and incremental evaluation report exactly what comparing
+/// every decision reports, for random policy changes on random data.
+fn pruned_incremental_impact_equals_full_impact() {
+    let catalog = catalog();
+    let base = policies_for("Doc", doc_atom());
+    let users = policies_for("User", user_atom());
+    let column = proptest::option::of((any::<bool>(), doc_atom()).prop_map(
+        |(permit, condition)| Policy {
+            effect: if permit {
+                interlaken_ir::security::Effect::Permit
+            } else {
+                interlaken_ir::security::Effect::Forbid
+            },
+            actions: vec![Action::Read],
+            resource_type: "Doc".into(),
+            condition,
+            column: Some("secret".into()),
+            mask: None,
+        },
+    ));
+    let added = policies_for("Doc", doc_atom());
+    let strategy = (data(), base, users, added, column, 1i64..4);
+    let saved = std::sync::atomic::AtomicUsize::new(0);
+    TestRunner::new(Config {
+        cases: 200,
+        ..Config::default()
+    })
+    .run(&strategy, |(data, before, users, added, column, keep)| {
+        let db = data.database();
+        // The proposal keeps some current policies, drops the rest, and adds new ones.
+        let mut current = before.clone();
+        current.extend(users.clone());
+        let mut proposed: Vec<Policy> = before
+            .iter()
+            .take(usize::try_from(keep).unwrap())
+            .cloned()
+            .collect();
+        proposed.extend(users);
+        proposed.extend(added);
+        proposed.extend(column);
+        let (current, proposed) = (RlsProvider::new(current), RlsProvider::new(proposed));
+        let ctx = context(1, "t1");
+        let fast = impact_analysis(&current, &proposed, &catalog, &db, &ctx).unwrap();
+        let full =
+            impact_analysis(&Opaque(&current), &Opaque(&proposed), &catalog, &db, &ctx).unwrap();
+        prop_assert_eq!(changes(&fast), changes(&full));
+        prop_assert!(!fast.sampled && !full.sampled);
+        prop_assert_eq!(full.pruned, 0);
+        prop_assert_eq!(full.evaluated, full.decisions);
+        prop_assert_eq!(fast.decisions + fast.pruned, full.decisions);
+        prop_assert!(fast.evaluated <= fast.decisions);
+        saved.fetch_add(
+            full.evaluated - fast.evaluated,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        saved.into_inner() > 0,
+        "pruning and incremental evaluation never saved work"
+    );
+}
+
+#[test]
+/// Assert analyses above the threshold sample, say so, and report only real changes.
+fn impact_analysis_samples_above_the_threshold() {
+    let catalog = catalog();
+    let mut data = sample();
+    // Enough users and documents that every decision is far above the threshold.
+    for i in 4..60 {
+        data.users
+            .push((i, format!("u{i}"), None, Some(i % 5), None));
+        data.docs
+            .push((100 + i, i, None, "x".into(), Some(i % 12), None));
+    }
+    let db = data.database();
+    let before = rls("(policies (permit (read) Doc (== resource.owner principal)))");
+    let after = rls(
+        "(policies (permit (read) Doc (or (== resource.owner principal) (< resource.secret 3))))",
+    );
+    let ctx = context(1, "t1");
+    let full = impact_analysis(&before, &after, &catalog, &db, &ctx).unwrap();
+    assert!(!full.sampled);
+    let options = ImpactOptions {
+        max_decisions: full.population / 10,
+        seed: 7,
+    };
+    let sampled = impact_analysis_with(&before, &after, &catalog, &db, &ctx, &options).unwrap();
+    assert!(sampled.sampled);
+    assert_eq!(sampled.population, full.population);
+    assert!(
+        sampled.decisions < full.decisions / 4,
+        "{} of {}",
+        sampled.decisions,
+        full.decisions
+    );
+    assert!(sampled.decisions > 0);
+    assert!(sampled.summary(3).contains("sampled"));
+    let (all, _) = changes(&full);
+    let (some, _) = changes(&sampled);
+    assert!(!some.is_empty());
+    assert!(some.iter().all(|c| all.contains(c)));
+    // The same seed samples the same entities.
+    let again = impact_analysis_with(&before, &after, &catalog, &db, &ctx, &options).unwrap();
+    assert_eq!(changes(&again), changes(&sampled));
+}
+
+#[test]
+/// Assert cached residuals depend on the entities policies read beyond the
+/// principal: a change to the manager's department misses (ADR-0032).
+fn residual_cache_keys_cover_entities_beyond_the_principal() {
+    let catalog = catalog();
+    let policies =
+        rls("(policies (permit (read) Doc (== resource.owner.dept principal.manager.dept)))");
+    assert_eq!(policies.entity_paths().len(), 1);
+    let cache = ResidualCache::new(100);
+    let doc = "Doc".into();
+    let ask = |db: &interlaken_ir::interp::Database| {
+        let store = DatabaseEntities {
+            catalog: &catalog,
+            db,
+        };
+        cache
+            .provider(&policies, 1)
+            .partial_eval(
+                &PartialRequest {
+                    context: &context(1, "t1"),
+                    action: Action::Read,
+                    resource_type: &doc,
+                },
+                &store,
+            )
+            .unwrap()
+    };
+    let before = ask(&sample().database());
+    assert_eq!(ask(&sample().database()), before);
+    assert_eq!(cache.stats().hits, 1);
+    // Bob (ann's manager) moves from ops to eng.
+    let mut changed = sample();
+    changed.users[1].2 = Some("eng".into());
+    let after = ask(&changed.database());
+    assert_eq!(cache.stats().misses, 2);
+    assert_ne!(after, before);
 }

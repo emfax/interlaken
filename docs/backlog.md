@@ -54,32 +54,11 @@ Entry format:
 - **Size:** About 2–4 days, depending on the conditional-branch design.
 - **Status:** open
 
-### closure-maintenance-in-dml: Maintain closure tables in the same transaction as edge changes
-- **Origin:** ADR-0017, I4
-- **Why:** `security::Closure` implements path-counted maintenance, and principal loading reads the closure tables. Nothing yet writes closure rows when an edges table changes. Until something does, closure tables must be maintained by whoever changes memberships.
-- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: executor milestone E4 (DML sinks), which is the natural hook. Required before memberships change through SQL.
-- **Size:** About 3 days, including tests that interleave edge changes with authorization.
-- **Status:** open
-
-### column-masking: Per-row column access and masking functions
-- **Origin:** ADR-0018, I4
-- **Why:** A column policy that depends on the row denies the column outright (fail closed). Returning redacted values per row needs masking functions.
-- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when an application needs per-row column visibility.
-- **Size:** About 1 week.
-- **Status:** open
-
-### entity-loading-beyond-principal: Load entities other than the principal for partial evaluation
-- **Origin:** ADR-0017, I4
-- **Why:** `load_principal` loads only the principal's attributes and ancestors. A policy reading another entity through the principal (`principal.manager.dept`) fails, and the policy is then ignored.
-- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when policies need it. Load referenced entities on demand through the transaction.
-- **Size:** About 1–2 days.
-- **Status:** open
-
-### impact-analysis-at-scale: Make impact analysis scale with the data
-- **Origin:** ADR-0030, I5
-- **Why:** Impact analysis authorizes every principal against every governed row and column. That is fine for small and medium data, but quadratic.
-- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when a policy change takes noticeably long to verify.
-- **Size:** About 3–5 days, for sampling, pruning by the policies' resource types, and incremental evaluation.
+### masked-table-writes: Let principals write tables whose masked columns they don't read
+- **Origin:** ADR-0032, F2
+- **Why:** A statement that writes a table with a masked column fails for that principal (`42501`), as for a denied column, because DML carries the whole target row and check-columns counts that as reading every column. Masks are only unsafe where a write reads or returns the hidden value, or writes a masked value back.
+- **When:** When an application masks columns of tables its users also write.
+- **Size:** About 2 days: tell carried target-row columns from read ones in `check_columns`, and keep the target row unmasked.
 - **Status:** open
 
 ### prover-subscriptions: Provers that watch replicated proposals
@@ -157,6 +136,34 @@ Entry format:
 - **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before the first long-running deployment, or sooner if disk growth shows up.
 - **Size:** About 1 day, plus a soak run.
 - **Status:** done (F4): `tests/disk_space.rs` (12 s in the suite, `scripts/disk-space-soak.sh` for long runs) shows disk space levelling off, bounded by fjall's journal cap. The cap is now configurable through `StorageOptions::max_journal_bytes` and `memtable_bytes` (ADR-0008).
+
+### closure-maintenance-in-dml: Maintain closure tables in the same transaction as edge changes
+- **Origin:** ADR-0017, I4
+- **Why:** `security::Closure` implements path-counted maintenance, and principal loading reads the closure tables. Nothing yet writes closure rows when an edges table changes. Until something does, closure tables must be maintained by whoever changes memberships.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: executor milestone E4 (DML sinks), which is the natural hook. Required before memberships change through SQL.
+- **Size:** About 3 days, including tests that interleave edge changes with authorization.
+- **Status:** done (F2): DML on an edges table maintains every closure the edge connects, path-counted, in the same statement; cycles fail with `23514`; concurrent changes conflict at every isolation level (ADR-0032).
+
+### column-masking: Per-row column access and masking functions
+- **Origin:** ADR-0018, I4
+- **Why:** A column policy that depends on the row denies the column outright (fail closed). Returning redacted values per row needs masking functions.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when an application needs per-row column visibility.
+- **Size:** About 1 week.
+- **Status:** done (F2): column policies declare `:mask null` or a masking function (`redact`, `mask_last4`, any catalog function); row-dependent columns show masked values, hidden in `EXPLAIN` (ADR-0032).
+
+### entity-loading-beyond-principal: Load entities other than the principal for partial evaluation
+- **Origin:** ADR-0017, I4
+- **Why:** `load_principal` loads only the principal's attributes and ancestors. A policy reading another entity through the principal (`principal.manager.dept`) fails, and the policy is then ignored.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when policies need it. Load referenced entities on demand through the transaction.
+- **Size:** About 1–2 days.
+- **Status:** done (F2): providers list the entity paths their policies read, and `load_entities` loads them through the transaction, registering reads like the principal's (ADR-0032).
+
+### impact-analysis-at-scale: Make impact analysis scale with the data
+- **Origin:** ADR-0030, I5
+- **Why:** Impact analysis authorizes every principal against every governed row and column. That is fine for small and medium data, but quadratic.
+- **When:** Milestone F2 (`design/mvp-completion.md`). Originally: when a policy change takes noticeably long to verify.
+- **Size:** About 3–5 days, for sampling, pruning by the policies' resource types, and incremental evaluation.
+- **Status:** done (F2): pruning by the changed policies' actions and resource types, incremental evaluation per changed policy, and seeded sampling above `ImpactOptions::max_decisions`, flagged in the report (ADR-0032).
 
 ### storage-temporal-types: Store dates, timestamps and UUIDs
 - **Origin:** E5

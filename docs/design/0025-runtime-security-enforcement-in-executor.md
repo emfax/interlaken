@@ -66,7 +66,7 @@ Security lowering inserts `PolicyFilter` and `WriteCheck` nodes and constrains t
 ## Future Work
 
 - Admin-only client-supplied physical plans, which still get the residual applied inside `ScanRequest` ([ADR-0015](0015-security-core-and-policy-provider-contract.md)).
-- Column masking functions.
+- ~~Column masking functions.~~ Done in F2, with `EXPLAIN` hiding masks: [ADR-0032](0032-authorization-completeness.md).
 
 ## References
 

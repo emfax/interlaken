@@ -27,7 +27,7 @@ mod run;
 pub use cast::cast_value;
 pub use datum::{Datum, RowKey};
 pub use error::EvalError;
-pub use functions::aggregate_values;
+pub use functions::{REDACTED, aggregate_values, mask_last4};
 pub use like::LikePattern;
 pub use rel::compare_sort_keys;
 pub(crate) use run::eval_constant;

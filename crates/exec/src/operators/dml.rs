@@ -21,6 +21,7 @@ use interlaken_storage::rows;
 
 use super::pull::{Pull, batch, into_stream};
 use super::scan::to_stored;
+use crate::closure::Maintainer;
 use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
@@ -60,6 +61,8 @@ struct DmlState {
     types: Vec<Type>,
     /// The output schema.
     schema: SchemaRef,
+    /// For an edges table, keeps its closure tables up to date.
+    closure: Option<Maintainer>,
 }
 
 /// Convert a row to its stored form.
@@ -155,6 +158,9 @@ impl DmlState {
                         row[c] = datum_at(b.column(k).as_ref(), r)?;
                     }
                     rows::insert(txn, stored, stored_table_row(&row, &stored.types())?).await?;
+                    if let Some(c) = &mut self.closure {
+                        c.record(None, Some(&row))?;
+                    }
                     written.push(row);
                 }
             }
@@ -164,6 +170,9 @@ impl DmlState {
                 for i in self.first_occurrences(&targets)? {
                     let row = &targets[i];
                     if rows::delete(txn, stored, &pk_of(row)?).await? {
+                        if let Some(c) = &mut self.closure {
+                            c.record(Some(row), None)?;
+                        }
                         written.push(row.clone());
                     }
                 }
@@ -198,10 +207,16 @@ impl DmlState {
                     )
                     .await?
                     {
+                        if let Some(c) = &mut self.closure {
+                            c.record(Some(old), Some(&new))?;
+                        }
                         written.push(new);
                     }
                 }
             }
+        }
+        if let Some(c) = &mut self.closure {
+            c.apply(txn).await?;
         }
         Ok(written)
     }
@@ -300,5 +315,9 @@ pub(crate) fn dml(
         returning,
         types,
         schema: node.schema.clone(),
+        closure: dml
+            .closure
+            .clone()
+            .map(|plan| Maintainer::new(plan, ctx.reserve(node, "ClosureMaintenance"))),
     }))
 }

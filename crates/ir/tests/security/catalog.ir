@@ -4,6 +4,7 @@
   (builtins)
   (table users :id 200
     (column id (not-null int8)) (column name (not-null text)) (column dept text) (column level int8)
+    (column manager_id int8)
     (primary-key id))
   (table groups :id 201 (column id (not-null int8)) (column name (not-null text)) (primary-key id))
   (table folders :id 202 (column id (not-null int8)) (column name (not-null text)) (primary-key id))
@@ -24,7 +25,8 @@
     (column doc (not-null int8)) (column folder (not-null int8)) (column paths (not-null int8))
     (primary-key doc folder))
   (table notes :id 210 (column id (not-null int8)) (column body text) (primary-key id))
-  (entity User :table users :key id (attr name) (attr dept) (attr level))
+  (entity User :table users :key id (attr name) (attr dept) (attr level)
+    (attr manager manager_id :references User))
   (entity Group :table groups :key id (attr name))
   (entity Folder :table folders :key id (attr name))
   (entity Doc :table docs :key id

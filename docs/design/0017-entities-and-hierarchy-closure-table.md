@@ -40,8 +40,9 @@ Policy languages such as Cedar reason about entities and hierarchies (`User in G
   - In-memory catalogs declare them in the text form (`(entity ...)`, `(membership ...)`).
   - Keys are single columns for now.
 - **Closure maintenance.** `security::Closure` maintains a hierarchy by path counting: adding or removing an edge adjusts the path counts of every affected pair. Removal is therefore correct when another path still connects a pair. Cycles are rejected. A property test checks it against reachability over random edge changes.
-  - Writing closure rows in the same transaction as edge DML belongs to the executor's DML sinks (see `docs/backlog.md`).
+  - *As implemented (F2):* DML on an edges table writes the closure rows in the same statement, path-counted across every hierarchy the edge connects, with cycles rejected ([ADR-0032](0032-authorization-completeness.md)).
 - **Principal loading.** `interlaken_engine::load_principal` reads the principal's row and its closure rows through the transaction. The closure scan uses the principal's key prefix, so unrelated memberships do not join the read set.
+  - *As implemented (F2):* `load_entities` also loads the other entities policies read (`principal.manager`), the same way ([ADR-0032](0032-authorization-completeness.md)).
 
 ## Implementation Phases
 

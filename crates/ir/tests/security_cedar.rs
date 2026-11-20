@@ -40,7 +40,7 @@ fn generated_schema() {
     let schema = cedar_schema(&catalog(), &TYPES, APP).unwrap();
     let expected = [
         r#"entity Group = { "name": String };"#,
-        r#"entity User in [Group] = { "name": String, "dept"?: String, "level"?: Long };"#,
+        r#"entity User in [Group] = { "name": String, "dept"?: String, "level"?: Long, "manager"?: User };"#,
         r#"entity Folder in [Folder] = { "name": String };"#,
         r#"entity Doc in [Folder] = { "owner": User, "folder"?: Folder, "title": String, "secret"?: Long, "tags"?: Set<String> };"#,
         r#"action "read", "insert", "update", "delete" appliesTo { principal: [Group, User, Folder, Doc], resource: [Group, User, Folder, Doc], context: { "time": Long, "ip": String, "auth_method": String, "session_id": String, "app": { "tenant": String } } };"#,
@@ -270,6 +270,7 @@ fn policies_for(
             resource_type: resource_type.into(),
             condition,
             column: None,
+            mask: None,
         })
     };
     (
@@ -493,4 +494,103 @@ fn cedar_oracle() {
         compared * 10 >= validated * 8,
         "only {compared} of {validated} cases compared"
     );
+}
+
+/// Entity data as the engine loads it: only the principal and the entities
+/// the provider's entity paths reach (ADR-0032).
+struct Loaded<'a> {
+    /// Every entity.
+    all: DatabaseEntities<'a>,
+    /// The loaded ones.
+    loaded: Vec<EntityUid>,
+}
+
+impl interlaken_ir::security::EntityStore for Loaded<'_> {
+    /// Return a loaded entity's attributes.
+    fn attributes(&self, uid: &EntityUid) -> Option<Vec<(interlaken_ir::Ident, SecValue)>> {
+        self.loaded
+            .contains(uid)
+            .then(|| self.all.attributes(uid))
+            .flatten()
+    }
+
+    /// Return a loaded entity's ancestors.
+    fn ancestors(&self, uid: &EntityUid) -> Vec<EntityUid> {
+        if self.loaded.contains(uid) {
+            self.all.ancestors(uid)
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+#[test]
+/// Assert Cedar policies read entities beyond the principal from what its
+/// entity paths load, and `@mask` masks columns row by row.
+fn cedar_entity_paths_and_masks() {
+    let catalog = catalog();
+    let shared: Arc<dyn interlaken_ir::catalog::Catalog> = Arc::new(catalog.clone());
+    let policies = r#"
+        permit (principal, action == Action::"read", resource is Doc) when {
+            principal has manager && principal.manager has dept &&
+            resource.owner has dept && resource.owner.dept == principal.manager.dept
+        };
+        @column("title") @mask("redact")
+        permit (principal, action == Action::"read", resource is Doc) when { resource has secret && resource.secret == 7 };
+    "#;
+    let provider = CedarProvider::new(policies, shared, &TYPES, APP).unwrap();
+    let paths = provider.entity_paths();
+    assert_eq!(paths.len(), 1, "{paths:?}");
+    assert_eq!(paths[0].root, None);
+    assert_eq!(paths[0].attrs, ["manager".into()]);
+    let db = sample().database();
+    let all = DatabaseEntities {
+        catalog: &catalog,
+        db: &db,
+    };
+    // Ann (1) is managed by bob (2, ops), who owns documents 11 and 12.
+    let ann = context(1, "t1");
+    let manager = paths[0].resolve(&ann.principal, &all).unwrap();
+    let store = Loaded {
+        all,
+        loaded: vec![ann.principal.clone(), manager],
+    };
+    let q = "(plan (sort (project (get docs :as d) d.id d.title) (asc id)))";
+    let plan = resolve(&parse_plan(q).unwrap(), &catalog).unwrap().plan;
+    let secured = secure(&plan, &catalog, &provider, &ann, &store).unwrap();
+    let rows = execute(
+        &optimize(&secured, &catalog),
+        &catalog,
+        &mut db.clone(),
+        &[],
+        ExecOptions::default(),
+    )
+    .unwrap();
+    let shown: Vec<String> = rows
+        .iter()
+        .map(|r| format!("{:?} {:?}", r[0], r[1]))
+        .collect();
+    // Document 12 has secret 7, so its title shows; 11's is redacted.
+    assert_eq!(
+        shown,
+        ["Int8(11) Text(\"****\")", "Int8(12) Text(\"notanumber\")"]
+    );
+    // Without the manager loaded, the policy can't read his department and grants nothing.
+    let bare = Loaded {
+        all: DatabaseEntities {
+            catalog: &catalog,
+            db: &db,
+        },
+        loaded: vec![ann.principal.clone()],
+    };
+    let secured = secure(&plan, &catalog, &provider, &ann, &bare).unwrap();
+    let rows = execute(
+        &secured,
+        &catalog,
+        &mut db.clone(),
+        &[],
+        ExecOptions::default(),
+    )
+    .unwrap();
+    assert!(rows.is_empty(), "{rows:?}");
 }

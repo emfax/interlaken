@@ -95,7 +95,7 @@ Both nodes are privileged: the verifier rejects them in client IR ([ADR-0013](00
 
 ## Future Work
 
-- Column masking functions returning redacted values.
+- ~~Column masking functions returning redacted values.~~ Done in F2: [ADR-0032](0032-authorization-completeness.md).
 
 ## References
 

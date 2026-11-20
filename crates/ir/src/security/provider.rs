@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use super::error::SecurityError;
 use super::eval::{EntityStore, Env, Partial, PartialEnv, ResourceData};
-use super::expr::{Action, Effect, EntityUid, Policy, SecExpr, SecValue, bx};
+use super::expr::{Action, Effect, EntityUid, Mask, Policy, SecExpr, SecValue, bx};
+use super::paths::{EntityPath, collect_entity_paths};
 use crate::names::Ident;
 
 /// Facts about the request the engine fills in (ADR-0015).
@@ -112,6 +113,23 @@ pub enum CombiningRule {
     PermitUnlessForbid,
 }
 
+/// How a principal may read one column of a resource type (ADR-0018).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColumnAccess {
+    /// Every row's value is readable.
+    Allow,
+    /// Reading the column fails the query.
+    Deny,
+    /// Rows where `visible` (a condition over `resource`) holds show the
+    /// value; the others show `mask` applied to it (ADR-0032).
+    Masked {
+        /// When the value is shown; `false` to mask every row.
+        visible: SecExpr,
+        /// What the other rows show.
+        mask: Mask,
+    },
+}
+
 /// What a residual depends on, for caching it (ADR-0019).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dependencies {
@@ -172,6 +190,116 @@ pub trait PolicyProvider: Send + Sync {
         column: &Ident,
         entities: &dyn EntityStore,
     ) -> Result<Decision, SecurityError>;
+
+    /// Decide how the principal may read attribute `column` of resources of
+    /// type `resource_type`, row by row: unlike [`column_access`], a
+    /// decision that depends on the row masks the column if its policies
+    /// declare a mask (ADR-0032). By default, `column_access`'s decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SecurityError`] if the policies cannot be evaluated or
+    /// declare conflicting masks.
+    ///
+    /// [`column_access`]: PolicyProvider::column_access
+    fn column_mask(
+        &self,
+        context: &SecurityContext,
+        resource_type: &Ident,
+        column: &Ident,
+        entities: &dyn EntityStore,
+    ) -> Result<ColumnAccess, SecurityError> {
+        Ok(
+            match self.column_access(context, resource_type, column, entities)? {
+                Decision::Allow => ColumnAccess::Allow,
+                Decision::Deny => ColumnAccess::Deny,
+            },
+        )
+    }
+
+    /// Return the entities other than the principal that the policies read
+    /// (`principal.manager.dept`), which must be loaded before partial
+    /// evaluation (ADR-0032). None by default.
+    fn entity_paths(&self) -> Vec<EntityPath> {
+        Vec::new()
+    }
+
+    /// Return the policies, if the provider holds them as sublanguage
+    /// policies, so impact analysis can compare policy sets policy by
+    /// policy (ADR-0030). `None` by default: the provider is opaque.
+    fn policies(&self) -> Option<&[Policy]> {
+        None
+    }
+}
+
+/// Return how `governing` (the column policies of one column) let the
+/// principal read the column row by row: their combined residual and the
+/// mask they declare.
+fn column_policies(
+    governing: &[&Policy],
+    context: &SecurityContext,
+    resource_type: &Ident,
+    entities: &dyn EntityStore,
+) -> (Residual, Vec<Mask>) {
+    let record = context.record();
+    let penv = PartialEnv {
+        env: Env {
+            principal: &context.principal,
+            resource: None,
+            context: &record,
+            store: entities,
+        },
+        resource_type,
+    };
+    let readers: Vec<&Policy> = governing
+        .iter()
+        .copied()
+        .filter(|p| p.actions.contains(&Action::Read))
+        .collect();
+    let mut masks: Vec<Mask> = Vec::new();
+    for mask in readers.iter().filter_map(|p| p.mask.clone()) {
+        if !masks.contains(&mask) {
+            masks.push(mask);
+        }
+    }
+    let (permits, forbids): (Vec<&Policy>, Vec<&Policy>) = readers
+        .into_iter()
+        .partition(|p| p.effect == Effect::Permit);
+    let eval = |ps: Vec<&Policy>| {
+        ps.into_iter()
+            .map(|p| penv.partial(&guarded(&p.condition)))
+            .collect()
+    };
+    (combine(eval(permits), eval(forbids)), masks)
+}
+
+/// Return the column access a residual and the declared masks give.
+///
+/// # Errors
+///
+/// Returns [`SecurityError::Invalid`] if the masks conflict.
+pub(crate) fn mask_access(
+    residual: Residual,
+    masks: Vec<Mask>,
+    resource_type: &Ident,
+    column: &Ident,
+) -> Result<ColumnAccess, SecurityError> {
+    let mut masks = masks.into_iter();
+    let (mask, other) = (masks.next(), masks.next());
+    if other.is_some() {
+        return Err(SecurityError::Invalid(format!(
+            "column {column} of {resource_type} has conflicting masks"
+        )));
+    }
+    Ok(match (residual, mask) {
+        (Residual::Allow, _) => ColumnAccess::Allow,
+        (Residual::Deny | Residual::Conditional(_), None) => ColumnAccess::Deny,
+        (Residual::Deny, Some(mask)) => ColumnAccess::Masked {
+            visible: SecExpr::Lit(SecValue::Bool(false)),
+            mask,
+        },
+        (Residual::Conditional(visible), Some(mask)) => ColumnAccess::Masked { visible, mask },
+    })
 }
 
 /// A Postgres row-level-security-style provider: policies are predicates in the sublanguage.
@@ -237,6 +365,14 @@ impl RlsProvider {
     #[must_use]
     pub fn new(policies: Vec<Policy>) -> Self {
         Self { policies }
+    }
+
+    /// Return the column-level policies governing `column` of `resource_type`.
+    fn governing(&self, resource_type: &Ident, column: &Ident) -> Vec<&Policy> {
+        self.policies
+            .iter()
+            .filter(|p| p.column.as_ref() == Some(column) && &p.resource_type == resource_type)
+            .collect()
     }
 
     /// Return the policies covering `action` on `resource_type`, split into permits and forbids.
@@ -380,8 +516,8 @@ impl PolicyProvider for RlsProvider {
 
     /// A column no policy names is readable; one that some policy names is
     /// readable only if the column policies allow it for every row.
-    /// A decision that depends on the row denies: per-row column masking is
-    /// not supported, so this fails closed.
+    /// A decision that depends on the row denies (fail closed); see
+    /// [`PolicyProvider::column_mask`] for masking such columns instead.
     fn column_access(
         &self,
         context: &SecurityContext,
@@ -389,36 +525,46 @@ impl PolicyProvider for RlsProvider {
         column: &Ident,
         entities: &dyn EntityStore,
     ) -> Result<Decision, SecurityError> {
-        let governing: Vec<&Policy> = self
-            .policies
-            .iter()
-            .filter(|p| p.column.as_ref() == Some(column) && &p.resource_type == resource_type)
-            .collect();
+        let governing = self.governing(resource_type, column);
         if governing.is_empty() {
             return Ok(Decision::Allow);
         }
-        let record = context.record();
-        let penv = PartialEnv {
-            env: Env {
-                principal: &context.principal,
-                resource: None,
-                context: &record,
-                store: entities,
+        Ok(
+            match column_policies(&governing, context, resource_type, entities).0 {
+                Residual::Allow => Decision::Allow,
+                Residual::Deny | Residual::Conditional(_) => Decision::Deny,
             },
-            resource_type,
-        };
-        let (permits, forbids): (Vec<&Policy>, Vec<&Policy>) = governing
-            .into_iter()
-            .filter(|p| p.actions.contains(&Action::Read))
-            .partition(|p| p.effect == Effect::Permit);
-        let eval = |ps: Vec<&Policy>| {
-            ps.into_iter()
-                .map(|p| penv.partial(&guarded(&p.condition)))
-                .collect()
-        };
-        Ok(match combine(eval(permits), eval(forbids)) {
-            Residual::Allow => Decision::Allow,
-            Residual::Deny | Residual::Conditional(_) => Decision::Deny,
-        })
+        )
+    }
+
+    /// As [`RlsProvider::column_access`], but a row-dependent decision
+    /// masks the column when its policies declare a mask.
+    fn column_mask(
+        &self,
+        context: &SecurityContext,
+        resource_type: &Ident,
+        column: &Ident,
+        entities: &dyn EntityStore,
+    ) -> Result<ColumnAccess, SecurityError> {
+        let governing = self.governing(resource_type, column);
+        if governing.is_empty() {
+            return Ok(ColumnAccess::Allow);
+        }
+        let (residual, masks) = column_policies(&governing, context, resource_type, entities);
+        mask_access(residual, masks, resource_type, column)
+    }
+
+    /// Return the entities every policy, row-level or column-level, reads.
+    fn entity_paths(&self) -> Vec<EntityPath> {
+        let mut out = BTreeSet::new();
+        for p in &self.policies {
+            collect_entity_paths(&p.condition, &mut out);
+        }
+        out.into_iter().collect()
+    }
+
+    /// Return the policies.
+    fn policies(&self) -> Option<&[Policy]> {
+        Some(&self.policies)
     }
 }

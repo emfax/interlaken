@@ -55,6 +55,8 @@ An ADR records the session API and the storage-backed catalog's tables.
 
 ### F2: Authorization completeness
 
+*Status: complete (2026-11-20), recorded in [ADR-0032](0032-authorization-completeness.md).*
+
 - **Closure maintenance in DML** (`closure-maintenance-in-dml`). The physical planner adds a closure-maintenance step to any DML on a membership edges table. It writes the path-counted closure rows (`security::Closure`, ADR-0017) in the same statement, so authorization in the same transaction sees the new memberships. This is the most important item here: E4 made edge DML possible, and today it leaves the closure stale.
 - **Entities beyond the principal** (`entity-loading-beyond-principal`). Partial evaluation loads referenced entities, such as `principal.manager.dept`, on demand through the transaction, registering their reads like the principal's.
 - **Column masking** (`column-masking`). Per-row column policies return masked values through masking functions instead of denying the column outright. `EXPLAIN` hides masks like residuals.

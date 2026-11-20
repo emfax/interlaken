@@ -8,6 +8,16 @@
 //! `WriteCheck` (Postgres `WITH CHECK`), which fails the statement
 //! otherwise. Tables that back no entity type are not governed.
 //!
+//! A column whose column policies depend on the row and declare a mask
+//! (ADR-0032) is masked where it is read: the governed `Get` is wrapped in
+//! a projection that passes every column through except masked ones,
+//! which become `policy_mask(visible, value, mask(value))`. The projection
+//! keeps the `Get`'s binding, so everything above reads masked values.
+//! `policy_mask` is volatile, so the optimizer never moves the condition
+//! out of the projection, and `EXPLAIN` hides it by name. Masks apply
+//! only to reads: a statement writing the table fails instead, so it can
+//! neither write masked values back nor compute new ones from hidden ones.
+//!
 //! The lowered plan is resolved again, which lowers the policies'
 //! subqueries to applies below each barrier, and verified as trusted.
 
@@ -15,12 +25,12 @@ use std::collections::HashMap;
 
 use super::error::SecurityError;
 use super::eval::EntityStore;
-use super::expr::{Action, EntityUid};
+use super::expr::{Action, EntityUid, Mask, SecExpr};
 use super::lower::Lowerer;
-use super::provider::{PartialRequest, PolicyProvider, Residual, SecurityContext};
+use super::provider::{ColumnAccess, PartialRequest, PolicyProvider, Residual, SecurityContext};
 use crate::catalog::Catalog;
-use crate::expr::Expr;
-use crate::names::{BindingId, ColumnId, ColumnRef, TableId, TableRef, TargetColumn};
+use crate::expr::{Expr, NamedExpr};
+use crate::names::{BindingId, ColumnId, ColumnRef, FunctionRef, TableId, TableRef, TargetColumn};
 use crate::rel::{Plan, Rel};
 use crate::value::Value;
 
@@ -40,7 +50,16 @@ struct Lowering<'a> {
     residuals: HashMap<(Action, TableId), Residual>,
     /// Counter for subquery aliases, shared across residuals.
     next_alias: u32,
+    /// The columns to mask, by the binding of the `Get` reading them.
+    masks: Masks,
 }
+
+/// Masked columns by the binding of the `Get` that reads them: each
+/// column with the condition under which its value shows, and its mask.
+type Masks = HashMap<BindingId, Vec<(ColumnId, SecExpr, Mask)>>;
+
+/// The name of the function that chooses between a value and its mask.
+pub const POLICY_MASK: &str = "policy_mask";
 
 /// Find the binding of the first `Get` of `table` in `rel`.
 fn find_get(rel: &Rel, table: TableId) -> Option<BindingId> {
@@ -118,6 +137,86 @@ impl Lowering<'_> {
         })
     }
 
+    /// Lower `condition`, a residual over the resource row given by `resource`.
+    fn lower_condition(
+        &mut self,
+        table: TableId,
+        condition: &SecExpr,
+        resource: &dyn Fn(ColumnId) -> Expr,
+    ) -> Result<Expr, SecurityError> {
+        let entity = self.catalog.entity_for_table(table).ok_or_else(|| {
+            SecurityError::Invalid(format!("table {} is not governed", table.get()))
+        })?;
+        let table_def = self
+            .catalog
+            .table_by_id(table)
+            .ok_or_else(|| SecurityError::Undeclared(format!("table {}", table.get())))?;
+        let mut lowerer = Lowerer {
+            catalog: self.catalog,
+            entity,
+            table: table_def,
+            resource,
+            principal_and_ancestors: self.principal_and_ancestors.clone(),
+            next_alias: self.next_alias,
+        };
+        let lowered = lowerer.condition(condition)?;
+        self.next_alias = lowerer.next_alias;
+        Ok(lowered)
+    }
+
+    /// Wrap `input`, which reads `table` bound to `binding`, in a projection
+    /// that masks the columns in `masks` and passes the rest through.
+    fn mask(
+        &mut self,
+        input: Rel,
+        table: TableId,
+        binding: BindingId,
+        masks: &[(ColumnId, SecExpr, Mask)],
+    ) -> Result<Rel, SecurityError> {
+        let def = self
+            .catalog
+            .table_by_id(table)
+            .ok_or_else(|| SecurityError::Undeclared(format!("table {}", table.get())))?;
+        let resource = |c: ColumnId| Expr::Column(ColumnRef::bound(binding, c));
+        let mut exprs = Vec::new();
+        for column in &def.columns {
+            let value = resource(column.id);
+            let Some((_, visible, mask)) = masks.iter().find(|(c, ..)| *c == column.id) else {
+                exprs.push(NamedExpr::from(value));
+                continue;
+            };
+            if !matches!(column.ty.data, crate::types::DataType::Scalar(_)) {
+                return Err(SecurityError::Unsupported(format!(
+                    "masking column {} of type {}",
+                    column.name, column.ty.data
+                )));
+            }
+            let visible = self.lower_condition(table, visible, &resource)?;
+            let masked = match mask {
+                Mask::Null => Expr::Cast {
+                    expr: Box::new(Expr::Literal(Value::Null)),
+                    to: column.ty.data.clone(),
+                },
+                Mask::Function(f) => Expr::Call {
+                    func: FunctionRef::Named(f.as_str().into()),
+                    args: vec![value.clone()],
+                },
+            };
+            exprs.push(NamedExpr {
+                expr: Expr::Call {
+                    func: FunctionRef::Named(POLICY_MASK.into()),
+                    args: vec![visible, value, masked],
+                },
+                name: Some(column.name.clone()),
+            });
+        }
+        Ok(Rel::Project {
+            input: Box::new(input),
+            exprs,
+            binding: Some(binding),
+        })
+    }
+
     /// Lower `rel`; `dml` names the table an enclosing update or delete changes, and its action.
     fn rel(&mut self, rel: Rel, dml: Option<(TableId, Action)>) -> Result<Rel, SecurityError> {
         Ok(match rel {
@@ -138,12 +237,16 @@ impl Lowering<'_> {
                     binding: Some(b),
                 };
                 let resource = |c: ColumnId| Expr::Column(ColumnRef::bound(b, c));
-                match self.condition(t, &actions, &resource)? {
+                let filtered = match self.condition(t, &actions, &resource)? {
                     None => get,
                     Some(residual) => Rel::PolicyFilter {
                         input: Box::new(get),
                         residual,
                     },
+                };
+                match self.masks.remove(&b) {
+                    Some(masks) => self.mask(filtered, t, b, &masks)?,
+                    None => filtered,
                 }
             }
             Rel::Insert {
@@ -256,20 +359,21 @@ impl Lowering<'_> {
     }
 }
 
-/// Fail if `plan` reads a column of a governed table the principal may not read.
+/// Fail if `plan` reads a column of a governed table the principal may not
+/// read, and return the columns to mask where they are read.
 ///
 /// A column counts as read if any expression references it, or if the
 /// whole row of its relation is consumed by position: the plan's output,
 /// a set operation, an insert or `DISTINCT`. Policy residuals are added
 /// later and are not checked: the engine may read any column to enforce
-/// policies.
+/// policies. A masked column of a table the plan writes counts as denied.
 fn check_columns(
     plan: &Plan,
     catalog: &dyn Catalog,
     provider: &dyn PolicyProvider,
     context: &SecurityContext,
     store: &dyn EntityStore,
-) -> Result<(), SecurityError> {
+) -> Result<Masks, SecurityError> {
     let mut read = std::collections::HashSet::new();
     crate::optimize::referenced(&plan.root, &mut read);
     let mut whole_rows = std::collections::HashSet::new();
@@ -293,8 +397,21 @@ fn check_columns(
         }
         rel.inputs().into_iter().for_each(|i| row_sources(i, out));
     }
+    /// Collect the tables the plan writes.
+    fn written(rel: &Rel, out: &mut Vec<TableId>) {
+        if let Rel::Insert { target, .. } | Rel::Update { target, .. } | Rel::Delete { target, .. } =
+            rel
+            && let TableRef::Id(t) = &target.table
+        {
+            out.push(*t);
+        }
+        rel.inputs().into_iter().for_each(|i| written(i, out));
+    }
     let mut sources = Vec::new();
     row_sources(&plan.root, &mut sources);
+    let mut targets = Vec::new();
+    written(&plan.root, &mut targets);
+    let mut masks = Masks::new();
     for (table, binding) in sources {
         let (Some(entity), Some(def)) =
             (catalog.entity_for_table(table), catalog.table_by_id(table))
@@ -303,18 +420,27 @@ fn check_columns(
         };
         for attribute in &entity.attributes {
             let used = whole_rows.contains(&binding) || read.contains(&(binding, attribute.column));
-            if used
-                && provider.column_access(context, &entity.name, &attribute.name, store)?
-                    == super::provider::Decision::Deny
-            {
-                return Err(SecurityError::ColumnDenied {
-                    table: def.name.to_string(),
-                    column: attribute.name.to_string(),
-                });
+            if !used {
+                continue;
+            }
+            let denied = || SecurityError::ColumnDenied {
+                table: def.name.to_string(),
+                column: attribute.name.to_string(),
+            };
+            match provider.column_mask(context, &entity.name, &attribute.name, store)? {
+                ColumnAccess::Allow => {}
+                ColumnAccess::Deny => return Err(denied()),
+                ColumnAccess::Masked { .. } if targets.contains(&table) => return Err(denied()),
+                ColumnAccess::Masked { visible, mask } => {
+                    masks
+                        .entry(binding)
+                        .or_default()
+                        .push((attribute.column, visible, mask))
+                }
             }
         }
     }
-    Ok(())
+    Ok(masks)
 }
 
 /// Apply `provider`'s policies for `context` to a resolved, verified plan.
@@ -336,7 +462,7 @@ pub fn secure(
     context: &SecurityContext,
     store: &dyn EntityStore,
 ) -> Result<Plan, SecurityError> {
-    check_columns(plan, catalog, provider, context, store)?;
+    let masks = check_columns(plan, catalog, provider, context, store)?;
     let mut principal_and_ancestors = vec![context.principal.clone()];
     principal_and_ancestors.extend(store.ancestors(&context.principal));
     let mut lowering = Lowering {
@@ -347,6 +473,7 @@ pub fn secure(
         principal_and_ancestors,
         residuals: HashMap::new(),
         next_alias: 0,
+        masks,
     };
     let root = lowering.rel(plan.root.clone(), None)?;
     let lowered = Plan {

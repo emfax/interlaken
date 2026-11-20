@@ -1,6 +1,6 @@
 //! The Cedar provider: TPE for partial evaluation, Cedar's authorizer for writes.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 
 use cedar_policy::{
@@ -17,14 +17,18 @@ use crate::catalog::Catalog;
 use crate::names::Ident;
 use crate::security::error::SecurityError;
 use crate::security::eval::{EntityStore, Env, Partial, PartialEnv, ResourceData};
-use crate::security::expr::{Action, EntityUid, SecExpr, SecValue, bx};
+use crate::security::expr::{Action, EntityUid, Mask, SecExpr, SecValue, bx};
+use crate::security::paths::{EntityPath, collect_entity_paths};
 use crate::security::provider::{
-    CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request, Residual,
-    SecurityContext, combine,
+    ColumnAccess, CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request,
+    Residual, SecurityContext, combine, mask_access,
 };
 
 /// The annotation marking a column-level policy: `@column("secret")`.
 const COLUMN_ANNOTATION: &str = "column";
+
+/// The annotation giving a column-level policy's mask: `@mask("null")` (ADR-0032).
+const MASK_ANNOTATION: &str = "mask";
 
 /// Construct a Cedar error.
 fn cedar_error(what: &str, e: impl std::fmt::Display) -> SecurityError {
@@ -46,6 +50,10 @@ pub struct CedarProvider {
     rows: PolicySet,
     /// Column-level policies, by column name.
     columns: HashMap<String, PolicySet>,
+    /// The masks column-level policies declare, by column name.
+    masks: HashMap<String, Vec<Mask>>,
+    /// The entities other than the principal the policies read.
+    paths: Vec<EntityPath>,
     /// Every policy, for dependency analysis.
     all: PolicySet,
 }
@@ -112,8 +120,8 @@ fn cedar_context(context: &SecurityContext) -> Result<Context, SecurityError> {
     .map_err(|e| cedar_error("context", e))
 }
 
-/// Return the principal's entity for partial evaluation: attributes and ancestors if it exists.
-fn principal_entity(
+/// Return a known entity for partial evaluation: attributes and ancestors if it exists.
+fn known_entity(
     principal: &EntityUid,
     store: &dyn EntityStore,
     schema: &Schema,
@@ -138,7 +146,40 @@ fn principal_entity(
         schema,
     )
     .map(Some)
-    .map_err(|e| cedar_error("principal entity", e))
+    .map_err(|e| cedar_error("entity", e))
+}
+
+/// Return the entities other than the principal that `all`'s conditions read.
+///
+/// The conditions are translated with a placeholder principal, so chains
+/// on `principal` become chains on that placeholder.
+fn cedar_entity_paths(all: &PolicySet, catalog: &dyn Catalog) -> Vec<EntityPath> {
+    let placeholder = EntityUid::str("\u{0}principal", "");
+    let record = SecValue::Record(Vec::new());
+    let translator = Translator {
+        catalog,
+        principal: &placeholder,
+        context: &record,
+    };
+    let mut out = BTreeSet::new();
+    if let Ok(set) = all.to_pst() {
+        for policy in set.policies.values() {
+            for clause in policy.body().clauses() {
+                let (pst::Clause::When(e) | pst::Clause::Unless(e)) = clause;
+                if let Ok(condition) = translator.expr(e.as_ref()) {
+                    collect_entity_paths(&condition, &mut out);
+                }
+            }
+        }
+    }
+    out.into_iter()
+        .filter_map(|mut p| {
+            if p.root.as_ref() == Some(&placeholder) {
+                p.root = None;
+            }
+            (p.root.is_some() || !p.attrs.is_empty()).then_some(p)
+        })
+        .collect()
 }
 
 /// Loads entities on demand for Cedar's authorizer, from an entity store and the request's resource.
@@ -246,19 +287,32 @@ impl CedarProvider {
         }
         let mut rows = PolicySet::new();
         let mut columns: HashMap<String, PolicySet> = HashMap::new();
+        let mut masks: HashMap<String, Vec<Mask>> = HashMap::new();
         for policy in all.policies() {
             let set = match policy.annotation(COLUMN_ANNOTATION) {
-                Some(column) => columns.entry(column.to_owned()).or_default(),
+                Some(column) => {
+                    if let Some(mask) = policy.annotation(MASK_ANNOTATION) {
+                        let found = masks.entry(column.to_owned()).or_default();
+                        let mask = Mask::named(mask);
+                        if !found.contains(&mask) {
+                            found.push(mask);
+                        }
+                    }
+                    columns.entry(column.to_owned()).or_default()
+                }
                 None => &mut rows,
             };
             set.add(policy.clone())
                 .map_err(|e| cedar_error("policy set", e))?;
         }
+        let paths = cedar_entity_paths(&all, catalog.as_ref());
         Ok(Self {
             catalog,
             schema,
             rows,
             columns,
+            masks,
+            paths,
             all,
         })
     }
@@ -288,11 +342,21 @@ impl CedarProvider {
             &self.schema,
         )
         .map_err(|e| cedar_error("partial request", e))?;
-        let entities = PartialEntities::from_partial_entities(
-            principal_entity(&context.principal, store, &self.schema)?,
-            &self.schema,
-        )
-        .map_err(|e| cedar_error("entities", e))?;
+        // The principal and every other entity the policies read, if they exist.
+        let mut uids = vec![context.principal.clone()];
+        for path in &self.paths {
+            if let Some(uid) = path.resolve(&context.principal, store)
+                && !uids.contains(&uid)
+            {
+                uids.push(uid);
+            }
+        }
+        let mut known = Vec::new();
+        for uid in &uids {
+            known.extend(known_entity(uid, store, &self.schema)?);
+        }
+        let entities = PartialEntities::from_partial_entities(known, &self.schema)
+            .map_err(|e| cedar_error("entities", e))?;
         let response = set
             .tpe(&request, &entities, &self.schema)
             .map_err(|e| cedar_error("partial evaluation", e))?;
@@ -591,5 +655,27 @@ impl PolicyProvider for CedarProvider {
                 Residual::Deny | Residual::Conditional(_) => Decision::Deny,
             },
         )
+    }
+
+    /// As [`CedarProvider::column_access`], but a row-dependent decision
+    /// masks the column when a policy on it is annotated `@mask("...")`.
+    fn column_mask(
+        &self,
+        context: &SecurityContext,
+        resource_type: &Ident,
+        column: &Ident,
+        entities: &dyn EntityStore,
+    ) -> Result<ColumnAccess, SecurityError> {
+        let Some(set) = self.columns.get(column.as_str()) else {
+            return Ok(ColumnAccess::Allow);
+        };
+        let residual = self.partial(set, context, Action::Read, resource_type, entities)?;
+        let masks = self.masks.get(column.as_str()).cloned().unwrap_or_default();
+        mask_access(residual, masks, resource_type, column)
+    }
+
+    /// Return the entities other than the principal the policies read.
+    fn entity_paths(&self) -> Vec<EntityPath> {
+        self.paths.clone()
     }
 }

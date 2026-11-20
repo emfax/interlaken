@@ -212,6 +212,42 @@ pub struct Policy {
     /// For a column-level policy, the column (attribute) it governs reading
     /// (ADR-0018); `None` for a row-level policy.
     pub column: Option<Ident>,
+    /// For a column-level policy, what the column shows on rows where the
+    /// column policies deny it; `None` denies reading the column instead
+    /// unless they allow every row.
+    pub mask: Option<Mask>,
+}
+
+/// What a masked column shows in place of a value the principal may not
+/// read (ADR-0018, ADR-0032).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Mask {
+    /// NULL.
+    Null,
+    /// The result of a scalar function of the column's value and type,
+    /// such as `redact` or `mask_last4`.
+    Function(Ident),
+}
+
+impl Mask {
+    /// Return the mask's name in policies: `null` or the function's name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Null => "null",
+            Self::Function(f) => f.as_str(),
+        }
+    }
+
+    /// Return the mask named `name` in policies.
+    #[must_use]
+    pub fn named(name: &str) -> Self {
+        if name == "null" {
+            Self::Null
+        } else {
+            Self::Function(name.into())
+        }
+    }
 }
 
 impl Policy {

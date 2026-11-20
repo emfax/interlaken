@@ -31,7 +31,13 @@ fn s(scalar: ScalarType) -> DataType {
 ///
 /// Scalar functions: `lower`, `upper`, `length`, `substr`, `abs`, `now`,
 /// `random`, `gen_random_uuid`, and `assert_present` (its argument, or an
-/// error if it is NULL; security lowering uses it for absent attributes). Aggregates: `count` (with no argument
+/// error if it is NULL; security lowering uses it for absent attributes).
+/// Masking (ADR-0032): `redact(text)` (always `****`), `mask_last4(text)`
+/// (every character but the last four replaced by `*`), and
+/// `policy_mask(visible, value, masked)` (`value` where `visible` is true,
+/// else `masked`), which security lowering uses for masked columns; it is
+/// volatile so the optimizer never moves a mask's condition, and `EXPLAIN`
+/// hides it. Aggregates: `count` (with no argument
 /// for `count(*)`, or one argument of any scalar type), `sum`, `avg`,
 /// `min`, `max`, `bool_and` and `bool_or`. No built-in function is
 /// leakproof yet: each needs an audit first (ADR-0011).
@@ -187,6 +193,35 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             vec![s(t)],
             s(t).not_null(),
             pure(false, false),
+        );
+    }
+    // Added in F2 (ADR-0032).
+    add(
+        "redact",
+        scalar,
+        vec![s(S::Text)],
+        text(),
+        pure(true, false),
+    );
+    add(
+        "mask_last4",
+        scalar,
+        vec![s(S::Text)],
+        text(),
+        pure(true, false),
+    );
+    let mask = FunctionProperties {
+        volatility: Volatility::Volatile,
+        deterministic: true,
+        ..pure(false, false)
+    };
+    for t in ScalarType::ALL {
+        add(
+            "policy_mask",
+            scalar,
+            vec![s(S::Bool), s(t), s(t)],
+            s(t).nullable(),
+            mask.clone(),
         );
     }
     out

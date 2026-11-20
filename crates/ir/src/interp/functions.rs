@@ -29,6 +29,28 @@ pub fn aggregate_values(
     Interp::aggregate(def, rows, distinct)
 }
 
+/// What `redact` returns.
+pub const REDACTED: &str = "****";
+
+/// Replace every character of `text` but the last four with `*` (`mask_last4`).
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_ir::interp::mask_last4;
+///
+/// assert_eq!(mask_last4("4111222233334444"), "************4444");
+/// assert_eq!(mask_last4("abc"), "abc");
+/// ```
+#[must_use]
+pub fn mask_last4(text: &str) -> String {
+    let n = text.chars().count();
+    text.chars()
+        .enumerate()
+        .map(|(i, c)| if i + 4 < n { '*' } else { c })
+        .collect()
+}
+
 impl Interp<'_> {
     /// Call the scalar function `def` on non-NULL (if strict) arguments.
     pub(crate) fn call(&mut self, def: &FunctionDef, args: Vec<Datum>) -> Result<Datum, EvalError> {
@@ -63,6 +85,10 @@ impl Interp<'_> {
                 scalar_type_of(d).expect("integer"),
             )?,
             ("now", []) => Datum::Timestamptz(self.options.now),
+            ("redact", [Datum::Text(_)]) => Datum::Text(REDACTED.into()),
+            ("mask_last4", [Datum::Text(t)]) => Datum::Text(mask_last4(t)),
+            ("policy_mask", [Datum::Bool(true), value, _]) => value.clone(),
+            ("policy_mask", [_, _, masked]) => masked.clone(),
             ("assert_present", [Datum::Null]) => return Err(EvalError::Absent),
             ("assert_present", [v]) => v.clone(),
             ("random", []) => {

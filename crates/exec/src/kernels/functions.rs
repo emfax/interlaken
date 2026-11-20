@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow_array::types::Float64Type;
 use arrow_array::{Array, ArrayRef, FixedSizeBinaryArray, PrimitiveArray};
 use interlaken_ir::DataType;
-use interlaken_ir::interp::EvalError;
+use interlaken_ir::interp::{EvalError, REDACTED, mask_last4};
 
 use super::compile::{Builtin, Node};
 use super::eval::State;
@@ -32,6 +32,8 @@ pub(crate) fn call(
         (Builtin::Length, [a]) => strings::length(a),
         (Builtin::Substr, [t, s, l]) => strings::substr(t, s, l),
         (Builtin::Abs, [a]) => arith::abs(a),
+        (Builtin::Redact, [a]) => Ok(strings::map_text(a, |_| REDACTED.to_owned())),
+        (Builtin::MaskLast4, [a]) => Ok(strings::map_text(a, mask_last4)),
         (Builtin::AssertPresent, [a]) => {
             if a.null_count() > 0 {
                 return Err(EvalError::Absent.into());

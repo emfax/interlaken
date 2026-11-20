@@ -248,6 +248,8 @@ pub struct Dml {
     pub returning: Vec<Expr>,
     /// The target row's columns as `RETURNING` sees them.
     pub target: Layout,
+    /// For an edges table, the closure tables kept up to date (ADR-0017).
+    pub closure: Option<Arc<crate::closure::ClosurePlan>>,
 }
 
 impl Op {
@@ -816,6 +818,7 @@ impl Planner<'_> {
                 ));
             }
         };
+        let closure = crate::closure::guard_dml(self.catalog, &table)?;
         let mut input = self.build(input)?;
         name_write_checks(&mut input, table.name.last().as_str());
         Ok(Dml {
@@ -823,6 +826,7 @@ impl Planner<'_> {
             returning: returning.iter().map(|e| e.expr.clone()).collect(),
             target: target_layout,
             table,
+            closure,
         })
     }
 
@@ -1164,6 +1168,7 @@ pub fn plan_with(
         options,
     };
     let mut root = planner.build(&plan.root)?;
+    crate::closure::check_single_maintainer(&root)?;
     number(&mut root, &mut 0);
     Ok(root)
 }

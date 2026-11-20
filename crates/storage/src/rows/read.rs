@@ -420,3 +420,31 @@ pub fn register_row_dependency(txn: &Txn, table: &TableDef, pk: &[Datum]) -> Res
     txn.register_dependency(super::keys::pk_key(table, pk)?);
     Ok(())
 }
+
+/// Register a dependency on every entry a scan with leading values `prefix` covers.
+///
+/// With `index`, the range is that index's entries whose leading indexed
+/// values are `prefix`; without, it is the table rows whose leading primary
+/// key values are. Like [`register_row_dependency`], the commit then fails
+/// at every isolation level if a transaction that committed after the
+/// snapshot wrote in that range, including a row inserted into it. The
+/// executor uses this for the closure rows it reads to maintain a
+/// hierarchy, so concurrent membership changes can't leave it inconsistent.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`](crate::Error::Encode) if the prefix does not
+/// encode, or a catalog error if it is longer than the index.
+pub fn register_scan_dependency(
+    txn: &Txn,
+    table: &TableDef,
+    index: Option<&IndexDef>,
+    prefix: &[Datum],
+) -> Result<()> {
+    let key = match index {
+        Some(index) => index_values_prefix(table, index, prefix)?,
+        None => super::keys::pk_key(table, prefix)?,
+    };
+    txn.register_dependency_range(KeyRange::prefix(&key));
+    Ok(())
+}

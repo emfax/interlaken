@@ -22,6 +22,7 @@
 //! and adds per-operator metrics.
 
 mod access;
+mod closure;
 mod columnar;
 mod error;
 mod exec;
@@ -35,6 +36,7 @@ mod rowwise;
 mod transaction;
 
 pub use access::{Access, KeyBounds};
+pub use closure::ClosurePlan;
 pub use columnar::{arrow_type, build_array, datum_at, field};
 pub use error::ExecError;
 pub use exec::{BatchStream, ExecContext, OuterColumn, collect, execute};

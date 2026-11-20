@@ -7,8 +7,9 @@
 //!    resolved (pinned to a schema version);
 //! 3. verify it as untrusted client IR, which rejects a plan pinned to an
 //!    older schema version and any privileged operator;
-//! 4. load the principal's entity data (ADR-0017) and the active policies
-//!    through the transaction;
+//! 4. load the active policies, then the principal's entity data and that
+//!    of every other entity the policies read (ADR-0017, ADR-0032), through
+//!    the transaction;
 //! 5. secure it with the policies' provider, its residuals cached
 //!    (ADR-0019);
 //! 6. optimize it;
@@ -30,7 +31,7 @@ use interlaken_ir::{RelSchema, Type};
 use interlaken_storage::Txn;
 
 use super::engine::Inner;
-use crate::authz::load_principal;
+use crate::authz::load_entities;
 use crate::error::EngineError;
 use crate::policy::{load_policies, policy_settings};
 use crate::privileges::Privileges;
@@ -86,7 +87,6 @@ pub(crate) fn pin(plan: &Plan, catalog: &dyn Catalog) -> Result<(Plan, RelSchema
 pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, EngineError> {
     let catalog = step.catalog.as_ref();
     let (resolved, schema) = pin(plan, catalog)?;
-    let entities = load_principal(step.txn, catalog, &step.context.principal).await?;
     let policies = load_policies(step.txn).await?;
     let settings = policy_settings(step.txn).await?;
     let provider = step.engine.provider(
@@ -95,6 +95,13 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
         &settings.app_context,
         step.use_caches,
     )?;
+    let entities = load_entities(
+        step.txn,
+        catalog,
+        &step.context.principal,
+        &provider.entity_paths(),
+    )
+    .await?;
     let secured = if step.use_caches {
         let cached = step
             .engine

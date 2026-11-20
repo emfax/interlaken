@@ -2,9 +2,10 @@
 //!
 //! ```text
 //! policies  (policies POLICY...)
-//! POLICY    (permit (ACTION...) TYPE EXPR [:column NAME])
-//!           | (forbid (ACTION...) TYPE EXPR [:column NAME])
-//!           ; with :column, a column-level read policy for that attribute
+//! POLICY    (permit (ACTION...) TYPE EXPR [:column NAME [:mask MASK]])
+//!           | (forbid (ACTION...) TYPE EXPR [:column NAME [:mask MASK]])
+//!           ; with :column, a column-level read policy for that attribute;
+//!           ; with :mask, rows it denies show MASK: null or a function name
 //! ACTION    read | insert | update | delete
 //! EXPR      true | false | 42 | "text" | (entity TYPE KEY) | (set EXPR...)
 //!           (record (NAME EXPR)...) | principal | resource | context
@@ -17,7 +18,7 @@
 //! ```
 
 use super::expr::{
-    Action, ArithOp, CmpOp, Effect, EntityKey, EntityUid, Policy, SecExpr, SecValue, bx,
+    Action, ArithOp, CmpOp, Effect, EntityKey, EntityUid, Mask, Policy, SecExpr, SecValue, bx,
 };
 use crate::text::ParseError;
 use crate::text::pretty::render;
@@ -255,6 +256,13 @@ fn policy(sexp: &Sexp) -> Result<Policy> {
     let resource_type = ident(form.next("the resource type")?)?;
     let condition = expr(form.next("the condition")?)?;
     let column = form.keyword("column").map(ident).transpose()?;
+    let mask = form
+        .keyword("mask")
+        .map(|m| ident(m).map(|name| Mask::named(name.as_str())))
+        .transpose()?;
+    if mask.is_some() && column.is_none() {
+        return Err(error(sexp, ":mask needs :column"));
+    }
     form.finish()?;
     Ok(Policy {
         effect,
@@ -262,6 +270,7 @@ fn policy(sexp: &Sexp) -> Result<Policy> {
         resource_type,
         condition,
         column,
+        mask,
     })
 }
 

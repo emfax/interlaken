@@ -47,6 +47,15 @@ pub enum ExecError {
     /// cancelled; its writes were rolled back (SQLSTATE `57014`).
     #[error("canceling statement due to statement timeout")]
     QueryCanceled,
+    /// A membership edge written by DML would make its hierarchy cyclic
+    /// (SQLSTATE `23514`, ADR-0017).
+    #[error("membership of {member} in {group} would create a cycle")]
+    MembershipCycle {
+        /// The member entity.
+        member: String,
+        /// The group entity.
+        group: String,
+    },
 }
 
 impl ExecError {
@@ -73,6 +82,7 @@ impl ExecError {
             Self::PermissionDenied { .. } => "42501",
             Self::MemoryExceeded { .. } => "53200",
             Self::QueryCanceled => "57014",
+            Self::MembershipCycle { .. } => "23514",
         }
     }
 }

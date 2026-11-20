@@ -17,7 +17,12 @@ use super::security::{DOCS, Data, FOLDERS, GROUPS, USERS};
 /// Generate random entity data.
 pub fn data() -> impl Strategy<Value = Data> {
     let dept = proptest::option::of(prop_oneof![Just("eng".to_owned()), Just("ops".to_owned())]);
-    let user = (dept, proptest::option::of(0i64..5));
+    // Managers range over one more ID than there are users at most, so some are missing.
+    let user = (
+        dept,
+        proptest::option::of(0i64..5),
+        proptest::option::weighted(0.8, 1i64..6),
+    );
     let doc = (
         1i64..6,
         proptest::option::of(1i64..5),
@@ -40,7 +45,9 @@ pub fn data() -> impl Strategy<Value = Data> {
                 users: users
                     .into_iter()
                     .enumerate()
-                    .map(|(i, (dept, level))| (i as i64 + 1, format!("u{}", i + 1), dept, level))
+                    .map(|(i, (dept, level, manager))| {
+                        (i as i64 + 1, format!("u{}", i + 1), dept, level, manager)
+                    })
                     .collect(),
                 groups: vec![1, 2, 3],
                 // Folder f's parent, if any, has a smaller ID, so the hierarchy is acyclic.
@@ -182,6 +189,19 @@ pub fn doc_atom() -> BoxedStrategy<SecExpr> {
             path(R, &["owner", "dept"]),
             path(P, &["dept"])
         )),
+        // Entities beyond the principal (ADR-0032).
+        Just(cmp(CmpOp::Eq, path(R, &["owner"]), path(P, &["manager"]))),
+        Just(cmp(
+            CmpOp::Eq,
+            path(R, &["owner", "dept"]),
+            path(P, &["manager", "dept"])
+        )),
+        (0i64..5).prop_map(|k| cmp(
+            CmpOp::Lt,
+            path(P, &["manager", "manager", "level"]),
+            long(k)
+        )),
+        (1i64..4).prop_map(|g| SecExpr::In(bx(path(P, &["manager"])), bx(entity("Group", g)))),
         Just(cmp(
             CmpOp::Eq,
             path(SecExpr::Context, &["app", "tenant"]),
@@ -210,6 +230,13 @@ pub fn user_atom() -> BoxedStrategy<SecExpr> {
         (1i64..4).prop_map(|g| SecExpr::In(bx(R), bx(entity("Group", g)))),
         (0i64..5).prop_map(|k| cmp(CmpOp::Lt, path(R, &["level"]), long(k))),
         Just(SecExpr::Has(bx(R), "dept".into())),
+        Just(cmp(CmpOp::Eq, path(R, &["manager"]), P)),
+        Just(cmp(
+            CmpOp::Eq,
+            path(R, &["dept"]),
+            path(P, &["manager", "dept"])
+        )),
+        Just(SecExpr::Has(bx(path(P, &["manager"])), "level".into())),
         Just(SecExpr::Lit(SecValue::Bool(true))),
     ]
     .boxed()
@@ -244,6 +271,7 @@ pub fn policies_for(
             resource_type: resource_type.into(),
             condition,
             column: None,
+            mask: None,
         })
     };
     (

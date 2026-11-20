@@ -9,6 +9,8 @@
 //! - a fingerprint of the principal's attributes and memberships, when the
 //!   policies read them, so a change to the principal's data (a revoked
 //!   role) misses;
+//! - a fingerprint of every other entity the policies read
+//!   (`principal.manager`, entity literals), so a change to one misses;
 //! - the values of the context fields the policies read.
 //!
 //! Residuals that depend on fast-changing context (`time`, `ip`) are not
@@ -22,10 +24,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::error::SecurityError;
 use super::eval::EntityStore;
+use super::expr::Policy;
 use super::expr::{Action, EntityUid, SecValue};
+use super::paths::EntityPath;
 use super::provider::{
-    CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request, Residual,
-    SecurityContext,
+    ColumnAccess, CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request,
+    Residual, SecurityContext,
 };
 use crate::names::Ident;
 
@@ -45,6 +49,8 @@ struct Key {
     policy_version: i64,
     /// The principal's attributes and ancestors, rendered, if the policies read them.
     principal_data: Option<String>,
+    /// The attributes and ancestors of the other entities the policies read, rendered.
+    entities: String,
     /// The values of the context fields the policies read, rendered.
     context: Vec<(String, String)>,
 }
@@ -149,6 +155,16 @@ impl CachedProvider<'_> {
             ancestors.sort();
             format!("{:?} {ancestors:?}", entities.attributes(principal))
         });
+        let mut entity_data = String::new();
+        for path in self.inner.entity_paths() {
+            let uid = path.resolve(principal, entities);
+            let data = uid.as_ref().map(|uid| {
+                let mut ancestors = entities.ancestors(uid);
+                ancestors.sort();
+                (entities.attributes(uid), ancestors)
+            });
+            entity_data.push_str(&format!("{path:?}={uid:?}:{data:?};"));
+        }
         let record = req.context.record();
         let context = dependencies
             .context_fields
@@ -161,6 +177,7 @@ impl CachedProvider<'_> {
             resource_type: req.resource_type.clone(),
             policy_version: self.policy_version,
             principal_data,
+            entities: entity_data,
             context,
         })
     }
@@ -220,5 +237,27 @@ impl PolicyProvider for CachedProvider<'_> {
     ) -> Result<Decision, SecurityError> {
         self.inner
             .column_access(context, resource_type, column, entities)
+    }
+
+    /// Pass through: masks are decided per query.
+    fn column_mask(
+        &self,
+        context: &SecurityContext,
+        resource_type: &Ident,
+        column: &Ident,
+        entities: &dyn EntityStore,
+    ) -> Result<ColumnAccess, SecurityError> {
+        self.inner
+            .column_mask(context, resource_type, column, entities)
+    }
+
+    /// Pass through.
+    fn entity_paths(&self) -> Vec<EntityPath> {
+        self.inner.entity_paths()
+    }
+
+    /// Pass through.
+    fn policies(&self) -> Option<&[Policy]> {
+        self.inner.policies()
     }
 }

@@ -21,6 +21,7 @@ mod expr;
 mod impact;
 mod lower;
 mod marker;
+mod paths;
 mod plan;
 mod provider;
 mod store;
@@ -31,13 +32,18 @@ pub use cedar::{CedarProvider, cedar_schema};
 pub use closure::{Closure, CycleError};
 pub use error::SecurityError;
 pub use eval::{EntityStore, EvalFailure, ResourceData};
-pub use expr::{Action, ArithOp, CmpOp, Effect, EntityKey, EntityUid, Policy, SecExpr, SecValue};
-pub use impact::{Change, ImpactReport, forbid_hazard, impact_analysis};
+pub use expr::{
+    Action, ArithOp, CmpOp, Effect, EntityKey, EntityUid, Mask, Policy, SecExpr, SecValue,
+};
+pub use impact::{
+    Change, ImpactOptions, ImpactReport, forbid_hazard, impact_analysis, impact_analysis_with,
+};
 pub use marker::{POLICY_ALIAS_PREFIX, is_policy_alias};
-pub use plan::secure;
+pub use paths::{EntityPath, collect_entity_paths};
+pub use plan::{POLICY_MASK, secure};
 pub use provider::{
-    CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request, Residual,
-    RlsProvider, SecurityContext, StandardContext,
+    ColumnAccess, CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request,
+    Residual, RlsProvider, SecurityContext, StandardContext,
 };
 pub use store::DatabaseEntities;
 pub use text::{parse_policies, parse_sec_expr, print_sec_expr};

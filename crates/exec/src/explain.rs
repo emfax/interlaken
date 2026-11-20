@@ -14,8 +14,11 @@
 //! one line wherever the optimizer put it beneath a policy filter or write
 //! check, and the conditions joining them are hidden. Beneath a policy
 //! filter every expression is hidden. A governed scan hides its policy
-//! conjuncts and key values, and a `WriteCheck` hides its check. The
-//! plan's shape stays visible, but its policy logic does not.
+//! conjuncts and key values, and a `WriteCheck` hides its check. A
+//! projection that masks columns (ADR-0032) hides each mask, and its input
+//! is treated like a write check's: subplans the mask's condition added
+//! are collapsed. The plan's shape stays visible, but its policy logic
+//! does not.
 
 use std::fmt::Write as _;
 use std::ops::Bound;
@@ -272,9 +275,29 @@ impl Renderer<'_> {
                 self.node(input, depth + 1, scope.max(Scope::Check));
             }
             Op::Project { input, exprs } => {
-                let text = format!("Project {}", self.shown_list(scope, exprs));
+                let masked = exprs.iter().any(is_mask);
+                let text = if hide && masked {
+                    let items: Vec<String> = exprs
+                        .iter()
+                        .map(|e| {
+                            if is_mask(e) {
+                                format!("{HIDDEN} mask")
+                            } else {
+                                self.shown(scope, e)
+                            }
+                        })
+                        .collect();
+                    format!("Project [{}]", items.join(", "))
+                } else {
+                    format!("Project {}", self.shown_list(scope, exprs))
+                };
                 self.line(node, depth, &text);
-                self.node(input, depth + 1, scope);
+                let inner = if masked {
+                    scope.max(Scope::Check)
+                } else {
+                    scope
+                };
+                self.node(input, depth + 1, inner);
             }
             Op::Limit {
                 input,
@@ -409,7 +432,7 @@ impl Renderer<'_> {
                 self.line(
                     node,
                     depth,
-                    &format!("Insert into {}", dml.table.name.last()),
+                    &format!("Insert into {}{}", dml.table.name.last(), maintains(dml)),
                 );
                 self.node(&dml.input, depth + 1, scope);
             }
@@ -430,7 +453,12 @@ impl Renderer<'_> {
                 self.line(
                     node,
                     depth,
-                    &format!("Update {} set {}", dml.table.name.last(), sets.join(", ")),
+                    &format!(
+                        "Update {} set {}{}",
+                        dml.table.name.last(),
+                        sets.join(", "),
+                        maintains(dml)
+                    ),
                 );
                 self.node(&dml.input, depth + 1, scope);
             }
@@ -438,12 +466,45 @@ impl Renderer<'_> {
                 self.line(
                     node,
                     depth,
-                    &format!("Delete from {}", dml.table.name.last()),
+                    &format!("Delete from {}{}", dml.table.name.last(), maintains(dml)),
                 );
                 self.node(&dml.input, depth + 1, scope);
             }
         }
     }
+}
+
+/// Return whether `e` contains a column mask security lowering added (ADR-0032).
+fn is_mask(e: &Expr) -> bool {
+    match e {
+        Expr::Call { func, args } => {
+            /// The IDs of the `policy_mask` overloads, which built-ins fix.
+            static MASKS: std::sync::OnceLock<Vec<interlaken_ir::FunctionId>> =
+                std::sync::OnceLock::new();
+            let masks = MASKS.get_or_init(|| {
+                interlaken_ir::catalog::builtin_functions()
+                    .into_iter()
+                    .filter(|f| f.name.to_string() == interlaken_ir::security::POLICY_MASK)
+                    .map(|f| f.id)
+                    .collect()
+            });
+            let named = match func {
+                interlaken_ir::FunctionRef::Named(name) => {
+                    name.to_string() == interlaken_ir::security::POLICY_MASK
+                }
+                interlaken_ir::FunctionRef::Id(id) => masks.contains(id),
+            };
+            named || args.iter().any(is_mask)
+        }
+        _ => false,
+    }
+}
+
+/// Render the closure tables a DML operator maintains, if any (ADR-0017).
+fn maintains(dml: &crate::physical::Dml) -> String {
+    dml.closure.as_ref().map_or_else(String::new, |plan| {
+        format!(" maintaining closures: {}", plan.table_names().join(", "))
+    })
 }
 
 /// Where in the plan an operator sits, for hiding policy logic.

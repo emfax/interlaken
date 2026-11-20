@@ -8,7 +8,7 @@ use interlaken_engine::{Engine, EngineError, EngineOptions, Session};
 use interlaken_exec::to_stored;
 use interlaken_ir::catalog::{Catalog, InMemoryCatalog};
 use interlaken_ir::interp::Datum;
-use interlaken_ir::security::{EntityUid, SecurityContext};
+use interlaken_ir::security::{Effect, EntityUid, Policy, SecurityContext, print_sec_expr};
 use interlaken_storage::rows::{self, RowScan};
 use interlaken_storage::{Durability, Storage, StorageOptions, TxnOptions, catalog};
 
@@ -189,4 +189,33 @@ pub async fn activate_rls(admin: &mut Session, policies: &str) -> Result<i64, En
     let id = admin.submit_policies(&document, "").await?;
     admin.verify_policies(id).await?;
     admin.activate_policies(id, true).await
+}
+
+/// Render policies in the RLS text form, with their columns and masks.
+pub fn rls_text(policies: &[Policy]) -> String {
+    let items: Vec<String> = policies
+        .iter()
+        .map(|p| {
+            let effect = match p.effect {
+                Effect::Permit => "permit",
+                Effect::Forbid => "forbid",
+            };
+            let actions: Vec<&str> = p.actions.iter().map(|a| a.name()).collect();
+            let column = p
+                .column
+                .as_ref()
+                .map_or_else(String::new, |c| format!(" :column {c}"));
+            let mask = p
+                .mask
+                .as_ref()
+                .map_or_else(String::new, |m| format!(" :mask {}", m.name()));
+            format!(
+                "({effect} ({}) {} {}{column}{mask})",
+                actions.join(" "),
+                p.resource_type,
+                print_sec_expr(&p.condition)
+            )
+        })
+        .collect();
+    format!("(policies {})", items.join(" "))
 }
