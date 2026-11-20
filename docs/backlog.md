@@ -101,13 +101,6 @@ Entry format:
 - **Size:** About 1–2 days, mostly in the Cedar schema and provider.
 - **Status:** open
 
-### last-admin-guard: Refuse to revoke the last administrator
-- **Origin:** writing the book's privileges chapter
-- **Why:** `Session::revoke` lets an administrator revoke `admin` from every principal, themselves included. Nobody could then run DDL, change policies or grant privileges, and there is no recovery short of editing storage.
-- **When:** Before production use.
-- **Size:** A few hours: count remaining admins in the revoking transaction (registering the read so a concurrent revoke conflicts) and fail with `42501` or `55000`.
-- **Status:** open
-
 ## Executor and IR open questions
 
 ### wasm-wit-interface: Define the WIT interface for WASM UDFs
@@ -118,6 +111,13 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### last-admin-guard: Refuse to revoke the last administrator
+- **Origin:** writing the book's privileges chapter
+- **Why:** `Session::revoke` lets an administrator revoke `admin` from every principal, themselves included. Nobody could then run DDL, change policies or grant privileges, and there is no recovery short of editing storage.
+- **When:** Before production use.
+- **Size:** A few hours: count remaining admins in the revoking transaction (registering the read so a concurrent revoke conflicts) and fail with `42501` or `55000`.
+- **Status:** done (revoking `admin` counts the remaining grants and fails with `55000` if none remain; it rewrites each remaining `admin` grant so concurrent revocations conflict on a key at every isolation level, not only under SERIALIZABLE)
 
 ### parameter-validation: Check parameter values against their declarations
 - **Origin:** writing the book's parameters chapter

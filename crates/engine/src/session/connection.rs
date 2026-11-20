@@ -842,7 +842,8 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// As for [`Session::grant`].
+    /// As for [`Session::grant`], or [`EngineError::LastAdmin`] if this
+    /// would revoke `admin` from the last principal holding it.
     pub async fn revoke(
         &mut self,
         principal: &EntityUid,

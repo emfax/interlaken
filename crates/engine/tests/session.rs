@@ -818,3 +818,56 @@ async fn parameters_are_checked() {
     assert!(root.is_aborted().await.unwrap());
     root.rollback().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert `admin` can't be revoked from the last principal holding it,
+/// alone or by concurrent revocations at any isolation level, and that a
+/// refused revocation changes nothing.
+async fn the_last_admin_cant_be_revoked() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = session(&engine, admin());
+
+    let err = root.revoke(&admin(), Privilege::Admin).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "55000");
+    assert!(err.to_string().contains("last administrator"), "{err}");
+    assert!(root.privileges().await.unwrap().admin);
+
+    // With a second administrator, either may go, but not both.
+    root.grant(&user(1), Privilege::Admin).await.unwrap();
+    root.grant(&user(1), Privilege::ReadPolicies).await.unwrap();
+    assert!(root.revoke(&admin(), Privilege::Admin).await.unwrap());
+    let mut alice = session(&engine, user(1));
+    assert_eq!(
+        state(alice.revoke(&user(1), Privilege::Admin).await),
+        "55000"
+    );
+    // Revoking another privilege, or admin from a non-holder, is unaffected.
+    assert!(
+        alice
+            .revoke(&user(1), Privilege::ReadPolicies)
+            .await
+            .unwrap()
+    );
+    assert!(!alice.revoke(&admin(), Privilege::Admin).await.unwrap());
+    alice.grant(&admin(), Privilege::Admin).await.unwrap();
+
+    // Two administrators revoking each other concurrently: each sees the
+    // other still holding admin, but only one commit may succeed, even
+    // under snapshot isolation, which doesn't check what was read.
+    for isolation in [
+        Isolation::ReadCommitted,
+        Isolation::RepeatableRead,
+        Isolation::Serializable,
+    ] {
+        let mut root = session(&engine, admin());
+        root.begin(TxnOptions::new(isolation)).await.unwrap();
+        alice.begin(TxnOptions::new(isolation)).await.unwrap();
+        assert!(root.revoke(&user(1), Privilege::Admin).await.unwrap());
+        assert!(alice.revoke(&admin(), Privilege::Admin).await.unwrap());
+        root.commit().await.unwrap();
+        assert_eq!(state(alice.commit().await), "40001", "{isolation:?}");
+        assert!(root.privileges().await.unwrap().admin, "{isolation:?}");
+        root.grant(&user(1), Privilege::Admin).await.unwrap();
+    }
+}

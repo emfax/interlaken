@@ -77,6 +77,9 @@ pub enum EngineError {
     /// The parameter values don't fit the parameters the statement declares.
     #[error(transparent)]
     Parameter(#[from] interlaken_ir::interp::ParamError),
+    /// Revoking `admin` would leave no administrator.
+    #[error("{0} is the last administrator; grant admin to another principal before revoking it")]
+    LastAdmin(String),
     /// A DDL request is invalid.
     #[error("invalid definition: {0}")]
     InvalidDefinition(String),
@@ -144,7 +147,10 @@ impl EngineError {
             },
             Self::TransactionInProgress => "25001",
             Self::NoTransaction => "25P01",
-            Self::ProposalNotFound(_) | Self::NotPending(_) | Self::Stale { .. } => "55000",
+            Self::ProposalNotFound(_)
+            | Self::NotPending(_)
+            | Self::Stale { .. }
+            | Self::LastAdmin(_) => "55000",
             Self::NotVerified(_)
             | Self::AwaitingProof(_)
             | Self::GateFailed { .. }

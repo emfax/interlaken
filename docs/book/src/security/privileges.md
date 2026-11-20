@@ -42,7 +42,7 @@ Privileges are granted to principals by entity UID, and the principal needn't ex
 
 `revoke` returns whether the principal held the privilege. Granting a privilege twice is harmless.
 
-**Don't revoke the last administrator.** Nothing prevents an administrator from revoking `admin` from every principal, themselves included. No one could then run DDL, change policies or grant privileges again (backlog `last-admin-guard`).
+**The last administrator stays.** Revoking `admin` from the only principal holding it fails with `55000`, since no one could then run DDL, change policies or grant privileges again. Grant `admin` to another principal first. Two administrators revoking each other in concurrent transactions can't get around this: one of the commits fails with `40001`, at every isolation level.
 
 ## Leakproof functions
 

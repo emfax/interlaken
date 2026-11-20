@@ -32,7 +32,6 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 ### Security
 
 - **Undeclared principal types:** Cedar policies can only name declared entity types, so a principal like `Admin::"root"` can't be granted access in Cedar, and its queries on governed tables fail with `42501` under the default empty Cedar set (backlog `undeclared-principal-types`). See [Governed tables](../security/model.md#governed-tables).
-- **Revoking the last administrator** isn't prevented, and can't be undone (backlog `last-admin-guard`). See [Privileges](../security/privileges.md).
 - **Privileges are coarse:** `admin` covers all DDL and policy changes; there are no per-table or delegated privileges.
 - **Masks on array columns** aren't supported (`42501`).
 - **Impact analysis samples** above a million decisions, and the threshold isn't configurable (see [Changing policies](../security/proposals.md)).

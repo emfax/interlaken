@@ -190,7 +190,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "55000",
         "object_not_in_prerequisite_state",
-        "A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation.",
+        "A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; or a revocation would remove the last administrator.",
     ),
     state(
         "57014",

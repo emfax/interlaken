@@ -118,9 +118,17 @@ pub async fn grant(
 
 /// Revoke `privilege` from `principal`; return whether it was held.
 ///
+/// Revoking `admin` from the last principal holding it is refused: no one
+/// could then change the catalog, the policies or the privileges again.
+/// The check reads every remaining `admin` grant and rewrites each one, so
+/// two concurrent revocations that would together remove every
+/// administrator write a key in common, and one of them fails at commit
+/// with SQLSTATE `40001` at every isolation level.
+///
 /// # Errors
 ///
-/// Returns an [`EngineError`] if storage fails.
+/// Returns [`EngineError::LastAdmin`] if `principal` is the only principal
+/// holding `admin`, or an [`EngineError`] if storage fails.
 pub async fn revoke(
     txn: &Txn,
     principal: &EntityUid,
@@ -128,10 +136,26 @@ pub async fn revoke(
 ) -> Result<bool, EngineError> {
     let table = stored(txn, PRIVILEGES).await?;
     let [ty, key] = principal_key(principal);
-    Ok(rows::delete(
+    let held = rows::delete(
         txn,
         &table,
         &[ty, key, Datum::Text(privilege.name().into())],
     )
-    .await?)
+    .await?;
+    if held && privilege == Privilege::Admin {
+        // The delete is visible to this read: it is the same statement's write.
+        txn.next_statement();
+        let admins: Vec<_> = read_all(txn, PRIVILEGES, Vec::new())
+            .await?
+            .into_iter()
+            .filter(|row| matches!(row.get(2), Some(Datum::Text(name)) if name == Privilege::Admin.name()))
+            .collect();
+        if admins.is_empty() {
+            return Err(EngineError::LastAdmin(principal.to_string()));
+        }
+        for row in admins {
+            rows::update(txn, &table, &row.clone(), row).await?;
+        }
+    }
+    Ok(held)
 }
