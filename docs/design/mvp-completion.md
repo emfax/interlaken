@@ -68,6 +68,8 @@ An ADR records the session API and the storage-backed catalog's tables.
 
 ### F3: Executor performance
 
+*Status: complete (2026-11-20), recorded in [ADR-0033](0033-executor-performance.md).*
+
 - **Benchmarks first.** A `benches/` suite for the executor:
   - scans with pushdown;
   - hash joins;

@@ -147,7 +147,7 @@ The IR proposal defines the barrier rules; the executor enforces them at run tim
 
 - Choose scan versus index scan from the predicates on indexed columns: equality on a unique index becomes `IndexLookup`; a range on an index prefix becomes `IndexScan`.
 - Push filters, projections and limits into `ScanRequest`, subject to the barrier rules.
-- Choose `HashJoin` for equi-joins with the smaller estimated side as the build side (estimates from simple heuristics until statistics exist), `NestedLoopJoin` otherwise.
+- Choose `HashJoin` for equi-joins with the smaller estimated side as the build side (estimates from simple heuristics until statistics exist), `NestedLoopJoin` otherwise. *Since F3 ([ADR-0033](0033-executor-performance.md)):* an equi-join on a key of a table becomes an `IndexLookup` join, which decides at run time between looking up a batch of left rows at a time and hashing.
 - Use `StreamAggregate` and merge-friendly plans when input order allows; otherwise hash.
 
 ## Observability
@@ -192,5 +192,5 @@ Roughly 11 weeks for one experienced engineer. It can start after storage milest
 ### Open questions
 
 - Should `Nest` produce jsonb directly or Arrow list/struct columns that the GraphQL serializer converts? jsonb is simpler; Arrow keeps types and is cheaper to serialize. *Resolved by [ADR-0012](0012-nesting-and-decorrelation-for-graphql.md): typed Arrow list-of-struct, converted to JSON by serializers.*
-- Default memory budget per query and per node for the container sizes we expect.
-- Should a hash join's build side be chosen at run time (after seeing input sizes) rather than at planning time?
+- Default memory budget per query and per node for the container sizes we expect. *Resolved in F3 ([ADR-0027](0027-query-memory-management.md) phase 2): 256 MiB per query; a node pool of a quarter of the memory left after storage's caches.*
+- Should a hash join's build side be chosen at run time (after seeing input sizes) rather than at planning time? *E3 chose plan time. F3's `IndexLookup` joins decide at run time between lookups and hashing ([ADR-0033](0033-executor-performance.md)).*

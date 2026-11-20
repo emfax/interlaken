@@ -15,7 +15,8 @@ use interlaken_ir::SetOpKind;
 use interlaken_ir::interp::RowKey;
 
 use super::distinct::distinct;
-use super::pull::{Pull, batch, collect, into_stream, row_keys, take};
+use super::pull::{Pull, batch, into_stream, row_keys, take};
+use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, execute};
 use crate::memory::{Reservation, entry_bytes};
@@ -47,8 +48,11 @@ struct Filtered {
 impl Pull for Filtered {
     /// Count the right input on the first pull, then filter one left batch per pull.
     async fn next(&mut self) -> Result<Option<RecordBatch>, ExecError> {
-        if let Some(right) = self.right.take() {
-            for b in collect(right).await? {
+        if let Some(mut right) = self.right.take() {
+            let mut yielder = Yielder::default();
+            while let Some(b) = right.next().await {
+                let b = b?;
+                yielder.tick().await;
                 for key in row_keys(b.columns(), b.num_rows())? {
                     match self.counts.get_mut(&key) {
                         Some(n) => *n += 1,

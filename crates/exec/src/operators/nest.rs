@@ -19,6 +19,7 @@ use interlaken_ir::Expr;
 use interlaken_ir::interp::RowKey;
 
 use super::pull::{Pull, batch, chunks, into_stream, row_keys};
+use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
@@ -59,8 +60,10 @@ impl NestState {
         let mut groups: HashMap<RowKey, usize> = HashMap::new();
         let mut members: Vec<Vec<u32>> = Vec::new();
         let mut seen = 0u32;
+        let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
             let b = b?;
+            yielder.tick().await;
             let n = b.num_rows();
             let keys = self
                 .keys

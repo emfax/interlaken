@@ -179,14 +179,14 @@ fn definition_key(table: TableId) -> Key {
 ///
 /// Every DDL change to a table rewrites its `sys_tables` row, so a
 /// transaction that wrote rows under an old definition fails validation.
-fn register_definition(txn: &Txn, table: &TableDef) {
+pub(super) fn register_definition(txn: &Txn, table: &TableDef) {
     if table.id().get() >= TableId::FIRST_USER {
         txn.register_dependency(definition_key(table.id()));
     }
 }
 
 /// Validate `row` against `table` and encode it.
-fn encode_checked(table: &TableDef, row: &[Datum]) -> Result<Bytes> {
+pub(super) fn encode_checked(table: &TableDef, row: &[Datum]) -> Result<Bytes> {
     let encoded = encode_row(table.schema_version(), &table.types(), row)?;
     if let Some(column) = table
         .columns()
@@ -205,7 +205,10 @@ fn encode_checked(table: &TableDef, row: &[Datum]) -> Result<Bytes> {
 }
 
 /// Return each index's name and the entry of `row` in it.
-fn index_entries<'a>(table: &'a TableDef, row: &[Datum]) -> Result<Vec<(&'a str, IndexEntry)>> {
+pub(super) fn index_entries<'a>(
+    table: &'a TableDef,
+    row: &[Datum],
+) -> Result<Vec<(&'a str, IndexEntry)>> {
     table
         .indexes()
         .iter()
@@ -226,7 +229,7 @@ pub(crate) async fn read_latest(txn: &Txn, table: &TableDef, key: &Key) -> Resul
 }
 
 /// Construct a primary key violation for `table`.
-fn primary_key_violation(table: &TableDef) -> crate::Error {
+pub(super) fn primary_key_violation(table: &TableDef) -> crate::Error {
     ConstraintViolation::PrimaryKey {
         table: table.name().to_owned(),
     }
@@ -234,7 +237,7 @@ fn primary_key_violation(table: &TableDef) -> crate::Error {
 }
 
 /// Construct a unique violation for the index called `index`.
-fn unique_violation(index: &str) -> crate::Error {
+pub(super) fn unique_violation(index: &str) -> crate::Error {
     ConstraintViolation::Unique {
         index: index.to_owned(),
     }

@@ -85,6 +85,11 @@ The rule-based optimizer ([ADR-0014](0014-rule-based-optimizer.md)) emits logica
   - `EXPLAIN ANALYZE` is checked for exact row counts per operator, storage calls, peak memory, and loops of an apply's inner scan.
   - Planted bugs are each caught: an element dropped, NULL record fields kept, a missing empty group, reversed lists, and loops not counted.
 
+- [x] **Phase 4: Incremental aggregates and index lookup joins** - F3 ([ADR-0033](0033-executor-performance.md))
+  - *As implemented:* `Aggregate` folds `count`, `sum`, `avg`, `min`, `max`, `bool_and` and `bool_or` into fixed-size states exactly as the interpreter computes them (float sums included), keeping argument tuples only for `DISTINCT` aggregates.
+  - A join whose right input is a keyed table (under filters) becomes `IndexLookup`, which fetches the right rows a left batch at a time and becomes a hash join at run time when its left input isn't small next to the right; `EXPLAIN` shows `IndexLookup <kind> using <key> keys: ...` over both inputs.
+  - Blocking operators yield to the runtime every four input batches.
+
 ## Consequences
 
 ### Positive

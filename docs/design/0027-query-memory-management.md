@@ -51,6 +51,23 @@ Blocking operators (hash tables, sorts, aggregation state, `Nest` accumulators) 
   - `ExecContext::with_memory` and `Transaction::with_memory` set the budget and pool. No node pool exists unless one is configured. Peak memory per operator appears in `EXPLAIN ANALYZE`.
   - *Testing:* each blocking operator is checked against a 64 KiB budget over 5,000 rows. It must fail with its own name, having read less than its whole input, and leave nothing reserved. The same queries succeed at the default budget. Streaming operators and a top-N over the whole table run in budgets where a full sort fails. Two sorts that fit their own budgets fail together at the node pool, and the second succeeds once the first is cancelled. Cancelling a hash join or a sort returns its memory. A statement over its budget aborts its transaction. Planted bugs (a reservation not released, the pool ignored, a join building without reserving) are each caught.
 
+- [x] **Phase 2: Default budgets from measurements** - F3 ([ADR-0033](0033-executor-performance.md))
+  - *As implemented:* the executor benchmarks (`crates/engine/benches/executor.rs`, one million rows of eight columns) measured each blocking operator's peak reservation and the process's resident growth:
+
+    | Operator (1M rows) | Peak reserved | Resident growth |
+    | --- | --- | --- |
+    | Hash join building 1M rows | 132 MiB | 340 MiB |
+    | Hash join building 100k rows | 9.7 MiB | 6–50 MiB |
+    | Sort of 1M rows | 62 MiB | 15–240 MiB |
+    | Top-N (10 rows) | 0.1 MiB | 0 |
+    | Aggregation into 100k groups | 14 MiB | 2 MiB |
+    | Aggregation into 1,000 groups, before F3's incremental aggregates | 280 MiB | 160 MiB |
+    | The same, after | 0.7 MiB | 0 |
+    | Scalar aggregation, before / after | 226 MiB / 0 | 603 MiB / 0 |
+
+    So 256 MiB holds a sort of about four million such rows or a hash build of about two million, and every streaming or grouped query the benchmarks run. At ten million rows a full sort fails at it, cleanly, with the resident set growing 205 MiB (`crates/exec/tests/ten_million.rs`). The per-query default stays **256 MiB**.
+  - Resident memory runs ahead of reservations: up to **2.6 times** for hash tables (row keys as `Datum`s cost more than estimated), and up to about **4 times** for a sort at the moment it finishes, when its buffered batches, their concatenation and the sorted copy exist together (backlog `memory-estimates`). The recommended node pool (`EngineOptions::node_memory_limit`) is therefore **a quarter of the memory left after storage's caches**: for a 4 GiB container with 1 GiB of fjall cache, 768 MiB, which admits three concurrent queries at their full default budget. Embedded use still configures no pool by default, since the engine can't know its container.
+
 ## Consequences
 
 ### Positive
@@ -62,7 +79,7 @@ Blocking operators (hash tables, sorts, aggregation state, `Nest` accumulators) 
 
 ## Open Questions
 
-- Default per-query and per-node budgets for the container sizes we expect. E5 keeps the 256 MiB per-query default and sets no node pool unless one is configured (backlog `default-memory-budgets`).
+- None. *The default budgets were chosen in F3 (phase 2).*
 
 ## Future Work
 

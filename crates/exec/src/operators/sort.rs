@@ -2,7 +2,8 @@
 //!
 //! Rows are ordered with the interpreter's sort-key comparison, stably.
 //! With a fetch of N rows, the operator sorts and truncates to N whenever
-//! it has buffered enough, so memory stays proportional to N.
+//! it has buffered enough, so memory stays proportional to N. Reading the
+//! input yields to the runtime every few batches (`coop`).
 
 use arrow_array::{RecordBatch, UInt32Array};
 use arrow_schema::SchemaRef;
@@ -12,6 +13,7 @@ use interlaken_ir::{Expr, SortKey};
 
 use super::pull::{Pull, batch, chunks, concat, into_stream, take};
 use crate::columnar::datum_at;
+use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
@@ -70,8 +72,10 @@ impl SortState {
         let mut input = self.input.take().expect("run once");
         let mut buffered: Vec<RecordBatch> = Vec::new();
         let mut rows = 0;
+        let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
             let b = b?;
+            yielder.tick().await;
             self.memory.grow(batch_bytes(&b))?;
             rows += b.num_rows();
             buffered.push(b);

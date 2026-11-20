@@ -1,5 +1,6 @@
 //! Physical operators as pull-based streams of Arrow batches (ADR-0022).
 
+mod accumulate;
 mod aggregate;
 mod apply;
 mod distinct;
@@ -7,6 +8,7 @@ mod dml;
 mod filter;
 mod join;
 mod limit;
+mod lookup;
 mod nest;
 mod project;
 mod pull;
@@ -24,6 +26,7 @@ pub(crate) use dml::{DmlKind, dml};
 pub(crate) use filter::filter;
 pub(crate) use join::join;
 pub(crate) use limit::limit;
+pub(crate) use lookup::{LookupSpec, index_lookup};
 pub(crate) use nest::nest;
 pub(crate) use project::project;
 pub(crate) use scan::table_scan;

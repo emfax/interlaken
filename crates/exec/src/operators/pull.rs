@@ -27,11 +27,6 @@ pub(crate) fn into_stream<P: Pull>(operator: P) -> BatchStream {
     .boxed()
 }
 
-/// Read every batch of `input`.
-pub(crate) async fn collect(input: BatchStream) -> Result<Vec<RecordBatch>, ExecError> {
-    input.try_collect().await
-}
-
 /// Concatenate batches into one with `schema`.
 pub(crate) fn concat(
     schema: &SchemaRef,

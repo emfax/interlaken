@@ -25,5 +25,9 @@ smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "tokio/process"]
 proptest.workspace = true
 tempfile.workspace = true
 
+[[bench]]
+name = "executor"
+harness = false
+
 [lints]
 workspace = true

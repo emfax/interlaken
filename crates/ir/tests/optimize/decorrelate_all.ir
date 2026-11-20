@@ -1,0 +1,57 @@
+; ALL and ANY with an ordering compare the outer value with the extreme of the
+; subquery: x > ALL (s) is NOT (x <= ANY (s)), which holds when x <= max(s).
+; The subquery is correlated by an equality, so its aggregates are grouped by
+; the correlated column and joined on it.
+(plan
+  (project (get users :as u) u.name
+    (all > u.karma (project (filter (get posts :as p) (= p.author_id u.id)) p.likes))
+    (any <> u.karma (project (filter (get posts :as p) (= p.author_id u.id)) p.likes))))
+;; optimized
+(plan :schema-version 7
+  (project :bind 8
+    (join left
+      (join left
+        (get (tid 100) :as u :bind 1)
+        (aggregate :bind 9
+          (project (get (tid 101) :as p :bind 2) (as #2.3 likes) #2.1 :bind 3)
+          (keys #3.1)
+          (aggs
+            (as (agg (fid 12)) rows)
+            (as (agg (fid 16) (cast #3.0 int8)) nn)
+            (as (agg (fid 45) (cast #3.0 int8)) max)))
+        (= #9.0 #1.0))
+      (aggregate :bind 10
+        (project (get (tid 101) :as p :bind 5) (as #5.3 likes) #5.1 :bind 6)
+        (keys #6.1)
+        (aggs
+          (as (agg (fid 12)) rows)
+          (as (agg (fid 16) (cast #6.0 int8)) nn)
+          (as (agg (fid 35) (cast #6.0 int8)) min)
+          (as (agg (fid 45) (cast #6.0 int8)) max)))
+      (= #10.0 #1.0))
+    (as #1.1 name)
+    (not
+      (case
+        (when
+          (case
+            (when (or (is-null #1.4) (= (coalesce #9.2 0) 0)) (cast null bool))
+            (else (<= #1.4 #9.3)))
+          true)
+        (when
+          (>
+            (coalesce #9.1 0)
+            (case (when (is-null #1.4) 0) (else (coalesce #9.2 0))))
+          (cast null bool))
+        (else false)))
+    (case
+      (when
+        (case
+          (when (or (is-null #1.4) (= (coalesce #10.2 0) 0)) (cast null bool))
+          (else (or (<> #1.4 #10.3) (<> #1.4 #10.4))))
+        true)
+      (when
+        (>
+          (coalesce #10.1 0)
+          (case (when (is-null #1.4) 0) (else (coalesce #10.2 0))))
+        (cast null bool))
+      (else false))))

@@ -42,12 +42,17 @@ impl std::fmt::Display for MemoryScope {
     }
 }
 
-/// Add `bytes` to `used` unless the total would exceed `limit`.
-fn try_add(used: &AtomicUsize, limit: usize, bytes: usize) -> bool {
-    used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+/// Add `bytes` to `used` unless the total would exceed `limit`, raising `peak` to the new total.
+fn try_add_tracked(used: &AtomicUsize, peak: &AtomicUsize, limit: usize, bytes: usize) -> bool {
+    match used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         current.checked_add(bytes).filter(|&total| total <= limit)
-    })
-    .is_ok()
+    }) {
+        Ok(before) => {
+            peak.fetch_max(before + bytes, Ordering::AcqRel);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// A node-wide memory cap shared by every query that draws on it.
@@ -57,6 +62,8 @@ pub struct MemoryPool {
     limit: usize,
     /// Bytes currently reserved by all queries.
     used: AtomicUsize,
+    /// The most bytes reserved at once since creation or the last [`MemoryPool::reset_peak`].
+    peak: AtomicUsize,
 }
 
 impl MemoryPool {
@@ -66,6 +73,7 @@ impl MemoryPool {
         Arc::new(Self {
             limit,
             used: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
         })
     }
 
@@ -80,6 +88,18 @@ impl MemoryPool {
     pub fn limit(&self) -> usize {
         self.limit
     }
+
+    /// Return the most bytes reserved at once since the pool was created
+    /// or its peak was last reset.
+    #[must_use]
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+
+    /// Restart peak tracking from the bytes reserved now.
+    pub fn reset_peak(&self) {
+        self.peak.store(self.used(), Ordering::Release);
+    }
 }
 
 /// One query's memory budget, optionally drawing on a node-wide pool.
@@ -89,6 +109,8 @@ pub struct QueryMemory {
     limit: usize,
     /// Bytes currently reserved by this query's operators.
     used: AtomicUsize,
+    /// The most bytes this query has reserved at once.
+    peak: AtomicUsize,
     /// The node-wide pool, if any.
     pool: Option<Arc<MemoryPool>>,
 }
@@ -100,6 +122,7 @@ impl QueryMemory {
         Arc::new(Self {
             limit,
             used: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
             pool,
         })
     }
@@ -110,13 +133,19 @@ impl QueryMemory {
         self.used.load(Ordering::Acquire)
     }
 
+    /// Return the most bytes this query has reserved at once.
+    #[must_use]
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+
     /// Reserve `bytes` more, or report which limit that would cross.
     fn acquire(&self, bytes: usize) -> Result<(), MemoryScope> {
-        if !try_add(&self.used, self.limit, bytes) {
+        if !try_add_tracked(&self.used, &self.peak, self.limit, bytes) {
             return Err(MemoryScope::Query);
         }
         if let Some(pool) = &self.pool
-            && !try_add(&pool.used, pool.limit, bytes)
+            && !try_add_tracked(&pool.used, &pool.peak, pool.limit, bytes)
         {
             self.used.fetch_sub(bytes, Ordering::AcqRel);
             return Err(MemoryScope::Node);

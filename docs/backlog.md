@@ -68,13 +68,6 @@ Entry format:
 - **Size:** About 1–2 days once change notifications exist.
 - **Status:** open
 
-### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
-- **Origin:** ADR-0012 (decorrelation), I3
-- **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.
-- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when a workload shows `NOT IN` or `ALL` over large subqueries, or with the executor's join operators (E3).
-- **Size:** About 3–5 days, including differential test coverage.
-- **Status:** open
-
 ### interp-text-formats: Widen the reference interpreter's text input formats
 - **Origin:** ADR-0021 phase 3, I3
 - **Why:** Casts from text accept only ISO dates and timestamps, hex `bytea` and a basic set of booleans, and `jsonb` is stored unvalidated. Postgres accepts more. Since E2 the executor's cast kernels call the interpreter's `cast_value` for text, so widening it widens both at once.
@@ -84,35 +77,42 @@ Entry format:
 
 ## Executor
 
-### batched-index-lookup: Probe an index with a whole input batch in joins
-- **Origin:** ADR-0023 phase 2, E4
-- **Why:** An index nested loop currently runs through `Apply`, one index scan per outer row. An `IndexLookup` join operator that collects a batch's keys and calls `get_many` (or one ranged scan) per batch would cut storage calls by the batch size.
-- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when joins on indexed keys show up in profiles, or with cost-based planning.
-- **Size:** About 3–4 days.
+### batch-decoder: Decode rows into Arrow on the storage thread
+- **Origin:** ADR-0023 phase 3, F3
+- **Why:** Scans decode stored rows into `Datum`s and then Arrow on executor threads. F3's profile of a million-row scan put it at about 6% of CPU samples against 89% on storage pool threads, and pushed filters already keep rejected rows in the storage pool, so moving decode onto the storage thread would lengthen the calls scans wait on. Decoding straight from the row format into Arrow builders (skipping `Datum`) is the cheaper first step if it starts to matter.
+- **When:** When profiles show executor threads saturated by decode, for example many concurrent large scans.
+- **Size:** About 1 week for `BatchDecoder` in the storage trait; about 2 days for direct decode into builders.
 - **Status:** open
 
-### batched-row-writes: Write DML rows in batches
-- **Origin:** E4
-- **Why:** DML calls the row layer once per row, and each call makes its own constraint-check reads. A batch API in the row layer could probe all keys of a batch in one `get_many` and buffer its writes together.
-- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when bulk inserts or large updates matter.
-- **Size:** About 3 days, mostly in the storage row layer.
+### slice-memory-accounting: Count sliced batches by their own rows
+- **Origin:** F3
+- **Why:** Sort and aggregation outputs are split into 1,024-row slices of one buffer, and `RecordBatch::get_array_memory_size` reports the whole buffer for each slice. An operator that buffers such slices (a sort over a sort, a hash build over a sort) overcounts by up to the number of slices and can fail its budget far too early.
+- **When:** When plans buffer the output of another blocking operator in practice, or before spilling.
+- **Size:** About 1 day: account sliced bytes, or compact slices when buffering.
 - **Status:** open
 
-### incremental-aggregates: Accumulate sum, min, max and bool aggregates incrementally
-- **Origin:** E3 (ADR-0028 phase 1)
-- **Why:** Aggregates other than plain `count` keep every argument tuple until the group finishes, so memory grows with the input. Exact incremental accumulators (integer sums in `i128`, min and max) would make it proportional to the number of groups; float sums need care to stay identical to the interpreter.
-- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when large groups show up. Since E5, kept argument tuples count against the query's memory budget, so large groups fail cleanly rather than exhaust the node.
-- **Size:** About 2 days.
+### memory-estimates: Make memory reservations match the heap
+- **Origin:** F3 benchmarks
+- **Why:** Hash joins, aggregations and `Distinct` estimate entries from `Datum` sizes plus a word or two; the benchmarks show resident memory up to 2.6 times the reservation (a million-row hash build reserved 132 MiB and grew the heap by 340 MiB). A finishing sort holds its buffered batches, their concatenation and the sorted copy at once but reserves only one of them (62 MiB reserved, up to 240 MiB resident). Budgets therefore cap less than they say, and the node pool recommendation has to allow for it.
+- **When:** Before production deployment with a tight container limit.
+- **Size:** About 2 days, measuring with a counting allocator in tests.
+- **Status:** open
+
+### sort-yields: Let a large in-memory sort yield while sorting
+- **Origin:** F3 (cooperative scheduling)
+- **Why:** Blocking operators yield between input batches, but the final sort of a large buffered input is one call; at a few million rows it holds its thread for a second or more.
+- **When:** When large sorts share threads with latency-sensitive queries.
+- **Size:** About 2 days: sort runs a chunk at a time and merge them, yielding between chunks.
+- **Status:** open
+
+### engine-streaming-results: Stream query results through the session
+- **Origin:** F3 (10-million-row criterion)
+- **Why:** The executor streams, but `Session::query` collects every batch into a `QueryResult`, so a client reading 10 million rows through the engine holds them all. The 10-million-row test runs at the executor level for that reason.
+- **When:** With the SQL front end's wire protocol, which streams rows to clients.
+- **Size:** About 2 days: a result stream that keeps the statement's transaction and timeout.
 - **Status:** open
 
 ## Executor and IR open questions
-
-### default-memory-budgets: Choose default per-query and per-node memory budgets
-- **Origin:** ADR-0027 open questions, `executor-design.md`
-- **Why:** Queries that exceed the budget fail rather than spill, so the defaults decide which real queries succeed. They need numbers for the container sizes we expect.
-- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: before production deployment, after measuring operators on realistic data. E5 kept the 256 MiB per-query default and configures no node pool unless asked (ADR-0027).
-- **Size:** About 1 day of measurement, plus an ADR update.
-- **Status:** open
 
 ### wasm-wit-interface: Define the WIT interface for WASM UDFs
 - **Origin:** ADR-0029 open questions
@@ -199,3 +199,38 @@ Entry format:
 - **When:** During executor milestone E3.
 - **Size:** A decision during E3.
 - **Status:** done (E3): chosen at plan time, always the right input, read completely before the left side probes it. Revisit with statistics (ADR-0028 future work).
+
+### not-in-decorrelation: Decorrelate NOT IN, ALL and general ANY
+- **Origin:** ADR-0012 (decorrelation), I3
+- **Why:** These lowerings aggregate over a comparison with the outer row, so they stay as nested-loop applies. A null-aware anti join, or a rewrite that pre-aggregates the subquery's NULL count, would make `NOT IN` against a large subquery set-oriented.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when a workload shows `NOT IN` or `ALL` over large subqueries, or with the executor's join operators (E3).
+- **Size:** About 3–5 days, including differential test coverage.
+- **Status:** done (F3): `IN`, `NOT IN`, `op ANY` and `op ALL` decorrelate into left joins with aggregates of the subquery that do not read the outer row and, for `=`, its distinct non-NULL values, so `NOT IN` in a filter is a null-aware anti join; 1,000 rows `NOT IN` a 10,000-row subquery went from 11.2 s to 25 ms (ADR-0033).
+
+### batched-index-lookup: Probe an index with a whole input batch in joins
+- **Origin:** ADR-0023 phase 2, E4
+- **Why:** An index nested loop currently runs through `Apply`, one index scan per outer row. An `IndexLookup` join operator that collects a batch's keys and calls `get_many` (or one ranged scan) per batch would cut storage calls by the batch size.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when joins on indexed keys show up in profiles, or with cost-based planning.
+- **Size:** About 3–4 days.
+- **Status:** done (F3): `IndexLookup` joins fetch the right rows for a whole left batch through the primary key (`get_many`) or a key prefix or secondary index (one `scan_many`), in concurrent calls of 256 keys, and become hash joins when the left input is not small; 10,000 lookups into a million-row table went from 1.45 s to 54 ms (ADR-0033).
+
+### batched-row-writes: Write DML rows in batches
+- **Origin:** E4
+- **Why:** DML calls the row layer once per row, and each call makes its own constraint-check reads. A batch API in the row layer could probe all keys of a batch in one `get_many` and buffer its writes together.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when bulk inserts or large updates matter.
+- **Size:** About 3 days, mostly in the storage row layer.
+- **Status:** done (F3): `rows::insert_many`, `update_many` and `delete_many` read a batch's constraint-check keys in one `get_many` (two for updates) and otherwise behave exactly like single-row writes; DML makes one call per input batch. Inserting, updating and deleting a million rows went from 17.0, 21.2 and 72.6 s to 6.4, 10.3 and 29.4 s (ADR-0033).
+
+### incremental-aggregates: Accumulate sum, min, max and bool aggregates incrementally
+- **Origin:** E3 (ADR-0028 phase 1)
+- **Why:** Aggregates other than plain `count` keep every argument tuple until the group finishes, so memory grows with the input. Exact incremental accumulators (integer sums in `i128`, min and max) would make it proportional to the number of groups; float sums need care to stay identical to the interpreter.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: when large groups show up. Since E5, kept argument tuples count against the query's memory budget, so large groups fail cleanly rather than exhaust the node.
+- **Size:** About 2 days.
+- **Status:** done (F3): `count`, `sum`, `avg`, `min`, `max`, `bool_and` and `bool_or` fold rows into fixed-size states exactly as the interpreter computes them, float sums included; only `DISTINCT` aggregates keep tuples. A million-row aggregation into 1,000 groups went from 280 MiB reserved to 0.7 MiB, and from 2.2 s to 0.9 s (ADR-0033).
+
+### default-memory-budgets: Choose default per-query and per-node memory budgets
+- **Origin:** ADR-0027 open questions, `executor-design.md`
+- **Why:** Queries that exceed the budget fail rather than spill, so the defaults decide which real queries succeed. They need numbers for the container sizes we expect.
+- **When:** Milestone F3 (`design/mvp-completion.md`). Originally: before production deployment, after measuring operators on realistic data. E5 kept the 256 MiB per-query default and configures no node pool unless asked (ADR-0027).
+- **Size:** About 1 day of measurement, plus an ADR update.
+- **Status:** done (F3): the per-query default stays 256 MiB and the recommended node pool is a quarter of the memory left after storage's caches, since resident memory runs up to 2.6 times ahead of reservations for hash tables and about 4 times for a finishing sort (ADR-0027, ADR-0033).

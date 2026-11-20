@@ -6,18 +6,19 @@ use std::time::Instant;
 use arrow_array::RecordBatch;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream, TryStreamExt};
-use interlaken_ir::catalog::Catalog;
+use interlaken_ir::catalog::{Catalog, TableDef};
 use interlaken_ir::interp::{Datum, ExecOptions};
 use interlaken_ir::{BindingId, ColumnId, Expr, Type};
 use interlaken_storage::Txn;
 
 use crate::error::ExecError;
 use crate::kernels::CompiledExpr;
+use crate::lookup::scan_below_filters;
 use crate::memory::{DEFAULT_QUERY_BUDGET, QueryMemory, Reservation};
 use crate::metrics::{Metrics, NodeMetrics, metered};
 use crate::operators::{
-    DmlKind, aggregate, apply, distinct, dml, filter, join, limit, nest, project, set_op, sort,
-    table_scan, unnest, values, write_check,
+    DmlKind, LookupSpec, aggregate, apply, distinct, dml, filter, index_lookup, join, limit, nest,
+    project, set_op, sort, table_scan, unnest, values, write_check,
 };
 use crate::physical::{Op, Physical};
 
@@ -205,6 +206,37 @@ fn start(node: &Physical, ctx: &ExecContext) -> BatchStream {
             keys,
             residual,
         } => join(node, *kind, left, right, keys, residual.as_ref(), ctx).unwrap_or_else(failed),
+        Op::IndexLookup {
+            kind,
+            left,
+            right,
+            key,
+            keys,
+            prefix,
+            point,
+            residual,
+        } => match lookup_scan(right) {
+            Some((table, batch_rows)) => index_lookup(
+                node,
+                &LookupSpec {
+                    kind: *kind,
+                    left,
+                    right,
+                    table,
+                    key,
+                    keys,
+                    prefix: *prefix,
+                    point: *point,
+                    residual: residual.as_ref(),
+                    batch_rows,
+                },
+                ctx,
+            )
+            .unwrap_or_else(failed),
+            None => failed(ExecError::Unsupported(
+                "index lookup without a table scan".into(),
+            )),
+        },
         Op::Apply { kind, outer, inner } => apply(node, *kind, outer, inner, ctx),
         Op::Aggregate { input, keys, aggs } => {
             aggregate(node, input, keys, aggs, ctx).unwrap_or_else(failed)
@@ -252,6 +284,16 @@ fn start(node: &Physical, ctx: &ExecContext) -> BatchStream {
         Op::Delete { dml: d, key } => {
             dml(node, d, DmlKind::Delete(key), ctx).unwrap_or_else(failed)
         }
+    }
+}
+
+/// Return the table and batch size of the scan under an index lookup's right input.
+fn lookup_scan(right: &Physical) -> Option<(&Arc<TableDef>, usize)> {
+    match &scan_below_filters(right)?.op {
+        Op::TableScan {
+            table, batch_rows, ..
+        } => Some((table, *batch_rows)),
+        _ => None,
     }
 }
 

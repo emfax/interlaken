@@ -8,6 +8,10 @@
 //!   each become hash keys; the rest of the condition is a residual
 //!   evaluated on key-matching pairs. Without keys the join loops over all
 //!   pairs. The build side is always the right input, chosen at plan time.
+//! - A join whose right input is a table scan (under filters) and whose
+//!   keys pin a leading run of one of its keys becomes an index lookup
+//!   join, which fetches the matching right rows a batch of left rows at a
+//!   time instead of hashing the whole table ([`crate::lookup`]).
 //! - A limit directly above a sort makes the sort keep only the rows the
 //!   limit can return (top-N).
 //! - Security (ADR-0025): a chain of filters and policy filters directly
@@ -33,6 +37,7 @@ use interlaken_ir::{
 use crate::access::{Access, choose};
 use crate::columnar::field;
 use crate::error::ExecError;
+use crate::lookup::{LookupKey, choose_lookup};
 
 /// Which (binding, column) each column of a batch holds, in order.
 pub type Layout = Vec<(BindingId, ColumnId)>;
@@ -121,6 +126,30 @@ pub enum Op {
         right: Box<Physical>,
         /// Equality keys: (left expression, right expression), both leakproof.
         keys: Vec<(Expr, Expr)>,
+        /// The rest of the join condition, evaluated on key-matching pairs.
+        residual: Option<Expr>,
+    },
+    /// An index nested-loop join: each batch of left rows fetches only the
+    /// right rows its keys reach, through the right table's primary key or
+    /// a secondary index (milestone F3).
+    IndexLookup {
+        /// The join kind: inner, left, semi or anti.
+        kind: JoinKind,
+        /// The probe input.
+        left: Box<Physical>,
+        /// The right input as planned: a table scan under filters and policy
+        /// filters. The scan never runs; its conditions and the filters'
+        /// apply to the rows the lookup fetches.
+        right: Box<Physical>,
+        /// The key the right rows are reached by.
+        key: LookupKey,
+        /// Equality keys (left expression, right column), the `prefix`
+        /// pinning the key's leading columns first, in key order.
+        keys: Vec<(Expr, Expr)>,
+        /// How many leading key columns the keys pin.
+        prefix: usize,
+        /// Whether they pin a whole primary key, so each probe is one point read.
+        point: bool,
         /// The rest of the join condition, evaluated on key-matching pairs.
         residual: Option<Expr>,
     },
@@ -268,7 +297,9 @@ impl Op {
             | Self::Nest { input, .. }
             | Self::PolicyFilter { input, .. }
             | Self::WriteCheck { input, .. } => vec![input],
-            Self::Join { left, right, .. } | Self::SetOp { left, right, .. } => vec![left, right],
+            Self::Join { left, right, .. }
+            | Self::IndexLookup { left, right, .. }
+            | Self::SetOp { left, right, .. } => vec![left, right],
             Self::Apply { outer, inner, .. } => vec![outer, inner],
             Self::Insert { dml, .. } | Self::Update { dml, .. } | Self::Delete { dml, .. } => {
                 vec![&dml.input]
@@ -290,7 +321,9 @@ impl Op {
             | Self::Nest { input, .. }
             | Self::PolicyFilter { input, .. }
             | Self::WriteCheck { input, .. } => vec![input],
-            Self::Join { left, right, .. } | Self::SetOp { left, right, .. } => vec![left, right],
+            Self::Join { left, right, .. }
+            | Self::IndexLookup { left, right, .. }
+            | Self::SetOp { left, right, .. } => vec![left, right],
             Self::Apply { outer, inner, .. } => vec![outer, inner],
             Self::Insert { dml, .. } | Self::Update { dml, .. } | Self::Delete { dml, .. } => {
                 vec![&mut dml.input]
@@ -510,7 +543,9 @@ fn name_write_checks(node: &mut Physical, table: &str) {
         | Op::Nest { input, .. }
         | Op::PolicyFilter { input, .. }
         | Op::WriteCheck { input, .. } => name_write_checks(input, table),
-        Op::Join { left, right, .. } | Op::SetOp { left, right, .. } => {
+        Op::Join { left, right, .. }
+        | Op::IndexLookup { left, right, .. }
+        | Op::SetOp { left, right, .. } => {
             name_write_checks(left, table);
             name_write_checks(right, table);
         }
@@ -785,12 +820,24 @@ impl Planner<'_> {
         if !matches!(kind, JoinKind::Semi | JoinKind::Anti) {
             layout.extend(right.layout.iter().copied());
         }
-        let op = Op::Join {
-            kind,
-            left: Box::new(left),
-            right: Box::new(right),
-            keys,
-            residual: conjoin(residual),
+        let op = match choose_lookup(kind, &right, &keys) {
+            Some(lookup) => Op::IndexLookup {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+                key: lookup.key,
+                keys: lookup.keys,
+                prefix: lookup.prefix,
+                point: lookup.point,
+                residual: conjoin(residual),
+            },
+            None => Op::Join {
+                kind,
+                left: Box::new(left),
+                right: Box::new(right),
+                keys,
+                residual: conjoin(residual),
+            },
         };
         self.node(op, layout)
     }

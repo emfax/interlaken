@@ -1,0 +1,45 @@
+; NOT IN must be NULL when the subquery has NULLs, so its lowering aggregates
+; over a comparison with the outer row. Decorrelation computes the same values
+; from aggregates of the subquery that do not read it: its row and non-NULL
+; counts, and a left join to its distinct non-NULL values (a null-aware anti
+; join once NOT and the filter apply).
+(plan
+  (project
+    (filter (get users :as u) (not (in u.id (project (get audit :as a) a.user_id))))
+    u.name))
+;; optimized
+(plan :schema-version 7
+  (project :bind 5
+    (filter
+      (join left
+        (join left
+          (get (tid 100) :as u :bind 1)
+          (aggregate :bind 6
+            (project (get (tid 103) :as a :bind 2) (as #2.1 user_id) :bind 3)
+            (keys)
+            (aggs (as (agg (fid 12)) rows) (as (agg (fid 16) #3.0) nn)))
+          true)
+        (distinct
+          (project :bind 9
+            (project :bind 7
+              (filter (get (tid 103) :as a :bind 8) (is-not-null #8.1))
+              (as #8.1 user_id))
+            (as #7.0 value)))
+        (= #9.0 #1.0))
+      (not
+        (case
+          (when
+            (case
+              (when (is-not-null #9.0) true)
+              (when
+                (or (is-null #1.0) (= (coalesce #6.1 0) 0))
+                (cast null bool))
+              (else false))
+            true)
+          (when
+            (>
+              (coalesce #6.0 0)
+              (case (when (is-null #1.0) 0) (else (coalesce #6.1 0))))
+            (cast null bool))
+          (else false))))
+    (as #1.1 name)))

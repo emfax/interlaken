@@ -19,9 +19,11 @@
 //!   with references wrapped in `coalesce(..., empty array)`.
 //! - **EXISTS markers:** a left apply of one marker row becomes a left join
 //!   to a `DISTINCT` projection of the correlated inner expressions.
+//! - **Quantified comparisons** (`IN`, `NOT IN`, `ANY`, `ALL`), whose
+//!   lowering aggregates over a comparison with the outer row: left joins
+//!   to aggregates of the subquery that don't read it (`quantified`).
 //!
-//! Applies that fit none of these (for example `NOT IN`, whose lowering
-//! aggregates over outer columns) stay and run as nested loops.
+//! Applies that fit none of these stay and run as nested loops.
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,7 +57,7 @@ pub(crate) struct Decorrelator<'a> {
 }
 
 /// Return `true` if `expr` references any of `bindings`.
-fn touches(expr: &Expr, bindings: &HashSet<BindingId>) -> bool {
+pub(super) fn touches(expr: &Expr, bindings: &HashSet<BindingId>) -> bool {
     !bindings_of(expr).is_disjoint(bindings)
 }
 
@@ -241,7 +243,7 @@ fn equalities(
 }
 
 /// Return the join condition matching group keys `binding.0..n` to outer expressions.
-fn key_condition(binding: BindingId, outer_exprs: Vec<Expr>, offset: usize) -> Expr {
+pub(super) fn key_condition(binding: BindingId, outer_exprs: Vec<Expr>, offset: usize) -> Expr {
     conjoin(
         outer_exprs
             .into_iter()
@@ -325,6 +327,10 @@ impl Decorrelator<'_> {
         if matches!(kind, ApplyKind::Inner | ApplyKind::Left | ApplyKind::Single) {
             match inner {
                 Rel::Aggregate { ref keys, .. } if keys.is_empty() => {
+                    let (outer, inner) = match self.quantified(outer, inner, &outer_bindings) {
+                        Ok(rewritten) => return Ok(rewritten),
+                        Err(inputs) => inputs,
+                    };
                     return self.aggregate(outer, inner, &outer_bindings);
                 }
                 Rel::Nest { ref keys, .. } if keys.is_empty() => {
@@ -340,7 +346,7 @@ impl Decorrelator<'_> {
     }
 
     /// Pull equality correlation out of `input`; return it uncorrelated with `(inner, outer)` key pairs.
-    fn keyed(
+    pub(super) fn keyed(
         &self,
         input: &Rel,
         outer: &HashSet<BindingId>,

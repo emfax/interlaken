@@ -1,40 +1,38 @@
 //! `Aggregate`: hash aggregation.
 //!
 //! Group keys are evaluated for every row; each aggregate's arguments only
-//! for the rows its `FILTER` keeps, as in the interpreter. Plain `count`
-//! is counted as rows arrive; every other aggregate keeps its argument
-//! tuples and is finished by the interpreter's own aggregate function, so
-//! results (including float summation order within a group) match it.
+//! for the rows its `FILTER` keeps, as in the interpreter. `count`, `sum`,
+//! `avg`, `min`, `max`, `bool_and` and `bool_or` fold rows into a fixed-size
+//! state as they arrive, exactly as the interpreter would compute them
+//! (`accumulate`), so memory grows with the groups, not the rows. `DISTINCT`
+//! and other aggregates keep their argument tuples and are finished by the
+//! interpreter's own aggregate function. The input loop yields to the
+//! runtime every few batches (`coop`).
 
 use std::collections::HashMap;
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch};
 use arrow_schema::SchemaRef;
 use futures::StreamExt;
-use interlaken_ir::interp::{Datum, RowKey, aggregate_values};
+use interlaken_ir::interp::{Datum, RowKey};
 use interlaken_ir::{Expr, Type};
 
+use super::accumulate::{Accumulator, Arg, Kind};
 use super::pull::{Pull, batch, chunks, into_stream, row_keys};
 use crate::columnar::{build_array, datum_at};
+use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, entry_bytes, row_bytes};
+use crate::memory::{Reservation, entry_bytes};
 use crate::physical::{Aggregate, Physical};
-
-/// One aggregate's state for one group.
-#[derive(Clone, Debug)]
-enum Accumulator {
-    /// A non-distinct `count`: the rows counted so far.
-    Count(i64),
-    /// The argument tuples of the rows seen so far.
-    Tuples(Vec<Vec<Datum>>),
-}
 
 /// One aggregate, compiled.
 struct Compiled {
     /// Its definition and flags.
     agg: Aggregate,
+    /// How it accumulates.
+    kind: Kind,
     /// The compiled arguments.
     args: Vec<CompiledExpr>,
     /// The compiled filter.
@@ -76,19 +74,11 @@ impl AggregateState {
         let mut input = self.input.take().expect("run once");
         let mut groups: HashMap<RowKey, usize> = HashMap::new();
         let mut order: Vec<(Vec<Datum>, Vec<Accumulator>)> = Vec::new();
-        let fresh: Vec<Accumulator> = self
-            .aggs
-            .iter()
-            .map(|a| {
-                if a.agg.def.name.to_string() == "count" && !a.agg.distinct {
-                    Accumulator::Count(0)
-                } else {
-                    Accumulator::Tuples(Vec::new())
-                }
-            })
-            .collect();
+        let fresh: Vec<Accumulator> = self.aggs.iter().map(|a| a.kind.fresh()).collect();
+        let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
             let b = b?;
+            yielder.tick().await;
             let n = b.num_rows();
             let keys = self
                 .keys
@@ -131,21 +121,23 @@ impl AggregateState {
                     .map(|e| e.eval(selected.columns(), selected.num_rows()))
                     .collect::<Result<Vec<_>, _>>()?;
                 let strict = compiled.agg.def.properties.strict;
+                if compiled.kind == Kind::Tuples {
+                    for (k, &row) in rows.iter().enumerate() {
+                        let tuple = args
+                            .iter()
+                            .map(|c| datum_at(c.as_ref(), k))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let bytes = order[group_of[row]].1[a].push_tuple(tuple)?;
+                        self.memory.grow(bytes)?;
+                    }
+                    continue;
+                }
+                let arg = Arg::of(&args);
                 for (k, &row) in rows.iter().enumerate() {
-                    let tuple = args
-                        .iter()
-                        .map(|c| datum_at(c.as_ref(), k))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    match &mut order[group_of[row]].1[a] {
-                        Accumulator::Count(n) => {
-                            if !(strict && tuple.iter().any(Datum::is_null)) {
-                                *n += 1;
-                            }
-                        }
-                        Accumulator::Tuples(tuples) => {
-                            self.memory.grow(row_bytes(&tuple))?;
-                            tuples.push(tuple);
-                        }
+                    let delta = order[group_of[row]].1[a].update(compiled.kind, &arg, k, strict)?;
+                    match usize::try_from(delta) {
+                        Ok(grown) => self.memory.grow(grown)?,
+                        Err(_) => self.memory.shrink(delta.unsigned_abs()),
                     }
                 }
             }
@@ -157,12 +149,7 @@ impl AggregateState {
         for (key, accumulators) in order {
             let mut row = key;
             for (accumulator, compiled) in accumulators.into_iter().zip(&self.aggs) {
-                row.push(match accumulator {
-                    Accumulator::Count(n) => Datum::Int8(n),
-                    Accumulator::Tuples(tuples) => {
-                        aggregate_values(&compiled.agg.def, tuples, compiled.agg.distinct)?
-                    }
-                });
+                row.push(accumulator.finish(&compiled.agg, compiled.kind)?);
             }
             rows.push(row);
         }
@@ -209,6 +196,7 @@ pub(crate) fn aggregate(
         .map(|a| {
             Ok(Compiled {
                 agg: a.clone(),
+                kind: Kind::of(a),
                 args: a
                     .args
                     .iter()

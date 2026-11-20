@@ -146,13 +146,75 @@ pub async fn scan_filtered(
     scan_with(txn, table, scan, Some(filter)).await
 }
 
-/// Scan one batch, optionally filtered on the storage thread.
-async fn scan_with(
+/// Scan one batch of each of several table scans in one storage call.
+///
+/// Returns one batch per scan, in order, exactly as [`scan`] would for
+/// each. Index lookups for a batch of primary key prefixes use this.
+///
+/// # Errors
+///
+/// As for [`scan`].
+pub async fn scan_many(txn: &Txn, table: &TableDef, scans: &[RowScan]) -> Result<Vec<RowBatch>> {
+    let requests = scans
+        .iter()
+        .map(|scan| table_request(table, scan))
+        .collect::<Result<Vec<_>>>()?;
+    let types = table.types();
+    txn.scan_many(requests)
+        .await?
+        .into_iter()
+        .map(|batch| {
+            let rows = batch
+                .rows
+                .iter()
+                .map(|(_, value)| Ok(decode_row(value, &types)?.1))
+                .collect::<Result<_>>()?;
+            Ok(RowBatch {
+                rows,
+                resume: batch.resume,
+            })
+        })
+        .collect()
+}
+
+/// Scan one batch of each of several index scans in one storage call.
+///
+/// Returns one batch per scan, in order, exactly as [`scan_index`] would
+/// for each. Index lookups for a batch of indexed values use this, then
+/// fetch the rows with one [`get_many`].
+///
+/// # Errors
+///
+/// As for [`scan_index`].
+pub async fn scan_index_many(
     txn: &Txn,
     table: &TableDef,
-    scan: &RowScan,
-    filter: Option<Arc<dyn RowFilter>>,
-) -> Result<RowBatch> {
+    index: &IndexDef,
+    scans: &[RowScan],
+) -> Result<Vec<IndexBatch>> {
+    let requests = scans
+        .iter()
+        .map(|scan| index_request(table, index, scan))
+        .collect::<Result<Vec<_>>>()?;
+    txn.scan_many(requests)
+        .await?
+        .into_iter()
+        .map(|batch| {
+            let primary_keys = batch
+                .rows
+                .iter()
+                .map(|(key, value)| pk_from_index_entry(table, index, key, value))
+                .collect::<Result<_>>()?;
+            Ok(IndexBatch {
+                primary_keys,
+                resume: batch.resume,
+            })
+        })
+        .collect()
+}
+
+/// Build the storage request for one batch of a table scan.
+fn table_request(table: &TableDef, scan: &RowScan) -> Result<ScanRequest> {
     let prefix = pk_key(table, &scan.prefix)?;
     if scan.range.is_some() && scan.prefix.len() >= table.primary_key().len() {
         return Err(CatalogError::InvalidDefinition(
@@ -171,7 +233,46 @@ async fn scan_with(
         SortOrder::ASC,
         scan.range.as_ref(),
     )?;
-    let mut request = request(range, scan);
+    Ok(request(range, scan))
+}
+
+/// Build the storage request for one batch of an index scan.
+fn index_request(table: &TableDef, index: &IndexDef, scan: &RowScan) -> Result<ScanRequest> {
+    let prefix = index_values_prefix(table, index, &scan.prefix)?;
+    let order = match (&scan.range, index.columns().get(scan.prefix.len())) {
+        (None, _) => SortOrder::ASC,
+        (Some(_), Some(column)) => column.order,
+        (Some(_), None) => {
+            return Err(CatalogError::InvalidDefinition(format!(
+                "a range on index \"{}\" needs a column after the prefix",
+                index.name()
+            ))
+            .into());
+        }
+    };
+    let range = key_range(
+        &prefix,
+        |v| {
+            index_values_prefix(
+                table,
+                index,
+                &[scan.prefix.as_slice(), std::slice::from_ref(v)].concat(),
+            )
+        },
+        order,
+        scan.range.as_ref(),
+    )?;
+    Ok(request(range, scan))
+}
+
+/// Scan one batch, optionally filtered on the storage thread.
+async fn scan_with(
+    txn: &Txn,
+    table: &TableDef,
+    scan: &RowScan,
+    filter: Option<Arc<dyn RowFilter>>,
+) -> Result<RowBatch> {
+    let mut request = table_request(table, scan)?;
     request.filter = filter;
     let batch = txn.scan(request).await?;
     let types = table.types();
@@ -200,31 +301,7 @@ pub async fn scan_index(
     index: &IndexDef,
     scan: &RowScan,
 ) -> Result<IndexBatch> {
-    let prefix = index_values_prefix(table, index, &scan.prefix)?;
-    let order = match (&scan.range, index.columns().get(scan.prefix.len())) {
-        (None, _) => SortOrder::ASC,
-        (Some(_), Some(column)) => column.order,
-        (Some(_), None) => {
-            return Err(CatalogError::InvalidDefinition(format!(
-                "a range on index \"{}\" needs a column after the prefix",
-                index.name()
-            ))
-            .into());
-        }
-    };
-    let range = key_range(
-        &prefix,
-        |v| {
-            index_values_prefix(
-                table,
-                index,
-                &[scan.prefix.as_slice(), std::slice::from_ref(v)].concat(),
-            )
-        },
-        order,
-        scan.range.as_ref(),
-    )?;
-    let batch = txn.scan(request(range, scan)).await?;
+    let batch = txn.scan(index_request(table, index, scan)?).await?;
     let primary_keys = batch
         .rows
         .iter()

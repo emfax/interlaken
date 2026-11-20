@@ -41,7 +41,8 @@ GraphQL returns trees; relational algebra returns flat rows. A naive translation
 - **Scalar aggregates.** An apply over an aggregate without keys, correlated only by equalities, becomes a left join to the aggregate grouped by the correlated inner expressions. References to `count` become `coalesce(count, 0)`, which avoids the count bug.
 - **Nesting.** An apply over a keyless `Nest` becomes a left join to a `Nest` keyed by the correlation, with `coalesce(nested, (cast (array) T))`, so parents without children get an empty array. Element order follows the sorted input.
 - **EXISTS as a value.** The left apply of one marker row that the resolver produces becomes a left join to `DISTINCT` correlation keys.
-- **What stays an apply.** `NOT IN`, `ALL` and `ANY` outside filter conjuncts are lowered to aggregates over a comparison with the outer row, and those stay as applies (nested loops), as in Postgres. The same goes for correlation by non-equality, or through operators the rules do not cross (limits, keyed aggregates, joins).
+- **Quantified comparisons** (added in F3, [ADR-0033](0033-executor-performance.md)). `NOT IN`, `ALL` and `ANY` outside filter conjuncts are lowered to aggregates over a comparison with the outer row. They become left joins to aggregates of the subquery that don't read the outer row (row and non-NULL counts, and `min` or `max` for orderings) and, for `=`, to its distinct non-NULL values, which makes `NOT IN` in a filter a null-aware anti join.
+- **What stays an apply.** Correlation by non-equality, or through operators the rules do not cross (limits, keyed aggregates, joins), stays an apply (a nested loop).
 
 To express the empty array, the IR gained an array constructor expression, `(array e...)`. An empty one is written under a cast, `(cast (array) T)`, as a typed NULL is.
 

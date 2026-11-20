@@ -213,6 +213,15 @@ impl Engine {
         &self.inner.storage
     }
 
+    /// Return the node-wide memory pool, if [`EngineOptions::node_memory_limit`] set one.
+    ///
+    /// Its [`MemoryPool::used`] and [`MemoryPool::peak`] show what running
+    /// statements hold.
+    #[must_use]
+    pub fn memory_pool(&self) -> Option<&Arc<MemoryPool>> {
+        self.inner.pool.as_ref()
+    }
+
     /// Return the residual cache's hit, miss and uncacheable counts.
     #[must_use]
     pub fn residual_cache_stats(&self) -> CacheStats {

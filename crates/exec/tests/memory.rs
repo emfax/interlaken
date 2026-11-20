@@ -102,7 +102,7 @@ fn count(batches: &[arrow_array::RecordBatch]) -> usize {
 const BLOCKING: [(&str, &str); 7] = [
     ("(plan (sort (get t) (asc b)))", "Sort"),
     (
-        "(plan (join inner (get t :as x) (get t :as y) (= x.id y.id)))",
+        "(plan (join inner (get t :as x) (get t :as y) (= x.b y.b)))",
         "HashJoin",
     ),
     (
@@ -244,7 +244,7 @@ async fn node_pool_caps_concurrent_queries() {
 
     // A cancelled hash join returns its build side too.
     let pool = MemoryPool::new(usize::MAX);
-    let join = physical("(plan (join inner (get t :as x) (get t :as y) (= x.id y.id)))");
+    let join = physical("(plan (join inner (get t :as x) (get t :as y) (= x.b y.b)))");
     let memory = QueryMemory::new(usize::MAX, Some(pool.clone()));
     let mut stream = execute(&join, &context(&txn, memory));
     stream.next().await.unwrap().unwrap();

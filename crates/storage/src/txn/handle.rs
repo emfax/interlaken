@@ -181,6 +181,87 @@ impl Txn {
         self.scan_with(request, false).await
     }
 
+    /// Read one batch of each of several range scans in one storage call.
+    ///
+    /// Returns one batch per request, in order, exactly as [`scan`](Self::scan)
+    /// would for each: continue a scan whose batch has a resume key with a
+    /// request carrying it. Index lookups for a batch of keys use this to
+    /// make one call instead of one per key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage pool is unavailable or fjall fails.
+    pub async fn scan_many(&self, requests: Vec<ScanRequest>) -> Result<Vec<ScanBatch>> {
+        self.check_age()?;
+        let jobs: Vec<Option<ScanJob>> = {
+            let state = self.state();
+            requests
+                .into_iter()
+                .map(|request| Self::scan_job(&state, request, false))
+                .collect()
+        };
+        if jobs.iter().all(Option::is_none) {
+            return Ok(jobs
+                .iter()
+                .map(|_| ScanBatch {
+                    rows: Vec::new(),
+                    resume: None,
+                })
+                .collect());
+        }
+        let outputs = self
+            .0
+            .shared
+            .pool
+            .run(move |engine| {
+                jobs.into_iter()
+                    .map(|job| job.map(|job| mvcc::scan(engine.data(), job)).transpose())
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await??;
+        // GC may have removed versions this scan needed once the pin expired.
+        self.check_age()?;
+        let mut state = self.state();
+        Ok(outputs
+            .into_iter()
+            .map(|output| match output {
+                Some(output) => {
+                    state.reads.record_range(output.covered);
+                    ScanBatch {
+                        rows: output.rows,
+                        resume: output.resume,
+                    }
+                }
+                None => ScanBatch {
+                    rows: Vec::new(),
+                    resume: None,
+                },
+            })
+            .collect())
+    }
+
+    /// Build the storage job for one scan batch, or `None` if the range left is empty.
+    fn scan_job(state: &TxnState, request: ScanRequest, latest: bool) -> Option<ScanJob> {
+        let range = match (request.resume, request.reverse) {
+            (None, _) => request.range,
+            (Some(resume), false) => KeyRange::new(Bound::Excluded(resume), request.range.end),
+            (Some(resume), true) => KeyRange::new(request.range.start, Bound::Excluded(resume)),
+        };
+        if range.is_empty() {
+            return None;
+        }
+        let statement = (!latest).then_some(state.statement);
+        Some(ScanJob {
+            buffered: state.writes.visible_range(&range, statement),
+            range,
+            reverse: request.reverse,
+            limit_rows: request.limit_rows,
+            limit_bytes: request.limit_bytes,
+            filter: request.filter,
+            snapshot: state.snapshot,
+        })
+    }
+
     /// Read one batch of a range scan like [`scan`](Self::scan), but also see
     /// writes from the current statement.
     pub(crate) async fn scan_latest(&self, request: ScanRequest) -> Result<ScanBatch> {
@@ -191,29 +272,11 @@ impl Txn {
     /// statements, or from every statement if `latest`.
     async fn scan_with(&self, request: ScanRequest, latest: bool) -> Result<ScanBatch> {
         self.check_age()?;
-        let range = match (request.resume, request.reverse) {
-            (None, _) => request.range,
-            (Some(resume), false) => KeyRange::new(Bound::Excluded(resume), request.range.end),
-            (Some(resume), true) => KeyRange::new(request.range.start, Bound::Excluded(resume)),
-        };
-        if range.is_empty() {
+        let Some(job) = Self::scan_job(&self.state(), request, latest) else {
             return Ok(ScanBatch {
                 rows: Vec::new(),
                 resume: None,
             });
-        }
-        let job = {
-            let state = self.state();
-            let statement = (!latest).then_some(state.statement);
-            ScanJob {
-                buffered: state.writes.visible_range(&range, statement),
-                range,
-                reverse: request.reverse,
-                limit_rows: request.limit_rows,
-                limit_bytes: request.limit_bytes,
-                filter: request.filter,
-                snapshot: state.snapshot,
-            }
         };
         let output = self
             .0

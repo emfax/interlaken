@@ -1,6 +1,10 @@
 //! `Insert`, `Update` and `Delete`: write through the row layer (ADR-0026).
 //!
-//! Writes go into the transaction's buffer as input batches arrive; the
+//! Writes go into the transaction's buffer as input batches arrive, one
+//! row-layer batch call per input batch (`rows::insert_many`,
+//! `update_many`, `delete_many`), which reads every constraint-check key
+//! of the batch in one storage call and otherwise behaves exactly like
+//! writing its rows one at a time; the
 //! input never sees them, because reads hide the current statement's writes
 //! (Halloween protection), while constraint checks see them, so a statement
 //! cannot insert one key twice. An update or delete changes each target row
@@ -98,6 +102,24 @@ fn as_column_type(value: Stored, ty: ColumnType) -> Stored {
     }
 }
 
+/// Collect `items` up to the first error, returning that error separately.
+///
+/// Rows are written a batch at a time, but a row that fails to convert must
+/// fail the statement only after the rows before it were written, as if
+/// each were written in turn: their own errors come first.
+fn until_error<T>(
+    items: impl IntoIterator<Item = Result<T, ExecError>>,
+) -> (Vec<T>, Result<(), ExecError>) {
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Ok(item) => out.push(item),
+            Err(e) => return (out, Err(e)),
+        }
+    }
+    (out, Ok(()))
+}
+
 impl DmlState {
     /// Return the target rows of a batch (whole table rows), one per input row.
     fn target_rows(b: &RecordBatch, key: &[usize]) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -152,28 +174,38 @@ impl DmlState {
         let mut written = Vec::new();
         match &mut self.write {
             Write::Insert(columns) => {
-                for r in 0..b.num_rows() {
+                let types = stored.types();
+                let (rows, failure) = until_error((0..b.num_rows()).map(|r| {
                     let mut row = vec![Datum::Null; width];
                     for (k, &c) in columns.iter().enumerate() {
                         row[c] = datum_at(b.column(k).as_ref(), r)?;
                     }
-                    rows::insert(txn, stored, stored_table_row(&row, &stored.types())?).await?;
-                    if let Some(c) = &mut self.closure {
-                        c.record(None, Some(&row))?;
+                    let encoded = stored_table_row(&row, &types)?;
+                    Ok((row, encoded))
+                }));
+                let (rows, encoded): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+                rows::insert_many(txn, stored, encoded).await?;
+                failure?;
+                if let Some(c) = &mut self.closure {
+                    for row in &rows {
+                        c.record(None, Some(row))?;
                     }
-                    written.push(row);
                 }
+                written = rows;
             }
             Write::Delete(key) => {
                 let key = key.clone();
                 let targets = Self::target_rows(b, &key)?;
-                for i in self.first_occurrences(&targets)? {
-                    let row = &targets[i];
-                    if rows::delete(txn, stored, &pk_of(row)?).await? {
+                let first = self.first_occurrences(&targets)?;
+                let (keys, failure) = until_error(first.iter().map(|&i| pk_of(&targets[i])));
+                let deleted = rows::delete_many(txn, stored, &keys).await?;
+                failure?;
+                for (&i, deleted) in first.iter().zip(deleted) {
+                    if deleted {
                         if let Some(c) = &mut self.closure {
-                            c.record(Some(row), None)?;
+                            c.record(Some(&targets[i]), None)?;
                         }
-                        written.push(row.clone());
+                        written.push(targets[i].clone());
                     }
                 }
             }
@@ -193,22 +225,23 @@ impl DmlState {
                     .iter_mut()
                     .map(|(c, e)| Ok((*c, e.eval(chosen.columns(), chosen.num_rows())?)))
                     .collect::<Result<Vec<_>, ExecError>>()?;
-                for (k, &i) in selected.iter().enumerate() {
+                let types = stored.types();
+                let (updates, failure) = until_error(selected.iter().enumerate().map(|(k, &i)| {
                     let old = &targets[i];
                     let mut new = old.clone();
                     for (c, array) in &values {
                         new[*c] = datum_at(array.as_ref(), k)?;
                     }
-                    if rows::update(
-                        txn,
-                        stored,
-                        &pk_of(old)?,
-                        stored_table_row(&new, &stored.types())?,
-                    )
-                    .await?
-                    {
+                    let encoded = stored_table_row(&new, &types)?;
+                    Ok((new, (pk_of(old)?, encoded)))
+                }));
+                let (rows, updates): (Vec<_>, Vec<_>) = updates.into_iter().unzip();
+                let replaced = rows::update_many(txn, stored, updates).await?;
+                failure?;
+                for ((new, replaced), &i) in rows.into_iter().zip(replaced).zip(&selected) {
+                    if replaced {
                         if let Some(c) = &mut self.closure {
-                            c.record(Some(old), Some(&new))?;
+                            c.record(Some(&targets[i]), Some(&new))?;
                         }
                         written.push(new);
                     }

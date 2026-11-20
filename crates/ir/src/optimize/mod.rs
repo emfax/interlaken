@@ -12,6 +12,7 @@ mod decorrelate;
 mod order;
 mod prune;
 mod pushdown;
+mod quantified;
 mod simplify;
 mod util;
 

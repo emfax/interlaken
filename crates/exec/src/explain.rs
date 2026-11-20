@@ -30,6 +30,7 @@ use interlaken_ir::{Expr, JoinKind, SetOpKind, SortKey};
 use crate::access::{Access, KeyBounds};
 use crate::error::ExecError;
 use crate::exec::{ExecContext, execute};
+use crate::lookup::LookupKey;
 use crate::metrics::{Metrics, NodeStats};
 use crate::physical::{Op, Physical};
 
@@ -339,6 +340,38 @@ impl Renderer<'_> {
                             .collect();
                         let _ = write!(text, " keys: {}", keys.join(", "));
                     }
+                    if let Some(r) = residual {
+                        let _ = write!(text, " residual: {}", expr(r));
+                    }
+                }
+                self.line(node, depth, &text);
+                self.node(left, depth + 1, scope);
+                self.node(right, depth + 1, scope);
+            }
+            Op::IndexLookup {
+                kind,
+                left,
+                right,
+                key,
+                keys,
+                residual,
+                ..
+            } => {
+                let using = match key {
+                    LookupKey::Primary => "primary key".to_owned(),
+                    LookupKey::Index(name) => name.to_string(),
+                };
+                let mut text = format!("IndexLookup {} using {using}", join_kind(*kind));
+                let policy_side =
+                    scope != Scope::Open && (policy_subplan(left) || policy_subplan(right));
+                if hide && (scope == Scope::Policy || policy_side) {
+                    let _ = write!(text, " on {HIDDEN}");
+                } else {
+                    let keys: Vec<String> = keys
+                        .iter()
+                        .map(|(l, r)| format!("{} = {}", expr(l), expr(r)))
+                        .collect();
+                    let _ = write!(text, " keys: {}", keys.join(", "));
                     if let Some(r) = residual {
                         let _ = write!(text, " residual: {}", expr(r));
                     }
