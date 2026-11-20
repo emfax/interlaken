@@ -3,19 +3,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures::StreamExt;
 use interlaken_exec::{
-    ExecError, ExplainOptions, Statement, Transaction, execute, explain, explain_analyze,
+    BatchStream, ExecError, ExplainOptions, Statement, Transaction, execute, explain,
+    explain_analyze,
 };
 use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Datum, ExecOptions};
 use interlaken_ir::security::{EntityUid, SecurityContext};
 use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
 use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
+use tokio::task::JoinHandle;
 
 use super::engine::Engine;
 use super::pipeline::{Step, exec_context, parse, pin, prepare};
 use super::result::QueryResult;
-use super::stream::QueryStream;
+use super::stream::{Execution, QueryStream};
 use crate::catalog::{self, ColumnSpec, EntitySpec, IndexSpec, MembershipSpec, TableSpec};
 use crate::error::EngineError;
 use crate::policy::{
@@ -49,6 +52,17 @@ struct Open {
     policies_dirty: bool,
 }
 
+/// A DML statement whose stream was dropped before its end, running to
+/// its end in a background task that owns the transaction meanwhile.
+struct Finishing {
+    /// Whether the statement runs in its own (implicit) transaction, which
+    /// the task commits; otherwise the task returns the open transaction.
+    implicit: bool,
+    /// The task: the open transaction once the statement has ended, or
+    /// `None` for an implicit one.
+    task: JoinHandle<Option<Open>>,
+}
+
 /// A connection's worth of statements, run for one principal.
 ///
 /// Statements run in the open transaction, or each in its own transaction
@@ -66,8 +80,11 @@ pub struct Session {
     context: SecurityContext,
     /// How long a statement may run before it is cancelled.
     statement_timeout: Option<Duration>,
-    /// The open transaction, if any.
+    /// The open transaction, if any, unless a dropped statement is
+    /// finishing in it.
     txn: Option<Open>,
+    /// A dropped DML statement still running to its end, if any.
+    finishing: Option<Finishing>,
 }
 
 impl Session {
@@ -78,6 +95,7 @@ impl Session {
             context,
             statement_timeout: None,
             txn: None,
+            finishing: None,
         }
     }
 
@@ -97,14 +115,94 @@ impl Session {
     /// Return whether a transaction is open.
     #[must_use]
     pub fn in_transaction(&self) -> bool {
-        self.txn.is_some()
+        self.txn.is_some() || self.finishing.as_ref().is_some_and(|f| !f.implicit)
     }
 
     /// Return whether the open transaction is aborted: a statement failed
     /// and only a rollback is accepted.
-    #[must_use]
-    pub fn is_aborted(&self) -> bool {
-        self.txn.as_ref().is_some_and(|open| open.exec.is_aborted())
+    ///
+    /// This first waits for a dropped DML statement to finish, since its
+    /// failure would abort the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Invalid`] if a dropped statement's task
+    /// panicked, losing the open transaction.
+    pub async fn is_aborted(&mut self) -> Result<bool, EngineError> {
+        self.settle().await?;
+        Ok(self.txn.as_ref().is_some_and(|open| open.exec.is_aborted()))
+    }
+
+    /// Wait for a dropped DML statement to finish (see [`QueryStream`]),
+    /// taking back the open transaction it ran in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Invalid`] if the statement's task panicked
+    /// in an explicit transaction, which is then lost (rolled back).
+    async fn settle(&mut self) -> Result<(), EngineError> {
+        let Some(finishing) = self.finishing.take() else {
+            return Ok(());
+        };
+        match finishing.task.await {
+            Ok(open) => {
+                self.txn = open;
+                Ok(())
+            }
+            // An implicit transaction is the dropped statement's own; its
+            // failure leaves nothing behind for later statements.
+            Err(_) if finishing.implicit => Ok(()),
+            Err(e) => Err(EngineError::Invalid(format!(
+                "the open transaction was lost finishing a dropped statement: {e}"
+            ))),
+        }
+    }
+
+    /// Run a streamed DML statement its caller stopped reading to its end
+    /// in the background, discarding its rows, then end it as
+    /// [`QueryStream::next`] would: keep its writes, or undo them and abort
+    /// the transaction if it fails; an implicit transaction then commits
+    /// or rolls back.
+    ///
+    /// Without a Tokio runtime to run it on, the statement is undone
+    /// instead, as a cancelled read is.
+    pub(super) fn finish_in_background(
+        &mut self,
+        statement: Statement,
+        implicit: bool,
+        batches: BatchStream,
+        deadline: Option<Instant>,
+    ) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            drop(batches);
+            self.cancel_statement(statement, implicit);
+            return;
+        };
+        let Some(mut open) = self.txn.take() else {
+            return;
+        };
+        let task = runtime.spawn(async move {
+            let kept = match drain(batches, deadline).await {
+                Ok(()) => open.exec.release_statement(statement).is_ok(),
+                Err(_) => {
+                    // The transaction is aborted even if the undo fails.
+                    let _ = open.exec.rollback_statement(statement);
+                    false
+                }
+            };
+            if !implicit {
+                return Some(open);
+            }
+            if kept {
+                // Nobody is left to hear a commit failure; the writes are
+                // then simply not committed, as for any failed statement.
+                let _ = open.exec.commit().await;
+            } else {
+                open.exec.rollback();
+            }
+            None
+        });
+        self.finishing = Some(Finishing { implicit, task });
     }
 
     /// Open a transaction.
@@ -113,6 +211,7 @@ impl Session {
     ///
     /// Returns [`EngineError::TransactionInProgress`] if one is open, or a storage error.
     pub async fn begin(&mut self, options: TxnOptions) -> Result<(), EngineError> {
+        self.settle().await?;
         if self.txn.is_some() {
             return Err(EngineError::TransactionInProgress);
         }
@@ -148,6 +247,7 @@ impl Session {
     /// commit's error (a serialization failure is SQLSTATE `40001`; the
     /// caller decides whether to retry).
     pub async fn commit(&mut self) -> Result<(), EngineError> {
+        self.settle().await?;
         let open = self.txn.take().ok_or(EngineError::NoTransaction)?;
         open.exec.commit().await?;
         Ok(())
@@ -155,10 +255,18 @@ impl Session {
 
     /// Roll the open transaction back.
     ///
+    /// A dropped DML statement still finishing in it is stopped, since its
+    /// writes are discarded anyway.
+    ///
     /// # Errors
     ///
     /// Returns [`EngineError::NoTransaction`] if none is open.
     pub fn rollback(&mut self) -> Result<(), EngineError> {
+        if let Some(finishing) = self.finishing.take_if(|f| !f.implicit) {
+            // Stopping the task drops the transaction it owns, aborting it.
+            finishing.task.abort();
+            return Ok(());
+        }
         let open = self.txn.take().ok_or(EngineError::NoTransaction)?;
         open.exec.rollback();
         Ok(())
@@ -175,7 +283,8 @@ impl Session {
     ///
     /// Returns [`EngineError::NoTransaction`] if none is open, or
     /// SQLSTATE `25P02` if it is aborted.
-    pub fn savepoint(&mut self) -> Result<SavepointId, EngineError> {
+    pub async fn savepoint(&mut self) -> Result<SavepointId, EngineError> {
+        self.settle().await?;
         Ok(self.open()?.exec.savepoint()?)
     }
 
@@ -185,7 +294,8 @@ impl Session {
     ///
     /// Returns [`EngineError::NoTransaction`] if none is open, or a storage
     /// error if the savepoint is not open.
-    pub fn rollback_to(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+    pub async fn rollback_to(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+        self.settle().await?;
         Ok(self.open()?.exec.rollback_to(savepoint)?)
     }
 
@@ -194,7 +304,8 @@ impl Session {
     /// # Errors
     ///
     /// As for [`Session::savepoint`].
-    pub fn release(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+    pub async fn release(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+        self.settle().await?;
         Ok(self.open()?.exec.release(savepoint)?)
     }
 
@@ -205,6 +316,7 @@ impl Session {
         kind: Kind,
         body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
+        self.settle().await?;
         let implicit = self.txn.is_none();
         if implicit {
             self.begin(TxnOptions::default()).await?;
@@ -395,6 +507,7 @@ impl Session {
         plan: Result<&Plan, EngineError>,
         params: Vec<Datum>,
     ) -> Result<QueryStream<'_>, EngineError> {
+        self.settle().await?;
         let implicit = self.txn.is_none();
         if implicit {
             self.begin(TxnOptions::default()).await?;
@@ -430,8 +543,14 @@ impl Session {
                 deadline,
             };
             let prepared = prepare(&step, plan?).await?;
+            let writes = prepared.physical.writes();
             let batches = execute(&prepared.physical, &exec_context(&step, params));
-            Ok::<_, EngineError>((prepared.columns, prepared.types, batches))
+            Ok::<_, EngineError>(Execution {
+                columns: prepared.columns,
+                types: prepared.types,
+                batches,
+                writes,
+            })
         };
         let started = match timeout {
             Some(limit) => tokio::time::timeout(limit, work)
@@ -440,9 +559,7 @@ impl Session {
             None => work.await,
         };
         match started {
-            Ok((columns, types, batches)) => Ok(QueryStream::new(
-                self, statement, implicit, columns, types, batches, deadline,
-            )),
+            Ok(run) => Ok(QueryStream::new(self, statement, implicit, run, deadline)),
             Err(e) => {
                 self.fail_statement(statement, implicit);
                 Err(e)
@@ -492,7 +609,7 @@ impl Session {
         }
     }
 
-    /// End a streamed statement its caller stopped reading: undo its
+    /// End a streamed query its caller stopped reading: undo its
     /// writes without aborting the open transaction, or roll back the
     /// implicit one.
     pub(super) fn cancel_statement(&mut self, statement: Statement, implicit: bool) {
@@ -793,5 +910,25 @@ impl Session {
             set_policy_settings(step.txn, settings).await
         })
         .await
+    }
+}
+
+/// Run `batches` to their end, discarding the rows, by `deadline` if any.
+///
+/// # Errors
+///
+/// Returns the execution error, or SQLSTATE `57014` past the deadline.
+async fn drain(mut batches: BatchStream, deadline: Option<Instant>) -> Result<(), ExecError> {
+    let run = async {
+        while let Some(batch) = batches.next().await {
+            batch?;
+        }
+        Ok(())
+    };
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline.into(), run)
+            .await
+            .unwrap_or(Err(ExecError::QueryCanceled)),
+        None => run.await,
     }
 }

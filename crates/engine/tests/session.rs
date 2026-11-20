@@ -409,7 +409,7 @@ async fn statement_timeout_cancels() {
     .unwrap();
     root.set_statement_timeout(Some(Duration::from_millis(50)));
     assert_eq!(state(root.query(huge, vec![]).await), "57014");
-    assert!(root.is_aborted());
+    assert!(root.is_aborted().await.unwrap());
     root.set_statement_timeout(None);
     assert_eq!(state(root.query(count, vec![]).await), "25P02");
     root.commit().await.unwrap_err();
@@ -427,7 +427,7 @@ async fn savepoints_undo_ddl_and_dml() {
     root.create_table(&table("a", &[("id", "(not-null int8)")], &["id"]))
         .await
         .unwrap();
-    let savepoint = root.savepoint().unwrap();
+    let savepoint = root.savepoint().await.unwrap();
     root.create_table(&table("b", &[("id", "(not-null int8)")], &["id"]))
         .await
         .unwrap();
@@ -442,9 +442,9 @@ async fn savepoints_undo_ddl_and_dml() {
         state(root.query("(plan (get nope))", vec![]).await),
         "42P01"
     );
-    assert!(root.is_aborted());
-    root.rollback_to(savepoint).unwrap();
-    assert!(!root.is_aborted());
+    assert!(root.is_aborted().await.unwrap());
+    root.rollback_to(savepoint).await.unwrap();
+    assert!(!root.is_aborted().await.unwrap());
     assert!(rows(&mut root, "(plan (get a))").await.is_empty());
     root.commit().await.unwrap();
     assert!(rows(&mut root, "(plan (get a))").await.is_empty());

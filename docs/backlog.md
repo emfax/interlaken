@@ -100,7 +100,7 @@ Entry format:
 - **Why:** The executor streams, but `Session::query` collects every batch into a `QueryResult`, so a client reading 10 million rows through the engine holds them all. The 10-million-row test runs at the executor level for that reason.
 - **When:** With the SQL front end's wire protocol, which streams rows to clients.
 - **Size:** About 2 days: a result stream that keeps the statement's transaction and timeout.
-- **Status:** done (`Session::query_stream` returns a `QueryStream` that borrows the session and pulls batches lazily under the statement's savepoint and timeout, committing autocommit at its end and undoing the statement on error or drop; 3 million rows stream in under 2 MB of heap growth, ADR-0031 phase 2)
+- **Status:** done (`Session::query_stream` returns a `QueryStream` that borrows the session and pulls batches lazily under the statement's savepoint and timeout, committing autocommit at its end and undoing the statement on error; a dropped query is undone and a dropped DML statement runs to its end in the background; 3 million rows stream in under 2 MB of heap growth, ADR-0031 phase 2)
 
 ### masked-table-writes: Let principals write tables whose masked columns they don't read
 - **Origin:** ADR-0032, F2

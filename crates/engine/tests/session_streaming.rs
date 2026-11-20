@@ -99,9 +99,11 @@ async fn autocommit_stream_commits_at_its_end() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Assert dropping a stream early rolls back its implicit transaction,
-/// and `finish` runs the rest of the statement and commits it.
-async fn autocommit_stream_dropped_early_rolls_back() {
+/// Assert a DML stream dropped early still runs to its end and commits its
+/// implicit transaction, whether part read or not read at all, and the
+/// session's next statement sees its writes; and `finish` does the same in
+/// the foreground.
+async fn autocommit_dml_dropped_early_still_commits() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = fixture(&engine).await;
@@ -110,14 +112,64 @@ async fn autocommit_stream_dropped_early_rolls_back() {
     assert!(first.num_rows() > 0);
     drop(stream);
     assert!(!root.in_transaction());
-    assert_eq!(committed(&engine).await, 0);
-    assert_eq!(count(&mut root).await, 0);
+    assert_eq!(
+        count(&mut root).await,
+        ROWS,
+        "the next statement waits for it"
+    );
+    assert_eq!(committed(&engine).await, ROWS);
 
+    // Never read: the whole statement runs in the background.
+    root.query("(plan (delete dst (get dst :as d) :as d))", Vec::new())
+        .await
+        .unwrap();
+    drop(root.query_stream(COPY, Vec::new()).await.unwrap());
+    assert_eq!(count(&mut root).await, ROWS);
+
+    // Without a later call on the session, the statement still commits.
+    root.query("(plan (delete dst (get dst :as d) :as d))", Vec::new())
+        .await
+        .unwrap();
+    drop(root.query_stream(COPY, Vec::new()).await.unwrap());
+    drop(root);
+    let mut waited = 0;
+    while committed(&engine).await != ROWS {
+        assert!(waited < 500, "the dropped statement never committed");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += 1;
+    }
+
+    let mut root = session(&engine, admin());
+    root.query("(plan (delete dst (get dst :as d) :as d))", Vec::new())
+        .await
+        .unwrap();
     let mut stream = root.query_stream(COPY, Vec::new()).await.unwrap();
     stream.next().await.unwrap().unwrap();
     stream.finish().await.unwrap();
     assert!(!root.in_transaction());
     assert_eq!(committed(&engine).await, ROWS);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a query stream dropped early stops and is as if it never ran: its
+/// implicit transaction ends, and an open one stays usable.
+async fn queries_dropped_early_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = fixture(&engine).await;
+    let scan = "(plan (get src :as s))";
+    let mut stream = root.query_stream(scan, Vec::new()).await.unwrap();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    assert!(!root.in_transaction());
+
+    root.begin(TxnOptions::default()).await.unwrap();
+    let mut stream = root.query_stream(scan, Vec::new()).await.unwrap();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    assert!(root.in_transaction());
+    assert!(!root.is_aborted().await.unwrap());
+    root.commit().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -158,7 +210,7 @@ async fn errors_mid_stream_undo_the_statement() {
     stream.next().await.unwrap().unwrap();
     let err = stream.collect().await.unwrap_err();
     assert_eq!(err.sqlstate(), "22012", "{err}");
-    assert!(root.is_aborted());
+    assert!(root.is_aborted().await.unwrap());
     assert_eq!(state(root.query(COUNT_DST, Vec::new()).await), "25P02");
     assert_eq!(
         state(root.query_stream(COUNT_DST, Vec::new()).await.map(|_| ())),
@@ -177,14 +229,15 @@ async fn errors_mid_stream_undo_the_statement() {
         ),
         "42P01"
     );
-    assert!(root.is_aborted());
+    assert!(root.is_aborted().await.unwrap());
     root.rollback().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Assert dropping a stream early in an explicit transaction undoes only
-/// that statement's writes and leaves the transaction usable.
-async fn explicit_stream_dropped_early_undoes_its_writes() {
+/// Assert a DML stream dropped early in an explicit transaction runs to its
+/// end there, keeping its writes until the transaction commits; a failure
+/// in the background aborts the transaction; and a rollback stops it.
+async fn explicit_dml_dropped_early_keeps_its_writes() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = fixture(&engine).await;
@@ -199,24 +252,55 @@ async fn explicit_stream_dropped_early_undoes_its_writes() {
     stream.next().await.unwrap().unwrap();
     drop(stream);
     assert!(root.in_transaction());
-    assert!(!root.is_aborted());
-    assert_eq!(
-        count(&mut root).await,
-        1,
-        "only the earlier statement's row stays"
-    );
-    // A finished stream keeps its writes in the transaction until it commits.
-    root.query_stream(COPY, Vec::new())
-        .await
-        .unwrap()
-        .finish()
-        .await
-        .unwrap();
-    assert!(root.in_transaction());
+    assert!(!root.is_aborted().await.unwrap());
     assert_eq!(count(&mut root).await, ROWS + 1);
     assert_eq!(committed(&engine).await, 0);
     root.commit().await.unwrap();
     assert_eq!(committed(&engine).await, ROWS + 1);
+
+    // A failure while finishing in the background aborts the transaction.
+    root.query("(plan (delete dst (get dst :as d) :as d))", Vec::new())
+        .await
+        .unwrap();
+    root.begin(TxnOptions::default()).await.unwrap();
+    let mut stream = root.query_stream(COPY_FAILING, Vec::new()).await.unwrap();
+    stream.next().await.unwrap().unwrap();
+    drop(stream);
+    assert!(root.in_transaction());
+    assert!(root.is_aborted().await.unwrap());
+    root.commit().await.unwrap_err();
+    assert_eq!(committed(&engine).await, 0);
+
+    // Every call waits for a statement finishing in the open transaction:
+    // `begin` sees it still open, and DDL runs in it rather than alone.
+    root.begin(TxnOptions::default()).await.unwrap();
+    drop(root.query_stream(COPY, Vec::new()).await.unwrap());
+    assert!(matches!(
+        root.begin(TxnOptions::default()).await,
+        Err(EngineError::TransactionInProgress)
+    ));
+    drop(
+        root.query_stream("(plan (delete dst (get dst :as d) :as d))", Vec::new())
+            .await
+            .unwrap(),
+    );
+    root.create_table(&table("scratch", &[("n", "(not-null int8)")], &["n"]))
+        .await
+        .unwrap();
+    root.rollback().unwrap();
+    assert_eq!(
+        state(root.query("(plan (get scratch))", Vec::new()).await),
+        "42P01",
+        "the DDL ran in the rolled-back transaction"
+    );
+
+    // A rollback stops a statement still finishing, discarding its writes.
+    root.begin(TxnOptions::default()).await.unwrap();
+    drop(root.query_stream(COPY, Vec::new()).await.unwrap());
+    root.rollback().unwrap();
+    assert!(!root.in_transaction());
+    assert_eq!(count(&mut root).await, 0);
+    assert_eq!(committed(&engine).await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -273,7 +357,7 @@ async fn statement_timeout_cancels_streams() {
     let err = stream.next().await.unwrap().unwrap_err();
     assert_eq!(err.sqlstate(), "57014", "{err}");
     drop(stream);
-    assert!(root.is_aborted());
+    assert!(root.is_aborted().await.unwrap());
     root.rollback().unwrap();
     root.set_statement_timeout(None);
     assert_eq!(committed(&engine).await, 0);

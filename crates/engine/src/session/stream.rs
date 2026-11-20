@@ -11,6 +11,18 @@ use super::connection::Session;
 use super::result::QueryResult;
 use crate::error::EngineError;
 
+/// A planned statement's executing batches and what they hold.
+pub(super) struct Execution {
+    /// The output column names.
+    pub(super) columns: Vec<String>,
+    /// The output column types.
+    pub(super) types: Vec<Type>,
+    /// The executing plan's batches.
+    pub(super) batches: BatchStream,
+    /// Whether the plan writes (DML).
+    pub(super) writes: bool,
+}
+
 /// The rows of a running query or DML statement, read a batch at a time
 /// (from [`Session::query_stream`]).
 ///
@@ -27,9 +39,15 @@ use crate::error::EngineError;
 /// - **An error:** its writes are undone, and the open transaction is
 ///   aborted (an implicit one is rolled back). The error is returned once;
 ///   the stream then ends.
-/// - **Dropped before its end:** execution stops, its writes are undone,
-///   and an implicit transaction is rolled back. An open transaction is
-///   not aborted: the statement is as if it had never run.
+/// - **Dropped before its end:** a query stops, and is as if it had never
+///   run: an implicit transaction is rolled back, and an open one is not
+///   aborted. A DML statement runs to its end anyway, as in Postgres, and
+///   its remaining rows are discarded: it ends as if read to the end (an
+///   implicit transaction commits) or, if it fails, as for an error. It
+///   finishes in the background, and the session's next call waits for
+///   it, so the next statement sees its writes. A failure is reported to
+///   no one, but aborts an open transaction, so its commit then fails;
+///   [`Session::rollback`] stops it instead.
 ///
 /// The borrow checker keeps the session from running another statement
 /// meanwhile:
@@ -56,28 +74,30 @@ pub struct QueryStream<'s> {
     types: Vec<Type>,
     /// The executing plan's batches, until the statement ends.
     batches: Option<BatchStream>,
+    /// Whether the statement writes (DML), so it runs to its end even if
+    /// the stream is dropped.
+    writes: bool,
     /// When the statement times out, if it has a timeout.
     deadline: Option<Instant>,
 }
 
 impl<'s> QueryStream<'s> {
-    /// Construct the stream of a begun statement executing as `batches`.
+    /// Construct the stream of a begun statement executing as `run`.
     pub(super) fn new(
         session: &'s mut Session,
         statement: Statement,
         implicit: bool,
-        columns: Vec<String>,
-        types: Vec<Type>,
-        batches: BatchStream,
+        run: Execution,
         deadline: Option<Instant>,
     ) -> Self {
         Self {
             session,
             statement: Some(statement),
             implicit,
-            columns,
-            types,
-            batches: Some(batches),
+            columns: run.columns,
+            types: run.types,
+            batches: Some(run.batches),
+            writes: run.writes,
             deadline,
         }
     }
@@ -171,13 +191,23 @@ impl<'s> QueryStream<'s> {
 }
 
 impl Drop for QueryStream<'_> {
-    /// Cancel the statement if it hasn't ended: stop executing it and undo
-    /// its writes, rolling back an implicit transaction.
+    /// End the statement if it hasn't ended: run DML to its end in the
+    /// background; stop a query and undo it, rolling back an implicit
+    /// transaction.
     fn drop(&mut self) {
-        // Dropping the batches first stops execution before the undo.
-        self.batches = None;
-        if let Some(statement) = self.statement.take() {
-            self.session.cancel_statement(statement, self.implicit);
+        let Some(statement) = self.statement.take() else {
+            return;
+        };
+        match (self.writes, self.batches.take()) {
+            (true, Some(batches)) => {
+                self.session
+                    .finish_in_background(statement, self.implicit, batches, self.deadline)
+            }
+            (_, batches) => {
+                // Dropping the batches first stops execution before the undo.
+                drop(batches);
+                self.session.cancel_statement(statement, self.implicit);
+            }
         }
     }
 }

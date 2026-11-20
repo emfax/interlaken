@@ -338,6 +338,16 @@ impl Physical {
     pub fn size(&self) -> usize {
         1 + self.op.inputs().iter().map(|i| i.size()).sum::<usize>()
     }
+
+    /// Return whether the plan rooted here writes a table (contains an
+    /// insert, update or delete).
+    #[must_use]
+    pub fn writes(&self) -> bool {
+        matches!(
+            self.op,
+            Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. }
+        ) || self.op.inputs().iter().any(|i| i.writes())
+    }
 }
 
 /// Number the operators of `node` in preorder, starting at `next`.
