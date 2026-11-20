@@ -75,6 +75,7 @@ cargo test --workspace --release      # the full suite; release mode keeps the p
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --workspace --no-deps --open
 cargo bench -p interlaken-engine      # executor benchmarks (ADR-0033)
+UPDATE_BOOK=1 cargo test -p interlaken-engine --test book_reference   # regenerate the book's reference sections
 ```
 
 The slow durability checks are scripts in [`scripts/`](scripts):

@@ -12,8 +12,8 @@ mod lookup;
 mod memory;
 
 pub use builtins::{
-    FIRST_USER_FUNCTION_ID, binary_op_properties, builtin_functions, cast_properties,
-    install_builtins, unary_op_properties,
+    FIRST_USER_FUNCTION_ID, binary_op_properties, builtin_description, builtin_functions,
+    cast_properties, install_builtins, unary_op_properties,
 };
 pub use defs::{
     ColumnDef, FunctionDef, FunctionKind, FunctionProperties, IndexColumn, IndexDef, TableDef,

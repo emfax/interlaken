@@ -227,6 +227,69 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
     out
 }
 
+/// Return a one-sentence description of the built-in function `name`, for
+/// documentation; `None` if no built-in has that name.
+///
+/// Every name [`builtin_functions`] returns has a description; the book's
+/// function reference is generated from these and the definitions.
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_ir::catalog::builtin_description;
+///
+/// assert!(builtin_description("lower").is_some());
+/// assert!(builtin_description("no_such_function").is_none());
+/// ```
+#[must_use]
+pub fn builtin_description(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "lower" => "The text with every character converted to lower case.",
+        "upper" => "The text with every character converted to upper case.",
+        "length" => "The number of characters (not bytes) in the text.",
+        "substr" => {
+            "`substr(t, start, count)`: the characters of `t` from 1-based position `start` for \
+             `count` characters; positions before the first character count towards `count`, \
+             and a negative `count` is an error (`22011`)."
+        }
+        "abs" => "The absolute value; the minimum integer of its type overflows (`22003`).",
+        "now" => "The time the current transaction started; the same for every call in it.",
+        "random" => {
+            "A pseudo-random value in [0, 1), from a generator seeded when the transaction starts."
+        }
+        "gen_random_uuid" => "A random version 4 UUID, from the same generator as `random`.",
+        "count" => {
+            "With no argument (`count(*)`), the number of rows; with one, the number of rows \
+             whose argument is not NULL."
+        }
+        "sum" => {
+            "The sum of the non-NULL values, or NULL if there are none. Integer sums are \
+             exact and return `int8`, failing with `22003` if the total does not fit."
+        }
+        "avg" => "The mean of the non-NULL values as `float8`, or NULL if there are none.",
+        "min" => "The smallest non-NULL value, or NULL if there are none.",
+        "max" => "The largest non-NULL value, or NULL if there are none.",
+        "bool_and" => "True if every non-NULL value is true; NULL if there are none.",
+        "bool_or" => "True if any non-NULL value is true; NULL if there are none.",
+        "assert_present" => {
+            "Its argument, or an error (`22004`) if it is NULL. Security lowering uses it for \
+             entity attributes a policy reads that may be absent."
+        }
+        "redact" => "A column mask: always `****`.",
+        "mask_last4" => {
+            "A column mask: every character but the last four replaced by `*`; text of four \
+             characters or fewer is unchanged."
+        }
+        "policy_mask" => {
+            "`policy_mask(visible, value, masked)`: `value` where `visible` is true, else \
+             `masked`. Security lowering uses it for \
+             masked columns; it is volatile so the optimizer never moves the condition, and \
+             `EXPLAIN` hides it."
+        }
+        _ => return None,
+    })
+}
+
 /// Add every built-in function to `catalog`.
 ///
 /// # Errors
@@ -278,4 +341,21 @@ pub fn binary_op_properties(op: BinaryOp, _operand: &DataType) -> FunctionProper
 pub fn cast_properties(from: &DataType, to: &DataType) -> FunctionProperties {
     let widening = implicit(from, to) && !(is_integer(from) && to == &s(ScalarType::Float8));
     pure(true, widening)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// Assert every built-in function name has a description.
+    fn every_builtin_is_described() {
+        for f in builtin_functions() {
+            let name = f.name.to_string();
+            assert!(
+                builtin_description(&name).is_some(),
+                "{name} has no description"
+            );
+        }
+    }
 }
