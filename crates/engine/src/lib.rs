@@ -28,3 +28,8 @@ pub use authz::{EntityData, LoadedEntities, load_entities, load_principal};
 pub use error::EngineError;
 pub use privileges::{Privilege, Privileges};
 pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session};
+
+/// The README's examples, compiled and run as doc tests so they stay correct.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
