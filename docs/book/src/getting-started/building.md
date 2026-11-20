@@ -84,6 +84,13 @@ cargo bench -p interlaken-engine --bench executor          # throughput and peak
 cargo bench -p interlaken-storage --bench commit_throughput  # commits per second by durability and concurrency
 ```
 
+## Continuous integration
+
+Two GitHub Actions workflows live in `.github/workflows`:
+
+- **`nightly.yml`** runs at 03:00 UTC, on nights when `main` has new commits: clippy, the full test suite, the SMT prover tests, the slow ignored tests, the power-loss tests on LazyFS and the disk-space soak. Run it by hand from the Actions tab to skip the check for new commits.
+- **`book.yml`** builds this book and publishes it to GitHub Pages whenever a change to `docs/book` reaches `main`.
+
 ## Documentation
 
 ```sh

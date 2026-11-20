@@ -32,7 +32,7 @@ Entry format:
 - **Why:** `scripts/power-loss.sh` (LazyFS, 50 cycles per test) and `scripts/disk-space-soak.sh` (10 minutes) are too slow for every commit. The normal suite runs only short versions, and skips power loss without `LAZYFS_ROOT`. Both scripts exit non-zero on failure, but nothing runs them yet. The CI runner needs FUSE (`/dev/fuse`, `fusermount3`), CMake and g++. It also needs either `libfuse3-dev` or `apt-get download`; `scripts/build-lazyfs.sh` handles the latter.
 - **When:** When the repository gets CI.
 - **Size:** About half a day.
-- **Status:** open
+- **Status:** in progress. `.github/workflows/nightly.yml` runs both scripts, the full suite, the SMT prover tests and the slow ignored tests at 03:00 UTC when `main` has commits from the last 25 hours. It hasn't run yet: the repository has no GitHub remote. Mark this done after the first green run. Elle isn't run yet; it needs Java and the `elle-cli` jar on the runner.
 
 ### pipelined-commit-validation: Validate the next commit group while the current one syncs
 - **Origin:** ADR-0005 measurements, M3

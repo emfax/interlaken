@@ -1,6 +1,6 @@
 # Testing durability
 
-The normal test suite checks crash recovery with short runs. Three scripts in `scripts/` run the longer checks that durability claims rest on. Each exits non-zero on failure, so CI can run them nightly. The repository has no CI configuration yet (backlog `nightly-durability-ci`).
+The normal test suite checks crash recovery with short runs. Three scripts in `scripts/` run the longer checks that durability claims rest on. Each exits non-zero on failure. The nightly workflow, `.github/workflows/nightly.yml`, runs `power-loss.sh` and `disk-space-soak.sh` on `main` with their defaults, together with the full test suite and the slow ignored tests, on nights after new commits.
 
 ## Power loss: `scripts/power-loss.sh`
 
