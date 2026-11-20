@@ -41,6 +41,10 @@ struct ReadmeDoctests;
 /// Rust example is listed here.
 #[cfg(doctest)]
 mod book {
+    /// The IR text language: parameters and prepared plans.
+    #[doc = include_str!("../../../docs/book/src/ir/parameters.md")]
+    struct Parameters;
+
     /// Operations: configuration.
     #[doc = include_str!("../../../docs/book/src/operations/configuration.md")]
     struct Configuration;
