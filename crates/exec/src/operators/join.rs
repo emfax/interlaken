@@ -21,18 +21,48 @@ use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, batch_bytes, entry_bytes};
-use crate::physical::Physical;
+use crate::memory::{Reservation, batch_bytes, key_bytes, vec_bytes};
+use crate::physical::{BATCH_ROWS, Physical};
 
 /// The most pairs evaluated against the residual at once.
 const PAIR_CHUNK: usize = 4096;
+
+/// Sentinel ending a chain of right rows with equal keys.
+const END: u32 = u32::MAX;
+
+/// The right rows with each key, as a chain through [`Index::next`].
+///
+/// A row per key costs a table entry (the key and two row numbers) plus
+/// four bytes, instead of a vector of rows per key.
+struct Index {
+    /// The first and last right row with each key (keys with a NULL are left out).
+    chains: HashMap<RowKey, (u32, u32)>,
+    /// The next right row with the same key as each row, or [`END`].
+    next: Vec<u32>,
+}
+
+impl Index {
+    /// Return the right rows with `key`, in row order.
+    fn rows(&self, key: &RowKey) -> Vec<u32> {
+        let mut out = Vec::new();
+        let Some(&(first, _)) = self.chains.get(key) else {
+            return out;
+        };
+        let mut row = first;
+        while row != END {
+            out.push(row);
+            row = self.next[row as usize];
+        }
+        out
+    }
+}
 
 /// The built right side.
 struct Build {
     /// Every right row.
     rows: RecordBatch,
     /// Right rows by key value; `None` for a nested-loop join.
-    index: Option<HashMap<RowKey, Vec<u32>>>,
+    index: Option<Index>,
     /// Which right rows matched some left row (right and full joins).
     matched: Vec<bool>,
 }
@@ -67,47 +97,84 @@ struct JoinState {
 
 impl JoinState {
     /// Read and index the right input.
+    ///
+    /// The batches read and their concatenation exist together for a
+    /// moment, and the reservation covers both. Keys are evaluated and
+    /// indexed a batch's worth of rows at a time.
     async fn build(&mut self) -> Result<(), ExecError> {
         let mut right = self.right.take().expect("built once");
         let mut batches = Vec::new();
+        let mut held = 0;
         let mut yielder = Yielder::default();
         while let Some(b) = right.next().await {
             let b = b?;
             yielder.tick().await;
-            self.memory.grow(batch_bytes(&b))?;
+            let bytes = batch_bytes(&b);
+            self.memory.grow(bytes)?;
+            held += bytes;
             batches.push(b);
         }
-        let rows = concat(&self.right_schema, &batches)?;
-        drop(batches);
-        self.memory.resize(batch_bytes(&rows) + rows.num_rows())?;
+        let rows = if batches.len() == 1 {
+            batches.pop().expect("one batch")
+        } else {
+            // Concatenation copies each batch's own rows.
+            self.memory.grow(held)?;
+            let rows = concat(&self.right_schema, &batches)?;
+            drop(batches);
+            rows
+        };
+        let n = rows.num_rows();
+        self.memory.resize(batch_bytes(&rows) + n)?;
+        let matched = vec![false; n];
         let index = if self.right_keys.is_empty() {
             None
         } else {
-            let keys = self
-                .right_keys
-                .iter_mut()
-                .map(|k| k.eval(rows.columns(), rows.num_rows()))
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut index: HashMap<RowKey, Vec<u32>> = HashMap::new();
-            for (j, key) in row_keys(&keys, rows.num_rows())?.into_iter().enumerate() {
-                if !key.0.iter().any(interlaken_ir::interp::Datum::is_null) {
-                    self.memory
-                        .grow(entry_bytes(&key, std::mem::size_of::<u32>()))?;
-                    index
-                        .entry(key)
-                        .or_default()
-                        .push(u32::try_from(j).expect("build rows fit in u32"));
-                }
-            }
-            Some(index)
+            Some(self.index(&rows)?)
         };
-        let matched = vec![false; rows.num_rows()];
         self.build = Some(Build {
             rows,
             index,
             matched,
         });
         Ok(())
+    }
+
+    /// Index `rows` by their key values, reserving for the index as it grows.
+    fn index(&mut self, rows: &RecordBatch) -> Result<Index, ExecError> {
+        let n = rows.num_rows();
+        self.memory.grow(vec_bytes::<u32>(n))?;
+        let mut index = Index {
+            chains: HashMap::new(),
+            next: vec![END; n],
+        };
+        for start in (0..n).step_by(BATCH_ROWS) {
+            let len = BATCH_ROWS.min(n - start);
+            let chunk = rows.slice(start, len);
+            let keys = self
+                .right_keys
+                .iter_mut()
+                .map(|k| k.eval(chunk.columns(), len))
+                .collect::<Result<Vec<_>, _>>()?;
+            for (i, key) in row_keys(&keys, len)?.into_iter().enumerate() {
+                if key.0.iter().any(interlaken_ir::interp::Datum::is_null) {
+                    continue;
+                }
+                let j = u32::try_from(start + i).expect("build rows fit in u32");
+                if let Some((_, last)) = index.chains.get_mut(&key) {
+                    index.next[*last as usize] = j;
+                    *last = j;
+                    continue;
+                }
+                let replaced = self.memory.reserve_entry::<(RowKey, (u32, u32))>(
+                    index.chains.len(),
+                    index.chains.capacity(),
+                    key_bytes(&key),
+                )?;
+                index.chains.insert(key, (j, j));
+                self.memory.shrink(replaced);
+            }
+        }
+        Ok(index)
     }
 
     /// Return each left row's candidate right rows.
@@ -129,7 +196,7 @@ impl JoinState {
                 if key.0.iter().any(interlaken_ir::interp::Datum::is_null) {
                     Vec::new()
                 } else {
-                    index.get(&key).cloned().unwrap_or_default()
+                    index.rows(&key)
                 }
             })
             .collect())

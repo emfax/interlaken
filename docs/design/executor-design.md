@@ -192,5 +192,5 @@ Roughly 11 weeks for one experienced engineer. It can start after storage milest
 ### Open questions
 
 - Should `Nest` produce jsonb directly or Arrow list/struct columns that the GraphQL serializer converts? jsonb is simpler; Arrow keeps types and is cheaper to serialize. *Resolved by [ADR-0012](0012-nesting-and-decorrelation-for-graphql.md): typed Arrow list-of-struct, converted to JSON by serializers.*
-- Default memory budget per query and per node for the container sizes we expect. *Resolved in F3 ([ADR-0027](0027-query-memory-management.md) phase 2): 256 MiB per query; a node pool of a quarter of the memory left after storage's caches.*
+- Default memory budget per query and per node for the container sizes we expect. *Resolved in F3 ([ADR-0027](0027-query-memory-management.md) phase 2): 256 MiB per query; a node pool of a quarter of the memory left after storage's caches, raised to half once reservations matched the heap (phase 3).*
 - Should a hash join's build side be chosen at run time (after seeing input sizes) rather than at planning time? *E3 chose plan time. F3's `IndexLookup` joins decide at run time between lookups and hashing ([ADR-0033](0033-executor-performance.md)).*

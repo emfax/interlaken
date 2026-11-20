@@ -184,7 +184,9 @@ async fn streaming_runs_in_a_small_budget() {
     let expected = (0..ROWS).filter(|i| i.to_string().contains('7')).count();
     assert_eq!(count(&collect(&streaming, &ctx).await.unwrap()), expected);
     // A top-N keeps only twice its fetch (or a batch) of rows, so it fits where a full sort fails.
-    let ctx = context(&txn, QueryMemory::new(2 * SMALL, None));
+    // Those are two batches of rows and their key values (a text value takes
+    // a 32-byte `Datum` and a heap chunk): about 200 KiB.
+    let ctx = context(&txn, QueryMemory::new(4 * SMALL, None));
     let top = physical("(plan (limit (sort (get t) (desc b)) :count 3))");
     assert_eq!(count(&collect(&top, &ctx).await.unwrap()), 3);
     let sort = physical("(plan (sort (get t) (desc b)))");
@@ -206,18 +208,25 @@ async fn node_pool_caps_concurrent_queries() {
     let txn = storage.begin(TxnOptions::default()).await.unwrap();
     let sort = physical("(plan (sort (get t) (asc b)))");
 
-    // Measure what one sort holds once it is producing output.
+    // Measure what one sort needs while sorting (its peak: the input and
+    // the key values) and holds once it is producing output (the input).
     let probe = QueryMemory::new(usize::MAX, None);
     let mut stream = execute(&sort, &context(&txn, probe.clone()));
     stream.next().await.unwrap().unwrap();
     let held = probe.used();
+    let peak = probe.peak();
     assert!(held > SMALL, "the sort holds {held} bytes");
+    assert!(
+        peak > held,
+        "the sort's peak {peak} is what it holds after sorting"
+    );
     drop(stream);
     assert_eq!(probe.used(), 0, "cancelling returns the sort's memory");
 
-    // Two sorts fit their own budgets, but not the pool together.
-    let pool = MemoryPool::new(held * 3 / 2);
-    let budget = || QueryMemory::new(held * 2, Some(pool.clone()));
+    // Two sorts fit their own budgets, but not the pool together: the
+    // second can't reach its peak while the first holds its input.
+    let pool = MemoryPool::new(peak + held / 2);
+    let budget = || QueryMemory::new(peak * 2, Some(pool.clone()));
     let mut first = execute(&sort, &context(&txn, budget()));
     first.next().await.unwrap().unwrap();
     assert!(pool.used() >= held);

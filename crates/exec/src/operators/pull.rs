@@ -58,15 +58,18 @@ pub(crate) fn chunks(batch: &RecordBatch) -> Vec<RecordBatch> {
 }
 
 /// Return the values of each row of `columns` as a hashable key.
+///
+/// Each key's vector holds exactly its values (collecting through a
+/// `Result` would leave room for at least four), since hash tables keep
+/// millions of them.
 pub(crate) fn row_keys(columns: &[ArrayRef], rows: usize) -> Result<Vec<RowKey>, ExecError> {
     (0..rows)
         .map(|r| {
-            Ok(RowKey(
-                columns
-                    .iter()
-                    .map(|c| datum_at(c.as_ref(), r))
-                    .collect::<Result<Vec<Datum>, _>>()?,
-            ))
+            let mut values: Vec<Datum> = Vec::with_capacity(columns.len());
+            for c in columns {
+                values.push(datum_at(c.as_ref(), r)?);
+            }
+            Ok(RowKey(values))
         })
         .collect()
 }

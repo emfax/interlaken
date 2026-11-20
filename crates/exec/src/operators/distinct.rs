@@ -12,7 +12,7 @@ use interlaken_ir::interp::RowKey;
 use super::pull::{batch, row_keys, take};
 use crate::error::ExecError;
 use crate::exec::BatchStream;
-use crate::memory::{Reservation, entry_bytes};
+use crate::memory::{Reservation, key_bytes};
 
 /// Return the rows of `b` not seen before (by value, NULLs equal), recording
 /// them in `seen` and the memory they take in `memory`.
@@ -25,8 +25,10 @@ pub(crate) fn first_occurrences(
     let mut keep = Vec::new();
     for (i, key) in row_keys(b.columns(), b.num_rows())?.into_iter().enumerate() {
         if !seen.contains(&key) {
-            memory.grow(entry_bytes(&key, 0))?;
+            let replaced =
+                memory.reserve_entry::<RowKey>(seen.len(), seen.capacity(), key_bytes(&key))?;
             seen.insert(key);
+            memory.shrink(replaced);
             keep.push(u32::try_from(i).expect("rows fit in u32"));
         }
     }

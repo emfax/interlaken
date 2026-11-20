@@ -31,7 +31,7 @@ use interlaken_ir::{DataType, ScalarType};
 
 use crate::columnar::datum_at;
 use crate::error::ExecError;
-use crate::memory::{datum_bytes, row_bytes};
+use crate::memory::{datum_heap_bytes, push_bytes, row_heap_bytes, vec_bytes};
 use crate::physical::Aggregate;
 
 /// How one aggregate accumulates.
@@ -290,23 +290,40 @@ impl Accumulator {
         if !replace {
             return Ok(0);
         }
-        let old = best.as_ref().map_or(0, datum_bytes);
-        let new = datum_bytes(&value);
+        // The value sits inline in the state; only its heap changes.
+        let old = best.as_ref().map_or(0, datum_heap_bytes);
+        let new = datum_heap_bytes(&value);
         *best = Some(value);
         Ok(isize::try_from(new).unwrap_or(isize::MAX) - isize::try_from(old).unwrap_or(0))
     }
 
-    /// Add one argument tuple to a tuple-keeping state; return its bytes.
+    /// Add one argument tuple to a tuple-keeping state; return the heap it adds.
+    ///
+    /// That is the tuple's own heap, plus the growth of the vector of
+    /// tuples when the push doubles it.
     pub(crate) fn push_tuple(&mut self, tuple: Vec<Datum>) -> Result<usize, ExecError> {
         match self {
             Self::Tuples(tuples) => {
-                let bytes = row_bytes(&tuple);
+                let bytes = row_heap_bytes(&tuple)
+                    + push_bytes::<Vec<Datum>>(tuples.len(), tuples.capacity());
                 tuples.push(tuple);
                 Ok(bytes)
             }
             other => Err(ExecError::Unsupported(format!(
                 "argument tuple for aggregate state {other:?}"
             ))),
+        }
+    }
+
+    /// Estimate the heap the state owns.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Best(Some(value)) => datum_heap_bytes(value),
+            Self::Tuples(tuples) => {
+                vec_bytes::<Vec<Datum>>(tuples.capacity())
+                    + tuples.iter().map(row_heap_bytes).sum::<usize>()
+            }
+            _ => 0,
         }
     }
 

@@ -19,7 +19,7 @@ use super::pull::{Pull, batch, into_stream, row_keys, take};
 use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, execute};
-use crate::memory::{Reservation, entry_bytes};
+use crate::memory::{Reservation, key_bytes};
 use crate::physical::Physical;
 
 /// Relabel a batch with the set operation's schema.
@@ -57,9 +57,13 @@ impl Pull for Filtered {
                     match self.counts.get_mut(&key) {
                         Some(n) => *n += 1,
                         None => {
-                            self.memory
-                                .grow(entry_bytes(&key, std::mem::size_of::<usize>()))?;
+                            let replaced = self.memory.reserve_entry::<(RowKey, usize)>(
+                                self.counts.len(),
+                                self.counts.capacity(),
+                                key_bytes(&key),
+                            )?;
                             self.counts.insert(key, 1);
+                            self.memory.shrink(replaced);
                         }
                     }
                 }

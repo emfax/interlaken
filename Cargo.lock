@@ -893,6 +893,7 @@ dependencies = [
  "futures",
  "interlaken-ir",
  "interlaken-storage",
+ "interlaken-test-alloc",
  "proptest",
  "tempfile",
  "thiserror",
@@ -921,6 +922,10 @@ dependencies = [
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "interlaken-test-alloc"
+version = "0.1.0"
 
 [[package]]
 name = "interval-heap"

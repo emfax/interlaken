@@ -1,0 +1,23 @@
+[package]
+name = "interlaken-test-alloc"
+description = "A counting global allocator for memory-accounting tests (not published)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+# Not the workspace lints: implementing `GlobalAlloc` takes `unsafe`, which
+# the workspace forbids. This crate is a test-only dev-dependency and holds
+# the only `unsafe` code in the workspace; it forwards to the system
+# allocator unchanged.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

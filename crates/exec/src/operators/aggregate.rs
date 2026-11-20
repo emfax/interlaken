@@ -18,14 +18,14 @@ use interlaken_ir::interp::{Datum, RowKey};
 use interlaken_ir::{Expr, Type};
 
 use super::accumulate::{Accumulator, Arg, Kind};
-use super::pull::{Pull, batch, chunks, into_stream, row_keys};
+use super::pull::{Pull, batch, into_stream, row_keys};
 use crate::columnar::{build_array, datum_at};
 use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, entry_bytes};
-use crate::physical::{Aggregate, Physical};
+use crate::memory::{Reservation, key_bytes, row_heap_bytes, table_capacity_bytes, vec_bytes};
+use crate::physical::{Aggregate, BATCH_ROWS, Physical};
 
 /// One aggregate, compiled.
 struct Compiled {
@@ -51,9 +51,13 @@ struct AggregateState {
     types: Vec<Type>,
     /// The output schema.
     schema: SchemaRef,
-    /// Output batches not yet returned.
-    ready: Vec<RecordBatch>,
-    /// The memory held by groups and kept argument tuples.
+    /// Every group's key values, in first-seen order, once the input is consumed.
+    groups: Vec<Vec<Datum>>,
+    /// Every group's accumulators, one per aggregate, group after group.
+    states: Vec<Accumulator>,
+    /// The groups already returned.
+    emitted: usize,
+    /// The memory held by groups and their accumulators.
     memory: Reservation,
 }
 
@@ -68,12 +72,27 @@ fn true_rows(result: &ArrayRef) -> Result<Vec<usize>, ExecError> {
         .collect())
 }
 
+/// Grow `memory` by a signed change in heap bytes.
+fn apply_delta(memory: &mut Reservation, delta: isize) -> Result<(), ExecError> {
+    match usize::try_from(delta) {
+        Ok(grown) => memory.grow(grown),
+        Err(_) => {
+            memory.shrink(delta.unsigned_abs());
+            Ok(())
+        }
+    }
+}
+
 impl AggregateState {
-    /// Consume the input and compute every group's output.
+    /// Consume the input, folding every row into its group's accumulators.
+    ///
+    /// Each group's key is held once, in the table, and its accumulators
+    /// in one vector shared by all groups; at the end the keys move out of
+    /// the table into first-seen order.
     async fn run(&mut self) -> Result<(), ExecError> {
         let mut input = self.input.take().expect("run once");
         let mut groups: HashMap<RowKey, usize> = HashMap::new();
-        let mut order: Vec<(Vec<Datum>, Vec<Accumulator>)> = Vec::new();
+        let width = self.aggs.len();
         let fresh: Vec<Accumulator> = self.aggs.iter().map(|a| a.kind.fresh()).collect();
         let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
@@ -90,13 +109,24 @@ impl AggregateState {
                 let group = match groups.get(&key) {
                     Some(&g) => g,
                     None => {
-                        // The key is held twice: in the map and in the output order.
-                        self.memory.grow(
-                            2 * entry_bytes(&key, fresh.len() * std::mem::size_of::<Accumulator>()),
+                        let g = groups.len();
+                        let states = &mut self.states;
+                        let grown = if states.len() + width > states.capacity() {
+                            let wanted = (2 * states.capacity()).max(states.len() + width);
+                            vec_bytes::<Accumulator>(wanted)
+                                - vec_bytes::<Accumulator>(states.capacity())
+                        } else {
+                            0
+                        };
+                        let replaced = self.memory.reserve_entry::<(RowKey, usize)>(
+                            groups.len(),
+                            groups.capacity(),
+                            key_bytes(&key) + grown,
                         )?;
-                        order.push((key.0.clone(), fresh.clone()));
-                        groups.insert(key, order.len() - 1);
-                        order.len() - 1
+                        states.extend_from_slice(&fresh);
+                        groups.insert(key, g);
+                        self.memory.shrink(replaced);
+                        g
                     }
                 };
                 group_of.push(group);
@@ -123,61 +153,89 @@ impl AggregateState {
                 let strict = compiled.agg.def.properties.strict;
                 if compiled.kind == Kind::Tuples {
                     for (k, &row) in rows.iter().enumerate() {
-                        let tuple = args
-                            .iter()
-                            .map(|c| datum_at(c.as_ref(), k))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        let bytes = order[group_of[row]].1[a].push_tuple(tuple)?;
+                        let mut tuple = Vec::with_capacity(args.len());
+                        for c in &args {
+                            tuple.push(datum_at(c.as_ref(), k)?);
+                        }
+                        let bytes = self.states[group_of[row] * width + a].push_tuple(tuple)?;
                         self.memory.grow(bytes)?;
                     }
                     continue;
                 }
                 let arg = Arg::of(&args);
                 for (k, &row) in rows.iter().enumerate() {
-                    let delta = order[group_of[row]].1[a].update(compiled.kind, &arg, k, strict)?;
-                    match usize::try_from(delta) {
-                        Ok(grown) => self.memory.grow(grown)?,
-                        Err(_) => self.memory.shrink(delta.unsigned_abs()),
-                    }
+                    let delta = self.states[group_of[row] * width + a].update(
+                        compiled.kind,
+                        &arg,
+                        k,
+                        strict,
+                    )?;
+                    apply_delta(&mut self.memory, delta)?;
                 }
             }
         }
-        if self.keys.is_empty() && order.is_empty() {
-            order.push((Vec::new(), fresh));
+        if self.keys.is_empty() && groups.is_empty() {
+            self.states = fresh;
+            self.groups.push(Vec::new());
+            return Ok(());
         }
-        let mut rows: Vec<Vec<Datum>> = Vec::with_capacity(order.len());
-        for (key, accumulators) in order {
-            let mut row = key;
-            for (accumulator, compiled) in accumulators.into_iter().zip(&self.aggs) {
-                row.push(accumulator.finish(&compiled.agg, compiled.kind)?);
+        // Move the keys out of the table, in first-seen order.
+        let table = table_capacity_bytes::<(RowKey, usize)>(groups.capacity());
+        self.memory.grow(vec_bytes::<Vec<Datum>>(groups.len()))?;
+        let mut ordered: Vec<Vec<Datum>> = vec![Vec::new(); groups.len()];
+        for (key, g) in groups {
+            ordered[g] = key.0;
+        }
+        self.memory.shrink(table);
+        self.groups = ordered;
+        Ok(())
+    }
+
+    /// Finish the next batch of groups, moving their keys and accumulators out.
+    fn emit(&mut self) -> Result<Option<RecordBatch>, ExecError> {
+        let start = self.emitted;
+        let end = (start + BATCH_ROWS).min(self.groups.len());
+        if start == end {
+            return Ok(None);
+        }
+        self.emitted = end;
+        let width = self.aggs.len();
+        let nkeys = self.keys.len();
+        let mut columns: Vec<Vec<Datum>> = (0..nkeys + width)
+            .map(|_| Vec::with_capacity(end - start))
+            .collect();
+        let mut released = 0;
+        for g in start..end {
+            let key = std::mem::take(&mut self.groups[g]);
+            released += row_heap_bytes(&key);
+            for (c, value) in key.into_iter().enumerate() {
+                columns[c].push(value);
             }
-            rows.push(row);
+            for (a, compiled) in self.aggs.iter().enumerate() {
+                let state =
+                    std::mem::replace(&mut self.states[g * width + a], Accumulator::Count(0));
+                released += state.heap_bytes();
+                columns[nkeys + a].push(state.finish(&compiled.agg, compiled.kind)?);
+            }
         }
-        let columns = self
+        self.memory.shrink(released);
+        let arrays = self
             .types
             .iter()
-            .enumerate()
-            .map(|(c, ty)| {
-                build_array(
-                    &ty.data,
-                    &rows.iter().map(|r| r[c].clone()).collect::<Vec<_>>(),
-                )
-            })
+            .zip(&columns)
+            .map(|(ty, values)| build_array(&ty.data, values))
             .collect::<Result<Vec<_>, _>>()?;
-        let all = batch(&self.schema, columns, rows.len())?;
-        self.ready = chunks(&all);
-        self.ready.reverse();
-        Ok(())
+        batch(&self.schema, arrays, end - start).map(Some)
     }
 }
 
 impl Pull for AggregateState {
-    /// Aggregate everything on the first pull, then return the groups in batches.
+    /// Aggregate everything on the first pull, then return the groups a batch at a time.
     async fn next(&mut self) -> Result<Option<RecordBatch>, ExecError> {
         if self.input.is_some() {
             self.run().await?;
         }
-        Ok(self.ready.pop())
+        self.emit()
     }
 }
 
@@ -212,7 +270,9 @@ pub(crate) fn aggregate(
         aggs,
         types: node.types.clone(),
         schema: node.schema.clone(),
-        ready: Vec::new(),
+        groups: Vec::new(),
+        states: Vec::new(),
+        emitted: 0,
         memory: ctx.reserve(node, "HashAggregate"),
     }))
 }

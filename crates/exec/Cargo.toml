@@ -17,6 +17,7 @@ interlaken-storage.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+interlaken-test-alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

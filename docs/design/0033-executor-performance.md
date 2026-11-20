@@ -137,7 +137,7 @@ Not built. A profile of the million-row scan benchmarks put 89% of CPU samples o
 
 ### Default memory budgets
 
-See ADR-0027 for the figures. The per-query default stays 256 MiB. The recommended node pool is a quarter of the memory left after storage's caches, because resident memory runs up to 2.6 times ahead of reservations for hash tables and about 4 times for a finishing sort.
+See ADR-0027 for the figures. The per-query default stays 256 MiB. The recommended node pool is a quarter of the memory left after storage's caches, because resident memory runs up to 2.6 times ahead of reservations for hash tables and about 4 times for a finishing sort. *Since revised (ADR-0027 phase 3): reservations now match the heap within about 10%, and the recommended node pool is half of the memory left after storage's caches.*
 
 ## Implementation Phases
 

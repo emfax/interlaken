@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/exec", "crates/ir", "crates/storage"]
+members = ["crates/engine", "crates/exec", "crates/ir", "crates/storage", "crates/test-alloc"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ license = "Apache-2.0"
 interlaken-exec = { path = "crates/exec" }
 interlaken-ir = { path = "crates/ir" }
 interlaken-storage = { path = "crates/storage" }
+interlaken-test-alloc = { path = "crates/test-alloc" }
 fjall = { version = "3.1", features = ["bytes_1"] }
 bytes = "1"
 flume = { version = "0.12", default-features = false, features = ["async"] }

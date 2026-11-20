@@ -8,13 +8,25 @@
 //! operator; there is no spilling. Dropping a reservation (as happens when
 //! a query finishes, fails or is cancelled) returns its bytes.
 //!
-//! Sizes are estimates: Arrow buffer sizes for buffered batches, and an
-//! approximation of heap use for row values held in hash tables.
+//! Sizes are estimates of the heap an operator holds, measured against a
+//! counting allocator (`tests/memory_estimates.rs`):
+//!
+//! - batches count their Arrow buffers, or, for a slice of a larger buffer
+//!   (sort, aggregation and `Nest` outputs are split into slices), only the
+//!   bytes of the slice's own rows ([`batch_bytes`]);
+//! - values count their inline size plus every heap allocation they own,
+//!   by capacity, rounded up to the chunk the allocator hands out
+//!   ([`alloc_bytes`]);
+//! - hash tables count their buckets and control bytes from the table's
+//!   capacity, and while a table grows, the old and the new table together
+//!   ([`Reservation::reserve_entry`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow_array::RecordBatch;
+use arrow_array::cast::AsArray;
+use arrow_array::{Array, RecordBatch};
+use arrow_schema::DataType as ArrowType;
 use interlaken_ir::interp::{Datum, RowKey};
 
 use crate::error::ExecError;
@@ -219,6 +231,38 @@ impl Reservation {
         self.bytes -= bytes;
     }
 
+    /// Reserve for one more entry of type `T` in a hash table holding `len`
+    /// entries in room for `capacity`, plus `heap` bytes the entry owns.
+    ///
+    /// When the insert will grow the table, the new table is reserved on top
+    /// of the old one, since both exist while entries move. Returns the old
+    /// table's bytes, which the caller releases ([`Reservation::shrink`])
+    /// once the entry is inserted.
+    ///
+    /// The tables are `std`'s (hashbrown's): a power-of-two number of
+    /// buckets, at most seven eighths full, each holding a `T` and a control
+    /// byte, and doubling when full. Entries are never removed from the
+    /// tables operators reserve for, so a full table always grows.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Reservation::grow`]; nothing is reserved then.
+    pub(crate) fn reserve_entry<T>(
+        &mut self,
+        len: usize,
+        capacity: usize,
+        heap: usize,
+    ) -> Result<usize, ExecError> {
+        if len < capacity {
+            self.grow(heap)?;
+            return Ok(0);
+        }
+        let old = buckets(capacity);
+        let new = if old == 0 { 4 } else { 2 * old };
+        self.grow(table_bytes::<T>(new) + heap)?;
+        Ok(table_bytes::<T>(old))
+    }
+
     /// Hold exactly `bytes`, growing or shrinking as needed.
     ///
     /// # Errors
@@ -241,29 +285,245 @@ impl Drop for Reservation {
     }
 }
 
-/// Estimate the memory a batch holds: its Arrow buffers.
+/// Above this many bytes, glibc's `malloc` maps pages instead of carving a chunk from its heap.
+const MMAP_THRESHOLD: usize = 128 * 1024;
+
+/// Estimate the bytes the allocator hands out for a request of `n` bytes.
+///
+/// The model is glibc's `malloc` on 64-bit targets: a chunk is the request
+/// plus an 8-byte header, rounded up to 16 bytes, and at least 32; large
+/// requests are mapped in whole pages. Small values thus cost noticeably
+/// more than their length: a 13-byte string takes a 32-byte chunk.
+pub(crate) fn alloc_bytes(n: usize) -> usize {
+    match n {
+        0 => 0,
+        n if n >= MMAP_THRESHOLD => (n + 16).next_multiple_of(4096),
+        n => (n + 8).next_multiple_of(16).max(32),
+    }
+}
+
+/// Estimate the heap of a `Vec<T>` with room for `capacity` elements.
+pub(crate) fn vec_bytes<T>(capacity: usize) -> usize {
+    alloc_bytes(capacity * std::mem::size_of::<T>())
+}
+
+/// Return the extra heap the next push onto a `Vec<T>` holding `len` of `capacity` allocates.
+///
+/// A full vector doubles, to at least four elements (`std`'s growth rule
+/// for elements of up to 1 KiB).
+pub(crate) fn push_bytes<T>(len: usize, capacity: usize) -> usize {
+    if len < capacity {
+        return 0;
+    }
+    let grown = (2 * capacity).max(4).max(len + 1);
+    vec_bytes::<T>(grown) - vec_bytes::<T>(capacity)
+}
+
+/// Return the buckets of a hash table with room for `capacity` entries.
+fn buckets(capacity: usize) -> usize {
+    match capacity {
+        0 => 0,
+        // Tables of fewer than eight buckets fill all but one of them.
+        c if c < 8 => c + 1,
+        c => c / 7 * 8,
+    }
+}
+
+/// Estimate the heap of a hash table of `buckets` buckets holding entries of type `T`.
+///
+/// One allocation holds the entries, aligned to 16 bytes, then a control
+/// byte per bucket and one group (16 bytes) of trailing control bytes.
+fn table_bytes<T>(buckets: usize) -> usize {
+    if buckets == 0 {
+        return 0;
+    }
+    let entries = (buckets * std::mem::size_of::<T>()).next_multiple_of(16);
+    alloc_bytes(entries + buckets + 16)
+}
+
+/// Estimate the heap of a hash table of entries of type `T` with room for `capacity` entries.
+pub(crate) fn table_capacity_bytes<T>(capacity: usize) -> usize {
+    table_bytes::<T>(buckets(capacity))
+}
+
+/// Estimate the memory a batch holds: its Arrow buffers, or for a slice of
+/// larger buffers, only its own rows' share (see [`array_bytes`]).
+///
+/// Slices of one batch then add up to that batch, so an operator buffering
+/// another blocking operator's sliced output counts it once, not once per
+/// slice.
 pub(crate) fn batch_bytes(batch: &RecordBatch) -> usize {
-    batch.get_array_memory_size()
+    batch
+        .columns()
+        .iter()
+        .map(|c| array_bytes(c.as_ref()))
+        .sum()
 }
 
-/// Estimate the heap and inline memory of a value.
-pub(crate) fn datum_bytes(datum: &Datum) -> usize {
-    std::mem::size_of::<Datum>()
-        + match datum {
-            Datum::Text(s) | Datum::Jsonb(s) => s.len(),
-            Datum::Bytea(b) => b.len(),
-            Datum::Array(items) | Datum::Record(items) => items.iter().map(datum_bytes).sum(),
-            _ => 0,
+/// Estimate the memory an array holds.
+///
+/// An array whose buffers are at most twice its own rows' bytes (plus a
+/// little fixed overhead) counts its buffers whole, including spare
+/// capacity a builder left. One sliced from much larger buffers counts only
+/// its own rows: the buffers are shared with the other slices, and whoever
+/// holds all of them holds the buffers once.
+pub(crate) fn array_bytes(array: &dyn Array) -> usize {
+    /// Fixed overhead below which the whole buffers are counted regardless.
+    const SLACK: usize = 1024;
+    let whole = array.get_array_memory_size();
+    let own = own_bytes(array).unwrap_or(whole);
+    if whole <= 2 * own + SLACK { whole } else { own }
+}
+
+/// Return the bytes of an array's own rows, following list offsets into their values.
+///
+/// Arrow's slice size counts a sliced list's whole child; here only the
+/// child range the slice's offsets cover is counted. `None` if Arrow can't
+/// size the array.
+fn own_bytes(array: &dyn Array) -> Option<usize> {
+    let nulls = array.nulls().map_or(0, |n| n.len().div_ceil(8));
+    match array.data_type() {
+        ArrowType::List(_) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let (start, end) = (offsets[0], offsets[offsets.len() - 1]);
+            let values = list.values().slice(
+                usize::try_from(start).ok()?,
+                usize::try_from(end - start).ok()?,
+            );
+            Some(nulls + std::mem::size_of_val(offsets) + own_bytes(values.as_ref())?)
         }
+        ArrowType::Struct(_) => {
+            let columns = array.as_struct().columns();
+            let fields = columns
+                .iter()
+                .map(|c| own_bytes(c.as_ref()))
+                .sum::<Option<usize>>()?;
+            Some(nulls + fields)
+        }
+        _ => array.to_data().get_slice_memory_size().ok(),
+    }
 }
 
-/// Estimate the memory of a row of values held in a collection.
-pub(crate) fn row_bytes(row: &[Datum]) -> usize {
-    std::mem::size_of::<Vec<Datum>>() + row.iter().map(datum_bytes).sum::<usize>()
+/// Estimate the heap a value owns (not its inline size).
+pub(crate) fn datum_heap_bytes(datum: &Datum) -> usize {
+    match datum {
+        Datum::Text(s) | Datum::Jsonb(s) => alloc_bytes(s.capacity()),
+        Datum::Bytea(b) => alloc_bytes(b.capacity()),
+        Datum::Array(items) | Datum::Record(items) => row_heap_bytes(items),
+        _ => 0,
+    }
 }
 
-/// Estimate the memory of a hash table entry keyed by `key` with a value of `value` bytes.
-pub(crate) fn entry_bytes(key: &RowKey, value: usize) -> usize {
-    // Keys are stored once; hash tables carry roughly a word of overhead per entry.
-    row_bytes(&key.0) + value + 2 * std::mem::size_of::<usize>()
+/// Estimate the heap a vector of values owns: its buffer and every value's heap.
+pub(crate) fn row_heap_bytes(row: &Vec<Datum>) -> usize {
+    vec_bytes::<Datum>(row.capacity()) + row.iter().map(datum_heap_bytes).sum::<usize>()
+}
+
+/// Estimate the heap a hash key owns.
+pub(crate) fn key_bytes(key: &RowKey) -> usize {
+    row_heap_bytes(&key.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    #[test]
+    /// Assert the bucket model matches `std`'s tables as they grow.
+    fn table_model_follows_std_growth() {
+        let mut set: HashSet<u64> = HashSet::new();
+        let mut expected = 0;
+        for i in 0..100_000u64 {
+            if set.len() == set.capacity() {
+                expected = if expected == 0 { 4 } else { 2 * expected };
+            }
+            set.insert(i);
+            assert_eq!(buckets(set.capacity()), expected, "after {i}");
+        }
+        let map: HashMap<u64, u64> = HashMap::with_capacity(1000);
+        assert_eq!(buckets(map.capacity()), 2048);
+    }
+
+    #[test]
+    /// Assert pushes allocate as the growth model says.
+    fn push_model_follows_std_growth() {
+        let mut v: Vec<u32> = Vec::new();
+        for i in 0..10_000 {
+            let (len, capacity) = (v.len(), v.capacity());
+            let before = vec_bytes::<u32>(capacity);
+            v.push(i);
+            assert_eq!(
+                vec_bytes::<u32>(v.capacity()) - before,
+                push_bytes::<u32>(len, capacity),
+                "push {i}"
+            );
+        }
+    }
+
+    #[test]
+    /// Assert slices of one array add up to about its rows' bytes, and an unsliced array counts its buffers.
+    fn slices_count_their_own_rows() {
+        use std::sync::Arc;
+
+        use arrow_array::{ArrayRef, Int64Array, ListArray, StringArray, StructArray};
+        use arrow_buffer::OffsetBuffer;
+        use arrow_schema::{Field, Fields};
+
+        let n = 100_000;
+        let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(0..n));
+        let names: ArrayRef = Arc::new(StringArray::from_iter_values(
+            (0..n).map(|i| format!("row number {i}")),
+        ));
+        let fields = Fields::from(vec![
+            Field::new("id", arrow_schema::DataType::Int64, false),
+            Field::new("name", arrow_schema::DataType::Utf8, false),
+        ]);
+        let records = StructArray::new(fields.clone(), vec![ids.clone(), names.clone()], None);
+        // Lists of ten records each.
+        let lists: ArrayRef = Arc::new(ListArray::new(
+            Arc::new(Field::new(
+                "item",
+                arrow_schema::DataType::Struct(fields),
+                false,
+            )),
+            OffsetBuffer::from_lengths(std::iter::repeat_n(10, usize::try_from(n).unwrap() / 10)),
+            Arc::new(records),
+            None,
+        ));
+        for array in [ids, names, lists] {
+            let whole = array_bytes(array.as_ref());
+            assert_eq!(whole, array.get_array_memory_size());
+            let len = array.len();
+            let slices: usize = (0..len)
+                .step_by(1024)
+                .map(|s| array_bytes(array.slice(s, 1024.min(len - s)).as_ref()))
+                .sum();
+            // Slices share the buffers but not a builder's spare capacity.
+            let rows = own_bytes(array.as_ref()).unwrap();
+            assert!(
+                slices <= whole && slices >= rows - rows / 20,
+                "{}: slices {slices}, whole {whole}, rows {rows}",
+                array.data_type()
+            );
+        }
+    }
+
+    #[test]
+    /// Assert value estimates count capacities and allocator chunks.
+    fn values_count_capacity_and_chunks() {
+        assert_eq!(alloc_bytes(0), 0);
+        assert_eq!(alloc_bytes(1), 32);
+        assert_eq!(alloc_bytes(24), 32);
+        assert_eq!(alloc_bytes(25), 48);
+        assert_eq!(alloc_bytes(MMAP_THRESHOLD), MMAP_THRESHOLD + 4096);
+        let mut s = String::with_capacity(100);
+        s.push('x');
+        assert_eq!(datum_heap_bytes(&Datum::Text(s)), alloc_bytes(100));
+        let key = RowKey(vec![Datum::Int8(1), Datum::Text("abc".into())]);
+        assert_eq!(key_bytes(&key), alloc_bytes(64) + alloc_bytes(3));
+        assert_eq!(datum_heap_bytes(&Datum::Int8(7)), 0);
+    }
 }

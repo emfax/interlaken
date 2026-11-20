@@ -23,7 +23,9 @@ use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, entry_bytes};
+use crate::memory::{
+    Reservation, array_bytes, batch_bytes, key_bytes, push_bytes, table_capacity_bytes,
+};
 use crate::physical::Physical;
 
 /// A nest in progress.
@@ -51,7 +53,33 @@ fn concat_column(parts: &[ArrayRef], ty: &ArrowType) -> Result<ArrayRef, ExecErr
     Ok(arrow_select::concat::concat(&refs)?)
 }
 
+/// Return the bytes held by the parts of one column.
+fn parts_bytes(parts: &[ArrayRef]) -> usize {
+    parts.iter().map(|a| array_bytes(a.as_ref())).sum()
+}
+
 impl NestState {
+    /// Concatenate a column's parts and gather the rows at `indices`, reserving
+    /// for the copies while they exist and releasing the parts.
+    fn gather(
+        &mut self,
+        parts: Vec<ArrayRef>,
+        ty: &ArrowType,
+        indices: &UInt32Array,
+    ) -> Result<ArrayRef, ExecError> {
+        let held = parts_bytes(&parts);
+        // The concatenation copies the parts' own rows.
+        self.memory.grow(held)?;
+        let all = concat_column(&parts, ty)?;
+        drop(parts);
+        self.memory.shrink(held);
+        let gathered = arrow_select::take::take(all.as_ref(), indices, None)?;
+        self.memory.grow(array_bytes(gathered.as_ref()))?;
+        drop(all);
+        self.memory.shrink(held);
+        Ok(gathered)
+    }
+
     /// Consume the input and build every group's output row.
     async fn run(&mut self) -> Result<(), ExecError> {
         let mut input = self.input.take().expect("run once");
@@ -59,6 +87,8 @@ impl NestState {
         let mut field_parts: Vec<Vec<ArrayRef>> = vec![Vec::new(); self.fields.len()];
         let mut groups: HashMap<RowKey, usize> = HashMap::new();
         let mut members: Vec<Vec<u32>> = Vec::new();
+        // The bytes reserved for the keys in `groups` and for `members` (the table aside).
+        let mut index_bytes = 0;
         let mut seen = 0u32;
         let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
@@ -78,22 +108,33 @@ impl NestState {
             let held: usize = keys
                 .iter()
                 .chain(&fields)
-                .map(|a| a.get_array_memory_size())
+                .map(|a| array_bytes(a.as_ref()))
                 .sum();
-            self.memory.grow(held + n * std::mem::size_of::<u32>())?;
+            self.memory.grow(held)?;
             for (r, key) in row_keys(&keys, n)?.into_iter().enumerate() {
                 let next = members.len();
                 let group = match groups.get(&key) {
                     Some(&g) => g,
                     None => {
-                        self.memory
-                            .grow(entry_bytes(&key, std::mem::size_of::<Vec<u32>>()))?;
+                        let heap =
+                            key_bytes(&key) + push_bytes::<Vec<u32>>(next, members.capacity());
+                        let replaced = self.memory.reserve_entry::<(RowKey, usize)>(
+                            groups.len(),
+                            groups.capacity(),
+                            heap,
+                        )?;
+                        index_bytes += heap;
                         groups.insert(key, next);
                         members.push(Vec::new());
+                        self.memory.shrink(replaced);
                         next
                     }
                 };
-                members[group].push(seen + u32::try_from(r).expect("rows fit in u32"));
+                let list = &mut members[group];
+                let grown = push_bytes::<u32>(list.len(), list.capacity());
+                self.memory.grow(grown)?;
+                index_bytes += grown;
+                list.push(seen + u32::try_from(r).expect("rows fit in u32"));
             }
             seen += u32::try_from(n).expect("rows fit in u32");
             for (parts, a) in key_parts.iter_mut().zip(keys) {
@@ -103,11 +144,13 @@ impl NestState {
                 parts.push(a);
             }
         }
+        index_bytes += table_capacity_bytes::<(RowKey, usize)>(groups.capacity());
+        drop(groups);
         if self.keys.is_empty() && members.is_empty() {
             members.push(Vec::new());
         }
 
-        let fields = self.schema.fields();
+        let fields = self.schema.fields().clone();
         let nested_type = fields[fields.len() - 1].data_type().clone();
         let ArrowType::List(item) = &nested_type else {
             return Err(ExecError::Unsupported(format!(
@@ -125,38 +168,39 @@ impl NestState {
                 .map(|m| m.first().copied())
                 .collect::<Vec<Option<u32>>>(),
         );
-        let mut columns = key_parts
-            .iter()
-            .zip(fields.iter())
-            .map(|(parts, f)| {
-                let all = concat_column(parts, f.data_type())?;
-                Ok(arrow_select::take::take(all.as_ref(), &firsts, None)?)
-            })
-            .collect::<Result<Vec<ArrayRef>, ExecError>>()?;
+        let mut columns = Vec::with_capacity(fields.len());
+        for (parts, f) in key_parts.into_iter().zip(fields.iter()) {
+            columns.push(self.gather(parts, f.data_type(), &firsts)?);
+        }
+        let order_bytes = seen as usize * std::mem::size_of::<u32>();
+        self.memory.grow(order_bytes)?;
         let order = UInt32Array::from(members.concat());
-        let children = field_parts
-            .iter()
-            .zip(record_fields.iter())
-            .map(|(parts, f)| {
-                let all = concat_column(parts, f.data_type())?;
-                Ok(arrow_select::take::take(all.as_ref(), &order, None)?)
-            })
-            .collect::<Result<Vec<ArrayRef>, ExecError>>()?;
-        let records =
-            StructArray::try_new_with_length(record_fields.clone(), children, None, order.len())?;
         let mut offsets = Vec::with_capacity(members.len() + 1);
         offsets.push(0i32);
         for m in &members {
             let last = *offsets.last().expect("starts with 0");
             offsets.push(last + i32::try_from(m.len()).expect("lists fit in i32"));
         }
+        let groups = members.len();
+        drop(members);
+        self.memory.shrink(index_bytes);
+        let mut children = Vec::with_capacity(record_fields.len());
+        for (parts, f) in field_parts.into_iter().zip(record_fields.iter()) {
+            children.push(self.gather(parts, f.data_type(), &order)?);
+        }
+        let records =
+            StructArray::try_new_with_length(record_fields.clone(), children, None, order.len())?;
+        drop(order);
+        self.memory.shrink(order_bytes);
         columns.push(Arc::new(ListArray::try_new(
             item.clone(),
             OffsetBuffer::new(ScalarBuffer::from(offsets)),
             Arc::new(records),
             None,
         )?));
-        let out = batch(&self.schema, columns, members.len())?;
+        let out = batch(&self.schema, columns, groups)?;
+        // From here on the reservation covers the output, returned a slice at a time.
+        self.memory.resize(batch_bytes(&out))?;
         self.ready = chunks(&out);
         self.ready.reverse();
         Ok(())

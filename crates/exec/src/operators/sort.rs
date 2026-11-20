@@ -1,27 +1,37 @@
 //! `Sort`: an in-memory sort, or top-N when a limit sits directly above.
 //!
 //! Rows are ordered with the interpreter's sort-key comparison, stably.
-//! With a fetch of N rows, the operator sorts and truncates to N whenever
-//! it has buffered enough, so memory stays proportional to N. Reading the
-//! input yields to the runtime every few batches (`coop`).
+//! The input batches are kept as they arrive, with their key values; the
+//! sort orders row numbers, and the output is gathered from the kept
+//! batches a batch at a time. So a sort holds its input once, plus its key
+//! values while it sorts, and its output batches are compact rather than
+//! slices of one large buffer. With a fetch of N rows, the operator sorts
+//! and truncates to N whenever it has buffered enough, so memory stays
+//! proportional to N. Reading the input yields to the runtime every few
+//! batches (`coop`).
 
-use arrow_array::{RecordBatch, UInt32Array};
+use arrow_array::{Array, RecordBatch};
 use arrow_schema::SchemaRef;
 use futures::StreamExt;
 use interlaken_ir::interp::{Datum, compare_sort_keys};
 use interlaken_ir::{Expr, SortKey};
 
-use super::pull::{Pull, batch, chunks, concat, into_stream, take};
+use super::pull::{Pull, batch, into_stream};
 use crate::columnar::datum_at;
 use crate::coop::Yielder;
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, batch_bytes};
+use crate::memory::{Reservation, batch_bytes, datum_heap_bytes, vec_bytes};
 use crate::physical::{BATCH_ROWS, Physical};
 use crate::rowwise::eval_constant;
 
 /// A sort in progress.
+///
+/// Input batches are kept as they arrive, with their rows' sort key values
+/// in one flat vector. Sorting orders row numbers; the output is gathered
+/// from the kept batches a batch at a time, so the input is never
+/// concatenated and no sorted copy of it exists at once.
 struct SortState {
     /// The input, until it is consumed.
     input: Option<BatchStream>,
@@ -33,70 +43,149 @@ struct SortState {
     fetch: Option<usize>,
     /// The schema.
     schema: SchemaRef,
-    /// The memory held by buffered rows.
+    /// The memory held by kept batches, key values and the order.
     memory: Reservation,
-    /// Sorted output batches not yet returned, last first.
-    ready: Vec<RecordBatch>,
+    /// The kept input batches.
+    batches: Vec<RecordBatch>,
+    /// The first row number of each kept batch, then the total.
+    starts: Vec<usize>,
+    /// The sort key values of every kept row, row after row.
+    values: Vec<Datum>,
+    /// The kept rows' numbers in sorted order, once sorted.
+    order: Vec<u32>,
+    /// How many rows of `order` were returned.
+    emitted: usize,
 }
 
 impl SortState {
-    /// Sort `rows` and keep at most `fetch` of them.
-    fn sort(&mut self, rows: &RecordBatch) -> Result<RecordBatch, ExecError> {
-        let n = rows.num_rows();
+    /// Return the rows kept.
+    fn rows(&self) -> usize {
+        *self.starts.last().expect("starts with 0")
+    }
+
+    /// Keep batch `b` and its key values, reserving for both.
+    fn keep(&mut self, b: RecordBatch) -> Result<(), ExecError> {
+        let n = b.num_rows();
         let keys = self
             .exprs
             .iter_mut()
-            .map(|e| e.eval(rows.columns(), n))
+            .map(|e| e.eval(b.columns(), n))
             .collect::<Result<Vec<_>, _>>()?;
-        let values: Vec<Vec<Datum>> = (0..n)
-            .map(|r| {
-                keys.iter()
-                    .map(|k| datum_at(k.as_ref(), r))
-                    .collect::<Result<_, _>>()
-            })
-            .collect::<Result<_, _>>()?;
+        let wanted = self.values.len() + n * keys.len();
+        let bytes = batch_bytes(&b);
+        if wanted > self.values.capacity() {
+            // The values move to a buffer twice the size; both exist while they do.
+            let grown = (2 * self.values.capacity()).max(wanted);
+            let old = vec_bytes::<Datum>(self.values.capacity());
+            self.memory.grow(bytes + vec_bytes::<Datum>(grown))?;
+            self.values.reserve_exact(grown - self.values.len());
+            self.memory.shrink(old);
+        } else {
+            self.memory.grow(bytes)?;
+        }
+        let mut heap = 0;
+        for r in 0..n {
+            for k in &keys {
+                let value = datum_at(k.as_ref(), r)?;
+                heap += datum_heap_bytes(&value);
+                self.values.push(value);
+            }
+        }
+        self.memory.grow(heap)?;
+        self.starts.push(self.rows() + n);
+        self.batches.push(b);
+        Ok(())
+    }
+
+    /// Order the kept rows, keeping at most `fetch` of them in `order`.
+    fn sort(&mut self) -> Result<(), ExecError> {
+        let n = self.rows();
+        let width = self.keys.len();
+        // A stable sort of n row numbers uses scratch space for up to n more.
+        let scratch = vec_bytes::<u32>(n);
+        self.memory.grow(vec_bytes::<u32>(n) + scratch)?;
         let mut order: Vec<u32> = (0..u32::try_from(n).expect("rows fit in u32")).collect();
-        order.sort_by(|&a, &b| {
-            compare_sort_keys(&values[a as usize], &values[b as usize], &self.keys)
-        });
+        let values = &self.values;
+        let row = |r: u32| &values[r as usize * width..(r as usize + 1) * width];
+        order.sort_by(|&a, &b| compare_sort_keys(row(a), row(b), &self.keys));
+        self.memory.shrink(scratch);
         if let Some(fetch) = self.fetch {
             order.truncate(fetch);
         }
-        let indices = UInt32Array::from(order);
-        let columns = take(rows.columns(), &indices)?;
+        self.order = order;
+        Ok(())
+    }
+
+    /// Gather the kept rows `order[range]` into one batch.
+    fn gather(&self, range: std::ops::Range<usize>) -> Result<RecordBatch, ExecError> {
+        let indices: Vec<(usize, usize)> = self.order[range]
+            .iter()
+            .map(|&r| {
+                let r = r as usize;
+                let b = self.starts.partition_point(|&s| s <= r) - 1;
+                (b, r - self.starts[b])
+            })
+            .collect();
+        let columns = (0..self.schema.fields().len())
+            .map(|c| {
+                let arrays: Vec<&dyn Array> =
+                    self.batches.iter().map(|b| b.column(c).as_ref()).collect();
+                Ok(arrow_select::interleave::interleave(&arrays, &indices)?)
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?;
         batch(&self.schema, columns, indices.len())
+    }
+
+    /// Release everything kept and reserved.
+    fn clear(&mut self) {
+        self.batches.clear();
+        self.starts.truncate(1);
+        self.values = Vec::new();
+        self.order = Vec::new();
+        self.memory.shrink(usize::MAX);
+    }
+
+    /// Top-N: keep only the best `fetch` rows, as one batch with their key values.
+    fn compact(&mut self) -> Result<(), ExecError> {
+        self.sort()?;
+        let best = self.gather(0..self.order.len())?;
+        let width = self.keys.len();
+        let mut values = Vec::with_capacity(self.order.len() * width);
+        for &r in &self.order {
+            let r = r as usize;
+            values.extend_from_slice(&self.values[r * width..(r + 1) * width]);
+        }
+        self.clear();
+        let heap: usize = values.iter().map(datum_heap_bytes).sum();
+        self.memory
+            .grow(batch_bytes(&best) + vec_bytes::<Datum>(values.capacity()) + heap)?;
+        self.values = values;
+        self.starts.push(best.num_rows());
+        self.batches.push(best);
+        Ok(())
     }
 
     /// Consume the input and sort it.
     async fn run(&mut self) -> Result<(), ExecError> {
         let mut input = self.input.take().expect("run once");
-        let mut buffered: Vec<RecordBatch> = Vec::new();
-        let mut rows = 0;
         let mut yielder = Yielder::default();
         while let Some(b) = input.next().await {
             let b = b?;
             yielder.tick().await;
-            self.memory.grow(batch_bytes(&b))?;
-            rows += b.num_rows();
-            buffered.push(b);
-            // Top-N: once twice the fetch is buffered, keep only the best rows.
+            self.keep(b)?;
+            // Top-N: once twice the fetch is kept, keep only the best rows.
             if let Some(fetch) = self.fetch
-                && rows > (2 * fetch).max(BATCH_ROWS)
+                && self.rows() > (2 * fetch).max(BATCH_ROWS)
             {
-                let all = concat(&self.schema, &buffered)?;
-                let best = self.sort(&all)?;
-                rows = best.num_rows();
-                self.memory.resize(batch_bytes(&best))?;
-                buffered = vec![best];
+                self.compact()?;
             }
         }
-        let all = concat(&self.schema, &buffered)?;
-        drop(buffered);
-        let sorted = self.sort(&all)?;
-        drop(all);
-        self.memory.resize(batch_bytes(&sorted))?;
-        self.ready = chunks(&sorted);
-        self.ready.reverse();
+        self.sort()?;
+        // The key values are needed only to sort.
+        let held: usize = vec_bytes::<Datum>(self.values.capacity())
+            + self.values.iter().map(datum_heap_bytes).sum::<usize>();
+        self.values = Vec::new();
+        self.memory.shrink(held);
         Ok(())
     }
 }
@@ -107,7 +196,14 @@ impl Pull for SortState {
         if self.input.is_some() {
             self.run().await?;
         }
-        Ok(self.ready.pop())
+        let start = self.emitted;
+        let end = (start + BATCH_ROWS).min(self.order.len());
+        if start == end {
+            self.clear();
+            return Ok(None);
+        }
+        self.emitted = end;
+        self.gather(start..end).map(Some)
     }
 }
 
@@ -147,6 +243,10 @@ pub(crate) fn sort(
         fetch,
         schema: node.schema.clone(),
         memory: ctx.reserve(node, if fetch.is_some() { "TopN" } else { "Sort" }),
-        ready: Vec::new(),
+        batches: Vec::new(),
+        starts: vec![0],
+        values: Vec::new(),
+        order: Vec::new(),
+        emitted: 0,
     }))
 }

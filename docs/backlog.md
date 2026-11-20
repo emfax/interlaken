@@ -84,20 +84,6 @@ Entry format:
 - **Size:** About 1 week for `BatchDecoder` in the storage trait; about 2 days for direct decode into builders.
 - **Status:** open
 
-### slice-memory-accounting: Count sliced batches by their own rows
-- **Origin:** F3
-- **Why:** Sort and aggregation outputs are split into 1,024-row slices of one buffer, and `RecordBatch::get_array_memory_size` reports the whole buffer for each slice. An operator that buffers such slices (a sort over a sort, a hash build over a sort) overcounts by up to the number of slices and can fail its budget far too early.
-- **When:** When plans buffer the output of another blocking operator in practice, or before spilling.
-- **Size:** About 1 day: account sliced bytes, or compact slices when buffering.
-- **Status:** open
-
-### memory-estimates: Make memory reservations match the heap
-- **Origin:** F3 benchmarks
-- **Why:** Hash joins, aggregations and `Distinct` estimate entries from `Datum` sizes plus a word or two; the benchmarks show resident memory up to 2.6 times the reservation (a million-row hash build reserved 132 MiB and grew the heap by 340 MiB). A finishing sort holds its buffered batches, their concatenation and the sorted copy at once but reserves only one of them (62 MiB reserved, up to 240 MiB resident). Budgets therefore cap less than they say, and the node pool recommendation has to allow for it.
-- **When:** Before production deployment with a tight container limit.
-- **Size:** About 2 days, measuring with a counting allocator in tests.
-- **Status:** open
-
 ### sort-yields: Let a large in-memory sort yield while sorting
 - **Origin:** F3 (cooperative scheduling)
 - **Why:** Blocking operators yield between input batches, but the final sort of a large buffered input is one call; at a few million rows it holds its thread for a second or more.
@@ -122,6 +108,20 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### slice-memory-accounting: Count sliced batches by their own rows
+- **Origin:** F3
+- **Why:** Sort and aggregation outputs are split into 1,024-row slices of one buffer, and `RecordBatch::get_array_memory_size` reports the whole buffer for each slice. An operator that buffers such slices (a sort over a sort, a hash build over a sort) overcounts by up to the number of slices and can fail its budget far too early.
+- **When:** When plans buffer the output of another blocking operator in practice, or before spilling.
+- **Size:** About 1 day: account sliced bytes, or compact slices when buffering.
+- **Status:** done (sorts and aggregations now emit compact batches gathered per pull, and `batch_bytes` counts a slice of a larger buffer by its own rows, following list offsets; a sort over a sliced `Nest` output fits 64 MiB where it reserved 386 MiB, ADR-0027 phase 3)
+
+### memory-estimates: Make memory reservations match the heap
+- **Origin:** F3 benchmarks
+- **Why:** Hash joins, aggregations and `Distinct` estimate entries from `Datum` sizes plus a word or two; the benchmarks show resident memory up to 2.6 times the reservation (a million-row hash build reserved 132 MiB and grew the heap by 340 MiB). A finishing sort holds its buffered batches, their concatenation and the sorted copy at once but reserves only one of them (62 MiB reserved, up to 240 MiB resident). Budgets therefore cap less than they say, and the node pool recommendation has to allow for it.
+- **When:** Before production deployment with a tight container limit.
+- **Size:** About 2 days, measuring with a counting allocator in tests.
+- **Status:** done (estimates count capacities, allocator chunks and hash-table buckets, sorts gather instead of concatenating and copying, keys are held once; every blocking operator reserves within 7% of its measured heap, `tests/memory_estimates.rs`, ADR-0027 phase 3)
 
 ### lazyfs-power-loss: Power-loss testing with a fault-injecting filesystem
 - **Origin:** ADR-0009 phase 6, ADR-0005 (crash harness section), M6

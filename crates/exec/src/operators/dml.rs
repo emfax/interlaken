@@ -30,7 +30,7 @@ use crate::columnar::{build_array, datum_at};
 use crate::error::ExecError;
 use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
-use crate::memory::{Reservation, entry_bytes};
+use crate::memory::{Reservation, key_bytes};
 use crate::physical::{Dml, Physical};
 
 /// What a DML operator does to each target row.
@@ -148,8 +148,13 @@ impl DmlState {
                 pk.iter().map(|&c| row[c].clone()).collect()
             });
             if !self.changed.contains(&key) {
-                self.memory.grow(entry_bytes(&key, 0))?;
+                let replaced = self.memory.reserve_entry::<RowKey>(
+                    self.changed.len(),
+                    self.changed.capacity(),
+                    key_bytes(&key),
+                )?;
                 self.changed.insert(key);
+                self.memory.shrink(replaced);
                 first.push(i);
             }
         }
