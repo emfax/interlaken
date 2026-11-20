@@ -21,6 +21,7 @@ mod error;
 mod eval;
 mod functions;
 mod like;
+mod params;
 mod rel;
 mod run;
 
@@ -29,6 +30,7 @@ pub use datum::{Datum, RowKey};
 pub use error::EvalError;
 pub use functions::{REDACTED, aggregate_values, mask_last4};
 pub use like::LikePattern;
+pub use params::{ParamError, check_params, declared_params};
 pub use rel::compare_sort_keys;
 pub(crate) use run::eval_constant;
 pub use run::{Database, ExecOptions, RowEvaluator, execute};

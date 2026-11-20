@@ -740,3 +740,81 @@ async fn transaction_limits_have_their_sqlstates() {
     assert_eq!(err.sqlstate(), "25P04", "{err}");
     root.rollback().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert parameter values are checked against their declarations before
+/// the statement runs: the count (08P01), each value's type (42804) and
+/// NULL for a NOT NULL parameter (22004), for text and prepared plans, and
+/// a rejected statement writes nothing.
+async fn parameters_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = session(&engine, admin());
+    root.create_table(&table(
+        "notes",
+        &[("id", "(not-null int8)"), ("body", "text")],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    let insert = "(plan (insert notes (values (columns id body)
+        (row (param 1 (not-null int8)) (param 2 text))) (columns id body)))";
+    let one = || vec![Datum::Int8(1), Datum::Text("a".into())];
+
+    let count = |n: usize| one().into_iter().cycle().take(n).collect::<Vec<_>>();
+    let err = root.query(insert, count(1)).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "08P01");
+    assert_eq!(
+        err.to_string(),
+        "the statement has 2 parameters, but 1 value was supplied"
+    );
+    assert_eq!(state(root.query(insert, count(3)).await), "08P01");
+    assert_eq!(state(root.query(insert, Vec::new()).await), "08P01");
+
+    let err = root
+        .query(insert, vec![Datum::Int4(1), Datum::Null])
+        .await
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), "42804");
+    assert!(
+        err.to_string()
+            .contains("parameter 1 is declared (not-null int8)"),
+        "{err}"
+    );
+    assert_eq!(
+        state(root.query(insert, vec![Datum::Null, Datum::Null]).await),
+        "22004"
+    );
+
+    // A prepared plan is checked the same way, and so are streams.
+    let plan = root.prepare(insert).await.unwrap();
+    assert_eq!(
+        state(
+            root.query_plan(&plan, vec![Datum::Int8(1), Datum::Int8(2)])
+                .await
+        ),
+        "42804"
+    );
+    assert_eq!(
+        state(root.query_stream(insert, Vec::new()).await.map(|_| ())),
+        "08P01"
+    );
+    // EXPLAIN ANALYZE runs without parameters, so it can't run this plan.
+    assert_eq!(state(root.explain(insert, true).await), "08P01");
+    assert!(rows(&mut root, "(plan (get notes))").await.is_empty());
+
+    // Matching values run; a NULL fits the nullable parameter.
+    root.query_plan(&plan, vec![Datum::Int8(1), Datum::Null])
+        .await
+        .unwrap();
+    root.query(insert, vec![Datum::Int8(2), Datum::Text("b".into())])
+        .await
+        .unwrap();
+    assert_eq!(rows(&mut root, "(plan (get notes))").await.len(), 2);
+
+    // A failed check in an explicit transaction aborts it, like any failed statement.
+    root.begin(TxnOptions::default()).await.unwrap();
+    assert_eq!(state(root.query(insert, Vec::new()).await), "08P01");
+    assert!(root.is_aborted().await.unwrap());
+    root.rollback().unwrap();
+}

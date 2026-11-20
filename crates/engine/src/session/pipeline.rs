@@ -15,13 +15,14 @@
 //! 6. optimize it;
 //! 7. plan it physically.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use interlaken_exec::{ExecContext, Physical, PlanOptions, QueryMemory, plan_with};
 use interlaken_ir::Plan;
 use interlaken_ir::catalog::{Catalog, InMemoryCatalog};
-use interlaken_ir::interp::{Datum, ExecOptions};
+use interlaken_ir::interp::{Datum, ExecOptions, declared_params};
 use interlaken_ir::optimize::optimize;
 use interlaken_ir::resolve::resolve;
 use interlaken_ir::security::{SecurityContext, secure};
@@ -65,6 +66,8 @@ pub(crate) struct Prepared {
     pub(crate) columns: Vec<String>,
     /// The output column types.
     pub(crate) types: Vec<Type>,
+    /// The type each parameter is declared with, by number.
+    pub(crate) params: BTreeMap<u32, Type>,
 }
 
 /// Parse a plan's text.
@@ -87,6 +90,7 @@ pub(crate) fn pin(plan: &Plan, catalog: &dyn Catalog) -> Result<(Plan, RelSchema
 pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, EngineError> {
     let catalog = step.catalog.as_ref();
     let (resolved, schema) = pin(plan, catalog)?;
+    let params = declared_params(&resolved.root);
     let policies = load_policies(step.txn).await?;
     let settings = policy_settings(step.txn).await?;
     let provider = step.engine.provider(
@@ -133,6 +137,7 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
         physical,
         columns,
         types,
+        params,
     })
 }
 

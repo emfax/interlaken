@@ -84,13 +84,6 @@ Entry format:
 - **Size:** About 2 days: sort runs a chunk at a time and merge them, yielding between chunks.
 - **Status:** open
 
-### parameter-validation: Check parameter values against their declarations
-- **Origin:** writing the book's parameters chapter
-- **Why:** `(param N TYPE)` declares a type, but the engine doesn't check the values passed against it before running the statement. A value of the wrong `Datum` variant fails at run time with `0A000` ("not supported by the executor yet: value Text(...) in a column of type int8"). A missing value fails with `0A000` ("not supported by the reference interpreter: parameter 1 has no value"). `Datum::Null` for a `(not-null T)` parameter is accepted, and the NULL then flows through a plan whose types say it can't occur. The optimizer and executor may rely on that, for example by simplifying `is-null` away. Postgres rejects such binds up front (`08P01`, `22P02`).
-- **When:** Before the SQL front end's wire protocol, which binds client-supplied values.
-- **Size:** About 1 day: check count, variant and nullability in the session before execution, with clear errors (`08P01` for the count, `42804` or `22P02` for the type, `22004` for NULL), and tests.
-- **Status:** open
-
 ### array-element-nullability: Convert between array element nullabilities
 - **Origin:** writing the book's types chapter
 - **Why:** An array type records whether its elements may be NULL, and array types convert only to themselves. So `(array "a" "b")`, of type `(array (not-null text))`, can't be inserted into an `(array text)` column (`42804`), and an explicit cast doesn't help. Converting `(array (not-null T))` to `(array T)` is lossless and should be implicit; the reverse could be an assignment conversion checked at run time.
@@ -125,6 +118,13 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### parameter-validation: Check parameter values against their declarations
+- **Origin:** writing the book's parameters chapter
+- **Why:** `(param N TYPE)` declares a type, but the engine doesn't check the values passed against it before running the statement. A value of the wrong `Datum` variant fails at run time with `0A000` ("not supported by the executor yet: value Text(...) in a column of type int8"). A missing value fails with `0A000` ("not supported by the reference interpreter: parameter 1 has no value"). `Datum::Null` for a `(not-null T)` parameter is accepted, and the NULL then flows through a plan whose types say it can't occur. The optimizer and executor may rely on that, for example by simplifying `is-null` away. Postgres rejects such binds up front (`08P01`, `22P02`).
+- **When:** Before the SQL front end's wire protocol, which binds client-supplied values.
+- **Size:** About 1 day: check count, variant and nullability in the session before execution, with clear errors (`08P01` for the count, `42804` or `22P02` for the type, `22004` for NULL), and tests.
+- **Status:** done (the session checks values against the parameters the resolved plan declares before running it: the count (`08P01`), each value's `Datum` variant recursively (`42804`) and NULL for NOT NULL parameters (`22004`), for text, prepared plans, streams and `EXPLAIN ANALYZE`; `interlaken_ir::interp::check_params`)
 
 ### engine-streaming-results: Stream query results through the session
 - **Origin:** F3 (10-million-row criterion)

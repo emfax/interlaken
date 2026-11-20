@@ -26,14 +26,19 @@ Values are passed as `interlaken_ir::interp::Datum`s, in order, to `Session::que
 
 The declared type types the parameter where it is used, just as a column's type would. Implicit conversions apply: an `int4` parameter compared with an `int8` column is widened.
 
-A parameter may be used more than once, and parameters may be used in any order. Unused parameter values are ignored.
+A parameter may be used more than once, and parameters may be used in any order.
 
-**Known gaps.** The engine doesn't yet check values against their declarations before running the statement (backlog `parameter-validation`):
-- A value of the wrong `Datum` variant fails with `0A000` when the statement runs.
-- A missing value fails with `0A000` ("parameter N has no value").
-- `Null` passed for a `(not-null T)` parameter isn't rejected. The NULL flows through a plan that assumes it can't occur.
+### Checking values
 
-Pass exactly the declared values, and declare parameters nullable unless NULL is impossible.
+Before a statement runs, the engine checks the values passed against the parameters the plan declares. A statement that fails a check doesn't run, and fails like any other statement, aborting an explicit transaction:
+
+| Check | Fails with |
+| --- | --- |
+| exactly one value per parameter number, up to the highest the plan declares | `08P01`: "the statement has 2 parameters, but 1 value was supplied" |
+| each value is the `Datum` variant of its declared type, and so are array elements and record fields | `42804`: "parameter 1 is declared int8, but the value supplied is Int4(1)" |
+| `Null` only for a nullable parameter | `22004`: "parameter 1 is declared (not-null int8), but NULL was supplied" |
+
+There are no conversions between variants: pass `Datum::Int8` for an `int8` parameter, not `Datum::Int4`. A number that no parameter uses still needs a value, of any variant, to keep the numbering. `EXPLAIN ANALYZE` runs a statement without parameter values, so it fails with `08P01` for a plan that declares any.
 
 ## Prepared plans
 

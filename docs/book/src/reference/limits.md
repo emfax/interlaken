@@ -28,7 +28,6 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 - **Text input formats:** casts from text accept ISO dates and timestamps, hex `bytea` and a basic set of booleans (backlog `interp-text-formats`).
 - **`jsonb`** is stored as text without validation, and can't be compared, sorted or used as a key.
 - **Array element nullability:** `(array (not-null T))` doesn't convert to `(array T)`, so an array literal with no NULLs can't be written to an array column that allows them (backlog `array-element-nullability`). See [Composite types](../ir/types.md#composite-types).
-- **Parameter checking:** parameter values aren't checked against their declared types before a statement runs; a mismatch fails at run time with `0A000`, and a NULL for a `(not-null T)` parameter isn't rejected (backlog `parameter-validation`). See [Parameters](../ir/parameters.md).
 
 ### Security
 

@@ -29,6 +29,11 @@ const fn state(code: &'static str, name: &'static str, meaning: &'static str) ->
 /// Every SQLSTATE code the engine returns, in code order.
 pub const SQLSTATES: &[SqlState] = &[
     state(
+        "08P01",
+        "protocol_violation",
+        "A statement was run with a different number of parameter values than the parameters it declares.",
+    ),
+    state(
         "0A000",
         "feature_not_supported",
         "The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it.",
@@ -46,7 +51,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "22004",
         "null_value_not_allowed",
-        "An entity attribute a policy needs is absent (`assert_present`).",
+        "An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter declared NOT NULL.",
     ),
     state(
         "22011",
@@ -154,7 +159,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "42804",
         "datatype_mismatch",
-        "An expression has the wrong type for where it is used.",
+        "An expression has the wrong type for where it is used, or a parameter value is not of its declared type.",
     ),
     state(
         "42883",

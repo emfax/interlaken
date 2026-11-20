@@ -9,7 +9,7 @@ use interlaken_exec::{
     explain_analyze,
 };
 use interlaken_ir::catalog::InMemoryCatalog;
-use interlaken_ir::interp::{Datum, ExecOptions};
+use interlaken_ir::interp::{Datum, ExecOptions, check_params};
 use interlaken_ir::security::{EntityUid, SecurityContext};
 use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
 use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
@@ -414,8 +414,9 @@ impl Session {
     /// # Errors
     ///
     /// Returns [`EngineError::Syntax`] if the text doesn't parse, a
-    /// resolution, verification or security error, or the execution error,
-    /// after undoing the statement.
+    /// resolution, verification or security error, [`EngineError::Parameter`]
+    /// if `params` don't fit the parameters the statement declares, or the
+    /// execution error, after undoing the statement.
     pub async fn query(
         &mut self,
         text: &str,
@@ -462,9 +463,11 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns [`EngineError::Syntax`] if the text doesn't parse, or a
-    /// resolution, verification or security error, after undoing the
-    /// statement; execution errors arrive through the stream.
+    /// Returns [`EngineError::Syntax`] if the text doesn't parse, a
+    /// resolution, verification or security error, or
+    /// [`EngineError::Parameter`] if `params` don't fit the parameters the
+    /// statement declares, after undoing the statement; execution errors
+    /// arrive through the stream.
     ///
     /// # Examples
     ///
@@ -548,6 +551,7 @@ impl Session {
                 deadline,
             };
             let prepared = prepare(&step, plan?).await?;
+            check_params(&prepared.params, &params)?;
             let writes = prepared.physical.writes();
             let batches = execute(&prepared.physical, &exec_context(&step, params));
             Ok::<_, EngineError>(Execution {
@@ -667,6 +671,7 @@ impl Session {
                 show_policies: step.privileges.read_policies,
             };
             if analyze {
+                check_params(&prepared.params, &[])?;
                 let ctx = exec_context(step, Vec::new());
                 Ok(explain_analyze(&prepared.physical, &ctx, options).await?)
             } else {

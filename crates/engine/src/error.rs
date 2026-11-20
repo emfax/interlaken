@@ -74,6 +74,9 @@ pub enum EngineError {
     /// The principal lacks the privilege the operation needs.
     #[error("permission denied: {0}")]
     PermissionDenied(String),
+    /// The parameter values don't fit the parameters the statement declares.
+    #[error(transparent)]
+    Parameter(#[from] interlaken_ir::interp::ParamError),
     /// A DDL request is invalid.
     #[error("invalid definition: {0}")]
     InvalidDefinition(String),
@@ -97,6 +100,7 @@ impl EngineError {
     /// ```
     #[must_use]
     pub fn sqlstate(&self) -> &'static str {
+        use interlaken_ir::interp::ParamError as P;
         use interlaken_ir::resolve::ResolveError as R;
         use interlaken_ir::security::SecurityError as S;
         use interlaken_ir::verify::VerifyError as V;
@@ -133,6 +137,11 @@ impl EngineError {
             Self::Security(S::ColumnDenied { .. }) | Self::PermissionDenied(_) => "42501",
             Self::Security(_) => "42501",
             Self::InvalidDefinition(_) => "42P16",
+            Self::Parameter(e) => match e {
+                P::Count { .. } => "08P01",
+                P::Type { .. } => "42804",
+                P::Null { .. } => "22004",
+            },
             Self::TransactionInProgress => "25001",
             Self::NoTransaction => "25P01",
             Self::ProposalNotFound(_) | Self::NotPending(_) | Self::Stale { .. } => "55000",

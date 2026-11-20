@@ -7,10 +7,11 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 <!-- begin generated: sqlstates -->
 | Code | Condition | When |
 | --- | --- | --- |
+| `08P01` | `protocol_violation` | A statement was run with a different number of parameter values than the parameters it declares. |
 | `0A000` | `feature_not_supported` | The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it. |
 | `21000` | `cardinality_violation` | A scalar subquery returned more than one row. |
 | `22003` | `numeric_value_out_of_range` | Arithmetic overflowed, or a value does not fit its target type. |
-| `22004` | `null_value_not_allowed` | An entity attribute a policy needs is absent (`assert_present`). |
+| `22004` | `null_value_not_allowed` | An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter declared NOT NULL. |
 | `22011` | `substring_error` | `substr` was called with a negative length. |
 | `22012` | `division_by_zero` | Division or modulo by zero. |
 | `2201W` | `invalid_row_count_in_limit_clause` | A `LIMIT` is negative. |
@@ -34,7 +35,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `42703` | `undefined_column` | A column does not exist. |
 | `42704` | `undefined_object` | An index does not exist. |
 | `42725` | `ambiguous_function` | A function call matches more than one overload equally well. |
-| `42804` | `datatype_mismatch` | An expression has the wrong type for where it is used. |
+| `42804` | `datatype_mismatch` | An expression has the wrong type for where it is used, or a parameter value is not of its declared type. |
 | `42883` | `undefined_function` | No function of that name accepts the argument types. |
 | `42P01` | `undefined_table` | A table does not exist. |
 | `42P07` | `duplicate_table` | A table or index of that name already exists. |
