@@ -83,6 +83,7 @@ fn resolved_queries_verify() {
         })
         .unwrap();
     let resolved = resolved.load(Ordering::Relaxed);
+    eprintln!("resolved {resolved} of {cases}");
     assert!(
         resolved * 10 >= cases * 6,
         "only {resolved} of {cases} queries resolved"

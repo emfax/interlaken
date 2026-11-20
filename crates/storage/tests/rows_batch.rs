@@ -243,9 +243,14 @@ fn batched_writes_match_single_row_writes() {
     .unwrap();
     let (failed, changed) = (failed.get(), changed.get());
     eprintln!("{failed} of {cases} cases failed a batch, {changed} changed rows");
+    // These guard the generator, not the code under test: they fail only if
+    // it stops producing failing or row-changing batches. Over 60 runs of
+    // 600 random cases, failing cases averaged 262 (sd 12, min 226) and
+    // row-changing cases 215 (sd 12, min 187), so both thresholds sit at least
+    // nine standard deviations below their means and can't fail by chance.
     assert!(failed * 5 >= cases, "too few failing batches: {failed}");
     assert!(
-        changed * 3 >= cases,
+        changed * 6 >= cases,
         "too few batches changed rows: {changed}"
     );
 }
