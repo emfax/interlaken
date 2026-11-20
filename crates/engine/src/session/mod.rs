@@ -5,7 +5,9 @@ mod connection;
 mod engine;
 mod pipeline;
 mod result;
+mod stream;
 
 pub use connection::Session;
 pub use engine::{Engine, EngineOptions};
 pub use result::QueryResult;
+pub use stream::QueryStream;

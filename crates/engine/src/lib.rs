@@ -27,4 +27,4 @@ mod session;
 pub use authz::{EntityData, LoadedEntities, load_entities, load_principal};
 pub use error::EngineError;
 pub use privileges::{Privilege, Privileges};
-pub use session::{Engine, EngineOptions, QueryResult, Session};
+pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session};

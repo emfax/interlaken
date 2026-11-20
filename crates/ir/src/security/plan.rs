@@ -14,9 +14,27 @@
 //! which become `policy_mask(visible, value, mask(value))`. The projection
 //! keeps the `Get`'s binding, so everything above reads masked values.
 //! `policy_mask` is volatile, so the optimizer never moves the condition
-//! out of the projection, and `EXPLAIN` hides it by name. Masks apply
-//! only to reads: a statement writing the table fails instead, so it can
-//! neither write masked values back nor compute new ones from hidden ones.
+//! out of the projection, and `EXPLAIN` hides it by name.
+//!
+//! Masks also govern writes, which read through them like queries do,
+//! while the row written is never a masked one:
+//!
+//! - **Carried target rows.** An update or delete carries the whole target
+//!   row to the DML operator, which writes the unassigned columns back as
+//!   they are (or deletes by key). Carrying is not reading: a masked column
+//!   only counts as read where an expression references it.
+//! - **Reads of the target row.** Where predicates, join conditions or
+//!   assignments do reference a masked column of the target row, the
+//!   target's `Get` is masked as for a query, and lowering joins the input
+//!   on the primary key to a second, unmasked read of the table, which
+//!   carries the row written. So assignments see masked values, and the
+//!   other columns are written back unmasked.
+//! - **`RETURNING`.** A masked column of the written row is masked in
+//!   `RETURNING`: the DML operator returns the whole row, and a projection
+//!   above it computes the original `RETURNING` items over it, masking
+//!   per row as a later read would.
+//! - **Copies from governed reads** (`INSERT ... SELECT`, assignments from
+//!   another table) read through those reads' masks like any query.
 //!
 //! The lowered plan is resolved again, which lowers the policies'
 //! subqueries to applies below each barrier, and verified as trusted.
@@ -50,8 +68,11 @@ struct Lowering<'a> {
     residuals: HashMap<(Action, TableId), Residual>,
     /// Counter for subquery aliases, shared across residuals.
     next_alias: u32,
-    /// The columns to mask, by the binding of the `Get` reading them.
+    /// The columns to mask, by the binding of the `Get` reading them or
+    /// of the DML target row `RETURNING` reads.
     masks: Masks,
+    /// The largest binding in use, for allocating fresh ones.
+    last_binding: u32,
 }
 
 /// Masked columns by the binding of the `Get` that reads them: each
@@ -75,7 +96,53 @@ fn find_get(rel: &Rel, table: TableId) -> Option<BindingId> {
     rel.inputs().into_iter().find_map(|i| find_get(i, table))
 }
 
+/// Find the binding of the `Get` of `table` that carries an update's or
+/// delete's target row: the one whose columns `input` outputs.
+fn target_source(input: &Rel, table: TableId, catalog: &dyn Catalog) -> Option<BindingId> {
+    /// Collect the bindings of every `Get` of `table`.
+    fn gets(rel: &Rel, table: TableId, out: &mut Vec<BindingId>) {
+        if let Rel::Get {
+            table: TableRef::Id(t),
+            binding: Some(b),
+            ..
+        } = rel
+            && *t == table
+        {
+            out.push(*b);
+        }
+        rel.inputs().into_iter().for_each(|i| gets(i, table, out));
+    }
+    let mut found = Vec::new();
+    gets(input, table, &mut found);
+    let outputs = crate::optimize::output_columns(input, catalog);
+    found
+        .into_iter()
+        .find(|b| outputs.iter().any(|(ob, _)| ob == b))
+}
+
+/// Return the `RETURNING` items and binding of a DML operator.
+fn returning_of(rel: &mut Rel) -> Option<(&mut Vec<NamedExpr>, &mut Option<BindingId>)> {
+    match rel {
+        Rel::Insert {
+            returning, binding, ..
+        }
+        | Rel::Update {
+            returning, binding, ..
+        }
+        | Rel::Delete {
+            returning, binding, ..
+        } => Some((returning, binding)),
+        _ => None,
+    }
+}
+
 impl Lowering<'_> {
+    /// Allocate a binding the plan does not use yet.
+    fn fresh_binding(&mut self) -> BindingId {
+        self.last_binding += 1;
+        BindingId::new(self.last_binding)
+    }
+
     /// Return the residual for `action` on `table`.
     fn residual(
         &mut self,
@@ -185,28 +252,8 @@ impl Lowering<'_> {
                 exprs.push(NamedExpr::from(value));
                 continue;
             };
-            if !matches!(column.ty.data, crate::types::DataType::Scalar(_)) {
-                return Err(SecurityError::Unsupported(format!(
-                    "masking column {} of type {}",
-                    column.name, column.ty.data
-                )));
-            }
-            let visible = self.lower_condition(table, visible, &resource)?;
-            let masked = match mask {
-                Mask::Null => Expr::Cast {
-                    expr: Box::new(Expr::Literal(Value::Null)),
-                    to: column.ty.data.clone(),
-                },
-                Mask::Function(f) => Expr::Call {
-                    func: FunctionRef::Named(f.as_str().into()),
-                    args: vec![value.clone()],
-                },
-            };
             exprs.push(NamedExpr {
-                expr: Expr::Call {
-                    func: FunctionRef::Named(POLICY_MASK.into()),
-                    args: vec![visible, value, masked],
-                },
+                expr: self.masked_value(table, column.id, visible, mask, &resource)?,
                 name: Some(column.name.clone()),
             });
         }
@@ -215,6 +262,180 @@ impl Lowering<'_> {
             exprs,
             binding: Some(binding),
         })
+    }
+
+    /// Construct `policy_mask(visible, value, mask(value))` for `column` of
+    /// `table`, over the resource row given by `resource`.
+    fn masked_value(
+        &mut self,
+        table: TableId,
+        column: ColumnId,
+        visible: &SecExpr,
+        mask: &Mask,
+        resource: &dyn Fn(ColumnId) -> Expr,
+    ) -> Result<Expr, SecurityError> {
+        let def = self
+            .catalog
+            .table_by_id(table)
+            .ok_or_else(|| SecurityError::Undeclared(format!("table {}", table.get())))?;
+        let column = def
+            .column_by_id(column)
+            .ok_or_else(|| SecurityError::Undeclared(format!("column {}", column.get())))?;
+        if !matches!(column.ty.data, crate::types::DataType::Scalar(_)) {
+            return Err(SecurityError::Unsupported(format!(
+                "masking column {} of type {}",
+                column.name, column.ty.data
+            )));
+        }
+        let value = resource(column.id);
+        let visible = self.lower_condition(table, visible, resource)?;
+        let masked = match mask {
+            Mask::Null => Expr::Cast {
+                expr: Box::new(Expr::Literal(Value::Null)),
+                to: column.ty.data.clone(),
+            },
+            Mask::Function(f) => Expr::Call {
+                func: FunctionRef::Named(f.as_str().into()),
+                args: vec![value.clone()],
+            },
+        };
+        Ok(Expr::Call {
+            func: FunctionRef::Named(POLICY_MASK.into()),
+            args: vec![visible, value, masked],
+        })
+    }
+
+    /// Join `input`, an update's or delete's input whose target row
+    /// (bound to `source`) is masked, on the primary key to an unmasked
+    /// read of `table` bound to `raw`, which then carries the target row.
+    ///
+    /// The masked row's primary key is never masked (see
+    /// [`check_columns`]), and both reads see the same snapshot, so each
+    /// input row meets exactly its own row.
+    fn join_unmasked(
+        &mut self,
+        input: Rel,
+        table: TableId,
+        source: BindingId,
+        raw: BindingId,
+    ) -> Result<Rel, SecurityError> {
+        let def = self
+            .catalog
+            .table_by_id(table)
+            .ok_or_else(|| SecurityError::Undeclared(format!("table {}", table.get())))?;
+        let key: Vec<ColumnId> = if def.primary_key.is_empty() {
+            def.columns.iter().map(|c| c.id).collect()
+        } else {
+            def.primary_key.clone()
+        };
+        let on = Expr::And(
+            key.iter()
+                .map(|&c| Expr::Binary {
+                    op: crate::expr::BinaryOp::Eq,
+                    left: Box::new(Expr::Column(ColumnRef::bound(source, c))),
+                    right: Box::new(Expr::Column(ColumnRef::bound(raw, c))),
+                })
+                .collect(),
+        );
+        self.next_alias += 1;
+        let alias = crate::names::Ident::new(format!(
+            "{}{}",
+            super::marker::POLICY_ALIAS_PREFIX,
+            self.next_alias
+        ));
+        Ok(Rel::Join {
+            kind: crate::rel::JoinKind::Inner,
+            left: Box::new(input),
+            right: Box::new(Rel::Get {
+                table: TableRef::Id(table),
+                alias: Some(alias),
+                binding: Some(raw),
+            }),
+            on,
+        })
+    }
+
+    /// Mask the masked columns `RETURNING` reads from the row `dml` writes
+    /// to `table`, bound to `target`.
+    ///
+    /// The DML operator returns the whole written row instead, and a
+    /// projection above it, bound like the original `RETURNING`, computes
+    /// the original items over that row with each masked column replaced
+    /// by its masked value, decided for the written row.
+    fn mask_returning(
+        &mut self,
+        mut dml: Rel,
+        table: TableId,
+        target: Option<BindingId>,
+    ) -> Result<Rel, SecurityError> {
+        let Some((target, masks)) = target.and_then(|t| Some((t, self.masks.remove(&t)?))) else {
+            return Ok(dml);
+        };
+        let def = self
+            .catalog
+            .table_by_id(table)
+            .ok_or_else(|| SecurityError::Undeclared(format!("table {}", table.get())))?;
+        let row = self.fresh_binding();
+        let (returning, binding) =
+            returning_of(&mut dml).ok_or_else(|| SecurityError::Invalid("not DML".into()))?;
+        let items = std::mem::replace(
+            returning,
+            def.columns
+                .iter()
+                .map(|c| NamedExpr {
+                    expr: Expr::Column(ColumnRef::bound(target, c.id)),
+                    name: Some(c.name.clone()),
+                })
+                .collect(),
+        );
+        let output = binding.replace(row);
+        let resource = |c: ColumnId| Expr::Column(ColumnRef::bound(row, c));
+        let mut replacements = HashMap::new();
+        for (column, visible, mask) in &masks {
+            replacements.insert(
+                *column,
+                self.masked_value(table, *column, visible, mask, &resource)?,
+            );
+        }
+        let exprs = items
+            .into_iter()
+            .map(|mut item| {
+                crate::optimize::rewrite_expr(&mut item.expr, &|b, c| {
+                    (b == target).then(|| replacements.get(&c).cloned().unwrap_or(resource(c)))
+                });
+                item
+            })
+            .collect();
+        Ok(Rel::Project {
+            input: Box::new(dml),
+            exprs,
+            binding: output,
+        })
+    }
+
+    /// Lower the input of an update or delete of `table` (`action`), and
+    /// return it with the binding that carries the target row.
+    ///
+    /// Where the statement reads a masked column of the target row, the
+    /// target's `Get` is masked like any other, and the input is joined to
+    /// an unmasked read of the table that carries the row instead.
+    fn target_input(
+        &mut self,
+        input: Rel,
+        table: TableId,
+        action: Action,
+    ) -> Result<(Rel, BindingId), SecurityError> {
+        let masked = target_source(&input, table, self.catalog)
+            .filter(|source| self.masks.contains_key(source));
+        let input = self.rel(input, Some((table, action)))?;
+        if let Some(source) = masked {
+            let raw = self.fresh_binding();
+            return Ok((self.join_unmasked(input, table, source, raw)?, raw));
+        }
+        let source = find_get(&input, table).ok_or_else(|| {
+            SecurityError::Invalid("update or delete input does not read its target".into())
+        })?;
+        Ok((input, source))
     }
 
     /// Lower `rel`; `dml` names the table an enclosing update or delete changes, and its action.
@@ -285,13 +506,15 @@ impl Lowering<'_> {
                         check,
                     },
                 };
-                Rel::Insert {
+                let target_row = target.binding;
+                let insert = Rel::Insert {
                     target,
                     columns,
                     input: Box::new(input),
                     returning,
                     binding,
-                }
+                };
+                self.mask_returning(insert, t, target_row)?
             }
             Rel::Update {
                 target,
@@ -303,10 +526,7 @@ impl Lowering<'_> {
                 let TableRef::Id(t) = target.table else {
                     return Err(SecurityError::Invalid("unresolved update target".into()));
                 };
-                let input = self.rel(*input, Some((t, Action::Update)))?;
-                let source = find_get(&input, t).ok_or_else(|| {
-                    SecurityError::Invalid("update input does not read its target".into())
-                })?;
+                let (input, source) = self.target_input(*input, t, Action::Update)?;
                 let new_row = |c: ColumnId| -> Expr {
                     assignments
                         .iter()
@@ -323,13 +543,15 @@ impl Lowering<'_> {
                         check,
                     },
                 };
-                Rel::Update {
+                let target_row = target.binding;
+                let update = Rel::Update {
                     target,
                     input: Box::new(input),
                     assignments,
                     returning,
                     binding,
-                }
+                };
+                self.mask_returning(update, t, target_row)?
             }
             Rel::Delete {
                 target,
@@ -340,13 +562,15 @@ impl Lowering<'_> {
                 let TableRef::Id(t) = target.table else {
                     return Err(SecurityError::Invalid("unresolved delete target".into()));
                 };
-                let input = self.rel(*input, Some((t, Action::Delete)))?;
-                Rel::Delete {
+                let (input, _) = self.target_input(*input, t, Action::Delete)?;
+                let target_row = target.binding;
+                let delete = Rel::Delete {
                     target,
                     input: Box::new(input),
                     returning,
                     binding,
-                }
+                };
+                self.mask_returning(delete, t, target_row)?
             }
             mut other => {
                 for input in other.inputs_mut() {
@@ -359,6 +583,36 @@ impl Lowering<'_> {
     }
 }
 
+/// The rows DML operators write: for each, the target table, the binding
+/// of the written row (which only `RETURNING` reads), and for an update or
+/// delete, the binding of the `Get` carrying the target row.
+struct Written {
+    /// Each written row's binding, by table.
+    targets: Vec<(TableId, BindingId)>,
+    /// The bindings carrying update and delete target rows.
+    sources: Vec<BindingId>,
+}
+
+/// Collect the rows the DML operators in `rel` write.
+fn written(rel: &Rel, catalog: &dyn Catalog, out: &mut Written) {
+    if let Rel::Insert { target, .. } | Rel::Update { target, .. } | Rel::Delete { target, .. } =
+        rel
+        && let TableRef::Id(t) = &target.table
+    {
+        if let Some(b) = target.binding {
+            out.targets.push((*t, b));
+        }
+        if let Rel::Update { input, .. } | Rel::Delete { input, .. } = rel
+            && let Some(source) = target_source(input, *t, catalog)
+        {
+            out.sources.push(source);
+        }
+    }
+    rel.inputs()
+        .into_iter()
+        .for_each(|i| written(i, catalog, out));
+}
+
 /// Fail if `plan` reads a column of a governed table the principal may not
 /// read, and return the columns to mask where they are read.
 ///
@@ -366,7 +620,15 @@ impl Lowering<'_> {
 /// whole row of its relation is consumed by position: the plan's output,
 /// a set operation, an insert or `DISTINCT`. Policy residuals are added
 /// later and are not checked: the engine may read any column to enforce
-/// policies. A masked column of a table the plan writes counts as denied.
+/// policies.
+///
+/// A DML operator's target row is carried, not read: the row an update or
+/// delete changes, and the row it writes, count as read only where an
+/// expression (a predicate, an assignment, `RETURNING`) references their
+/// columns. A masked column of a carried target row consumed by position
+/// (`DISTINCT` in an update's input) counts as denied, since the row must
+/// reach the operator unmasked; so does a masked primary key column read
+/// there, which the unmasked target row is joined on.
 fn check_columns(
     plan: &Plan,
     catalog: &dyn Catalog,
@@ -397,20 +659,17 @@ fn check_columns(
         }
         rel.inputs().into_iter().for_each(|i| row_sources(i, out));
     }
-    /// Collect the tables the plan writes.
-    fn written(rel: &Rel, out: &mut Vec<TableId>) {
-        if let Rel::Insert { target, .. } | Rel::Update { target, .. } | Rel::Delete { target, .. } =
-            rel
-            && let TableRef::Id(t) = &target.table
-        {
-            out.push(*t);
-        }
-        rel.inputs().into_iter().for_each(|i| written(i, out));
-    }
     let mut sources = Vec::new();
     row_sources(&plan.root, &mut sources);
-    let mut targets = Vec::new();
-    written(&plan.root, &mut targets);
+    let mut dml = Written {
+        targets: Vec::new(),
+        sources: Vec::new(),
+    };
+    written(&plan.root, catalog, &mut dml);
+    // The written row is the DML operator's own; only `RETURNING` reads it.
+    for (_, target) in &dml.targets {
+        whole_rows.remove(target);
+    }
     let mut masks = Masks::new();
     for (table, binding) in sources {
         let (Some(entity), Some(def)) =
@@ -418,8 +677,10 @@ fn check_columns(
         else {
             continue;
         };
+        let carried = dml.sources.contains(&binding);
         for attribute in &entity.attributes {
-            let used = whole_rows.contains(&binding) || read.contains(&(binding, attribute.column));
+            let whole = whole_rows.contains(&binding);
+            let used = whole || read.contains(&(binding, attribute.column));
             if !used {
                 continue;
             }
@@ -430,7 +691,14 @@ fn check_columns(
             match provider.column_mask(context, &entity.name, &attribute.name, store)? {
                 ColumnAccess::Allow => {}
                 ColumnAccess::Deny => return Err(denied()),
-                ColumnAccess::Masked { .. } if targets.contains(&table) => return Err(denied()),
+                ColumnAccess::Masked { .. }
+                    if carried
+                        && (whole
+                            || def.primary_key.is_empty()
+                            || def.primary_key.contains(&attribute.column)) =>
+                {
+                    return Err(denied());
+                }
                 ColumnAccess::Masked { visible, mask } => {
                     masks
                         .entry(binding)
@@ -474,6 +742,7 @@ pub fn secure(
         residuals: HashMap::new(),
         next_alias: 0,
         masks,
+        last_binding: crate::optimize::max_binding(&plan.root),
     };
     let root = lowering.rel(plan.root.clone(), None)?;
     let lowered = Plan {

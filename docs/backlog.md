@@ -54,13 +54,6 @@ Entry format:
 - **Size:** About 2–4 days, depending on the conditional-branch design.
 - **Status:** open
 
-### masked-table-writes: Let principals write tables whose masked columns they don't read
-- **Origin:** ADR-0032, F2
-- **Why:** A statement that writes a table with a masked column fails for that principal (`42501`), as for a denied column, because DML carries the whole target row and check-columns counts that as reading every column. Masks are only unsafe where a write reads or returns the hidden value, or writes a masked value back.
-- **When:** When an application masks columns of tables its users also write.
-- **Size:** About 2 days: tell carried target-row columns from read ones in `check_columns`, and keep the target row unmasked.
-- **Status:** open
-
 ### prover-subscriptions: Provers that watch replicated proposals
 - **Origin:** ADR-0030 phase 2
 - **Why:** `prove_pending` must be called. With replication, prover nodes should run it whenever a proposal arrives.
@@ -91,13 +84,6 @@ Entry format:
 - **Size:** About 2 days: sort runs a chunk at a time and merge them, yielding between chunks.
 - **Status:** open
 
-### engine-streaming-results: Stream query results through the session
-- **Origin:** F3 (10-million-row criterion)
-- **Why:** The executor streams, but `Session::query` collects every batch into a `QueryResult`, so a client reading 10 million rows through the engine holds them all. The 10-million-row test runs at the executor level for that reason.
-- **When:** With the SQL front end's wire protocol, which streams rows to clients.
-- **Size:** About 2 days: a result stream that keeps the statement's transaction and timeout.
-- **Status:** open
-
 ## Executor and IR open questions
 
 ### wasm-wit-interface: Define the WIT interface for WASM UDFs
@@ -108,6 +94,20 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### engine-streaming-results: Stream query results through the session
+- **Origin:** F3 (10-million-row criterion)
+- **Why:** The executor streams, but `Session::query` collects every batch into a `QueryResult`, so a client reading 10 million rows through the engine holds them all. The 10-million-row test runs at the executor level for that reason.
+- **When:** With the SQL front end's wire protocol, which streams rows to clients.
+- **Size:** About 2 days: a result stream that keeps the statement's transaction and timeout.
+- **Status:** done (`Session::query_stream` returns a `QueryStream` that borrows the session and pulls batches lazily under the statement's savepoint and timeout, committing autocommit at its end and undoing the statement on error or drop; 3 million rows stream in under 2 MB of heap growth, ADR-0031 phase 2)
+
+### masked-table-writes: Let principals write tables whose masked columns they don't read
+- **Origin:** ADR-0032, F2
+- **Why:** A statement that writes a table with a masked column fails for that principal (`42501`), as for a denied column, because DML carries the whole target row and check-columns counts that as reading every column. Masks are only unsafe where a write reads or returns the hidden value, or writes a masked value back.
+- **When:** When an application masks columns of tables its users also write.
+- **Size:** About 2 days: tell carried target-row columns from read ones in `check_columns`, and keep the target row unmasked.
+- **Status:** done (writes read masked columns through their masks, carried target-row columns no longer count as read, and an unmasked read joined by primary key carries the row written; `RETURNING` is masked per written row, assignments see masked values, ADR-0032 phase 2)
 
 ### slice-memory-accounting: Count sliced batches by their own rows
 - **Origin:** F3

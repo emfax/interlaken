@@ -12,6 +12,10 @@
 //! that a blocking query (a full sort) fails cleanly at the default query
 //! budget, returning everything it reserved. It is ignored by default
 //! because loading takes about a minute and a few GiB of disk.
+//!
+//! The same streaming criterion through the engine's public API, with
+//! results streamed by `Session::query_stream` and the heap measured by a
+//! counting allocator, is `crates/engine/tests/streaming_memory.rs`.
 
 use std::sync::Arc;
 use std::time::Instant;

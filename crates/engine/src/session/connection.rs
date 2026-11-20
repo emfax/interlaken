@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use interlaken_exec::{ExecError, ExplainOptions, Transaction, collect, explain, explain_analyze};
+use interlaken_exec::{
+    ExecError, ExplainOptions, Statement, Transaction, execute, explain, explain_analyze,
+};
 use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Datum, ExecOptions};
 use interlaken_ir::security::{EntityUid, SecurityContext};
@@ -13,6 +15,7 @@ use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
 use super::engine::Engine;
 use super::pipeline::{Step, exec_context, parse, pin, prepare};
 use super::result::QueryResult;
+use super::stream::QueryStream;
 use crate::catalog::{self, ColumnSpec, EntitySpec, IndexSpec, MembershipSpec, TableSpec};
 use crate::error::EngineError;
 use crate::policy::{
@@ -285,7 +288,11 @@ impl Session {
         result
     }
 
-    /// Run a query or DML statement given as IR text, with parameters `$1`, `$2`, ...
+    /// Run a query or DML statement given as IR text, with parameters
+    /// `$1`, `$2`, ..., and collect its rows.
+    ///
+    /// This collects [`Session::query_stream`]'s batches, so every row is
+    /// held at once; stream large results instead.
     ///
     /// # Errors
     ///
@@ -297,20 +304,11 @@ impl Session {
         text: &str,
         params: Vec<Datum>,
     ) -> Result<QueryResult, EngineError> {
-        let plan = parse(text);
-        self.run(Kind::Query, async move |step: &Step<'_>| {
-            let prepared = prepare(step, &plan?).await?;
-            let batches = collect(&prepared.physical, &exec_context(step, params)).await?;
-            Ok(QueryResult {
-                columns: prepared.columns,
-                types: prepared.types,
-                batches,
-            })
-        })
-        .await
+        self.query_stream(text, params).await?.collect().await
     }
 
-    /// Run a built query or DML plan, resolved or not, with parameters.
+    /// Run a built query or DML plan, resolved or not, with parameters,
+    /// and collect its rows.
     ///
     /// # Errors
     ///
@@ -320,16 +318,196 @@ impl Session {
         plan: &Plan,
         params: Vec<Datum>,
     ) -> Result<QueryResult, EngineError> {
-        self.run(Kind::Query, async move |step: &Step<'_>| {
-            let prepared = prepare(step, plan).await?;
-            let batches = collect(&prepared.physical, &exec_context(step, params)).await?;
-            Ok(QueryResult {
-                columns: prepared.columns,
-                types: prepared.types,
-                batches,
-            })
-        })
-        .await
+        self.query_plan_stream(plan, params).await?.collect().await
+    }
+
+    /// Start a query or DML statement given as IR text, with parameters
+    /// `$1`, `$2`, ..., and return a stream of its rows, which runs the
+    /// statement as it is read.
+    ///
+    /// The statement is planned before this returns; execution is lazy,
+    /// one batch per [`QueryStream::next`], so memory stays bounded by the
+    /// plan's operators, not the result's size. The stream borrows the
+    /// session, so the session runs nothing else until the stream is
+    /// finished or dropped. The statement keeps its semantics (ADR-0026):
+    ///
+    /// - It runs under its own savepoint in the open transaction, or in an
+    ///   implicit transaction committed when the stream ends.
+    /// - An error while streaming undoes the statement and aborts an open
+    ///   transaction (or rolls back the implicit one), as for
+    ///   [`Session::query`].
+    /// - Dropping the stream before its end cancels the statement and
+    ///   undoes its writes, without aborting an open transaction; the
+    ///   implicit transaction is rolled back.
+    /// - The statement timeout runs from this call: a stream read past it
+    ///   fails with SQLSTATE `57014`, including time the caller spends
+    ///   between batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Syntax`] if the text doesn't parse, or a
+    /// resolution, verification or security error, after undoing the
+    /// statement; execution errors arrive through the stream.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(session: &mut interlaken_engine::Session) -> Result<(), interlaken_engine::EngineError> {
+    /// let mut rows = session
+    ///     .query_stream("(plan (project (get docs :as d) d.id))", Vec::new())
+    ///     .await?;
+    /// let mut count = 0;
+    /// while let Some(batch) = rows.next().await {
+    ///     count += batch?.num_rows();
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn query_stream(
+        &mut self,
+        text: &str,
+        params: Vec<Datum>,
+    ) -> Result<QueryStream<'_>, EngineError> {
+        match parse(text) {
+            Ok(plan) => self.start_stream(Ok(&plan), params).await,
+            Err(e) => self.start_stream(Err(e), params).await,
+        }
+    }
+
+    /// Start a built query or DML plan, resolved or not, with parameters,
+    /// and return a stream of its rows.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::query_stream`].
+    pub async fn query_plan_stream(
+        &mut self,
+        plan: &Plan,
+        params: Vec<Datum>,
+    ) -> Result<QueryStream<'_>, EngineError> {
+        self.start_stream(Ok(plan), params).await
+    }
+
+    /// Begin a query statement (and an implicit transaction if none is
+    /// open), plan `plan` and return the stream that executes it.
+    async fn start_stream(
+        &mut self,
+        plan: Result<&Plan, EngineError>,
+        params: Vec<Datum>,
+    ) -> Result<QueryStream<'_>, EngineError> {
+        let implicit = self.txn.is_none();
+        if implicit {
+            self.begin(TxnOptions::default()).await?;
+        }
+        let timeout = self.statement_timeout;
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        let open = self.txn.as_mut().ok_or(EngineError::NoTransaction)?;
+        let statement = match open.exec.begin_statement() {
+            Ok(statement) => statement,
+            Err(e) => {
+                if implicit {
+                    self.rollback()?;
+                }
+                return Err(e.into());
+            }
+        };
+        let engine = &self.engine.inner;
+        let context = &self.context;
+        let (catalog_dirty, policies_dirty, options) =
+            (open.catalog_dirty, open.policies_dirty, open.options);
+        let txn = open.exec.txn();
+        let work = async {
+            let catalog = engine.catalogs.catalog(txn, catalog_dirty).await?;
+            let privileges = privileges::privileges(txn, &context.principal).await?;
+            let step = Step {
+                engine,
+                txn,
+                catalog,
+                context,
+                privileges,
+                use_caches: !catalog_dirty && !policies_dirty,
+                options,
+                deadline,
+            };
+            let prepared = prepare(&step, plan?).await?;
+            let batches = execute(&prepared.physical, &exec_context(&step, params));
+            Ok::<_, EngineError>((prepared.columns, prepared.types, batches))
+        };
+        let started = match timeout {
+            Some(limit) => tokio::time::timeout(limit, work)
+                .await
+                .unwrap_or(Err(EngineError::Exec(ExecError::QueryCanceled))),
+            None => work.await,
+        };
+        match started {
+            Ok((columns, types, batches)) => Ok(QueryStream::new(
+                self, statement, implicit, columns, types, batches, deadline,
+            )),
+            Err(e) => {
+                self.fail_statement(statement, implicit);
+                Err(e)
+            }
+        }
+    }
+
+    /// End a streamed statement that ran to its end: keep its writes, and
+    /// commit the transaction if it was implicit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error, or the commit's error (SQLSTATE `40001` for
+    /// a serialization failure).
+    pub(super) async fn finish_statement(
+        &mut self,
+        statement: Statement,
+        implicit: bool,
+    ) -> Result<(), EngineError> {
+        let released = self.open().and_then(|open| {
+            open.exec
+                .release_statement(statement)
+                .map_err(EngineError::from)
+        });
+        if let Err(e) = released {
+            if implicit && self.txn.is_some() {
+                self.rollback()?;
+            }
+            return Err(e);
+        }
+        if implicit {
+            self.commit().await?;
+        }
+        Ok(())
+    }
+
+    /// End a streamed statement that failed: undo its writes and abort the
+    /// open transaction, or roll back the implicit one.
+    pub(super) fn fail_statement(&mut self, statement: Statement, implicit: bool) {
+        if let Some(open) = self.txn.as_mut() {
+            // The transaction is aborted even if the undo fails, so nothing
+            // the statement wrote can commit.
+            let _ = open.exec.rollback_statement(statement);
+        }
+        if implicit && let Some(open) = self.txn.take() {
+            open.exec.rollback();
+        }
+    }
+
+    /// End a streamed statement its caller stopped reading: undo its
+    /// writes without aborting the open transaction, or roll back the
+    /// implicit one.
+    pub(super) fn cancel_statement(&mut self, statement: Statement, implicit: bool) {
+        if implicit {
+            // Rolling the whole transaction back undoes the statement too.
+            drop(statement);
+            if let Some(open) = self.txn.take() {
+                open.exec.rollback();
+            }
+            return;
+        }
+        if let Some(open) = self.txn.as_mut() {
+            // A failed undo aborts the transaction instead.
+            let _ = open.exec.cancel_statement(statement);
+        }
     }
 
     /// Resolve and verify IR text against the current catalog without

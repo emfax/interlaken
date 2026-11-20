@@ -18,4 +18,4 @@ mod util;
 
 pub use api::{is_leakproof, optimize};
 pub(crate) use prune::{positional, referenced};
-pub(crate) use util::{output_columns, take};
+pub(crate) use util::{max_binding, output_columns, rewrite_expr, take};

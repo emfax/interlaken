@@ -5,7 +5,7 @@ use interlaken_engine::catalog::{
 };
 use interlaken_engine::policy::{PolicyDocument, PolicyLanguage};
 use interlaken_engine::{Engine, EngineError, EngineOptions, Session};
-use interlaken_exec::to_stored;
+use interlaken_exec::{from_stored, to_stored};
 use interlaken_ir::catalog::{Catalog, InMemoryCatalog};
 use interlaken_ir::interp::Datum;
 use interlaken_ir::security::{Effect, EntityUid, Policy, SecurityContext, print_sec_expr};
@@ -177,6 +177,30 @@ pub async fn replace_rows(engine: &Engine, tables: &[(&str, Vec<Vec<Datum>>)]) {
         }
     }
     txn.commit().await.unwrap();
+}
+
+/// Return every row of the named table in primary key order, read
+/// directly from storage (bypassing policies and masks).
+pub async fn stored_rows(engine: &Engine, name: &str) -> Vec<Vec<Datum>> {
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let def = catalog::table(&txn, name).await.unwrap().unwrap();
+    let mut scan = RowScan::all();
+    let mut out = Vec::new();
+    loop {
+        let batch = rows::scan(&txn, &def, &scan).await.unwrap();
+        out.extend(
+            batch
+                .rows
+                .iter()
+                .map(|row| row.iter().map(from_stored).collect::<Vec<_>>()),
+        );
+        match batch.resume {
+            Some(resume) => scan.resume = Some(resume),
+            None => break,
+        }
+    }
+    txn.abort();
+    out
 }
 
 /// Propose, verify and activate an RLS policy set as `admin`, confirming

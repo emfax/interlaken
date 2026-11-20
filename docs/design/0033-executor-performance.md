@@ -52,7 +52,7 @@ E1–E5 built every operator for correctness; F1 put them behind the engine's AP
 - secured queries: a scan and a join as user 1;
 - bulk DML: insert, update and delete of a million rows.
 
-`crates/exec/tests/ten_million.rs` is the executor's 10-million-row criterion, ignored by default (`cargo test --release -p interlaken-exec --test ten_million -- --ignored --nocapture`).
+`crates/exec/tests/ten_million.rs` is the executor's 10-million-row criterion, ignored by default (`cargo test --release -p interlaken-exec --test ten_million -- --ignored --nocapture`). Its session-level counterpart, streaming through `Session::query_stream` with the heap measured by a counting allocator, is `crates/engine/tests/streaming_memory.rs` (ADR-0031 phase 2).
 
 ### Incremental aggregates
 

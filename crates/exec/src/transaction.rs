@@ -8,6 +8,13 @@
 //! a savepoint taken before the failure, or ends the transaction. A commit
 //! of an aborted transaction rolls it back. Serialization failures at
 //! commit are returned (`40001`) and never retried here.
+//!
+//! [`Transaction::statement`] runs a statement given as a closure. A
+//! statement whose results outlive one call, such as a result stream the
+//! client pulls from, uses the lower-level [`Transaction::begin_statement`]
+//! and ends the [`Statement`] it returns with
+//! [`Transaction::release_statement`], [`Transaction::rollback_statement`]
+//! or [`Transaction::cancel_statement`].
 
 use std::sync::Arc;
 
@@ -20,6 +27,20 @@ use crate::error::ExecError;
 use crate::exec::{ExecContext, collect};
 use crate::memory::{DEFAULT_QUERY_BUDGET, MemoryPool, QueryMemory};
 use crate::physical::Physical;
+
+/// A statement in progress, begun by [`Transaction::begin_statement`].
+///
+/// It must be ended by one of [`Transaction::release_statement`] (keep its
+/// writes), [`Transaction::rollback_statement`] (undo them and abort the
+/// transaction) or [`Transaction::cancel_statement`] (undo them only).
+/// Dropping it without ending it leaves its savepoint open, so its writes
+/// stay until the transaction ends or a rollback to an earlier savepoint.
+#[derive(Debug)]
+#[must_use = "a statement must be released, rolled back or cancelled"]
+pub struct Statement {
+    /// The statement's implicit savepoint.
+    savepoint: SavepointId,
+}
 
 /// A transaction that runs statements.
 pub struct Transaction {
@@ -131,28 +152,88 @@ impl Transaction {
     where
         E: From<ExecError>,
     {
-        if self.aborted {
-            return Err(ExecError::TransactionAborted.into());
-        }
-        self.txn.next_statement();
-        let savepoint = self.txn.savepoint();
-        let result = body(&self.txn).await;
-        match result {
+        let statement = self.begin_statement()?;
+        match body(&self.txn).await {
             Ok(value) => {
-                self.txn
-                    .release_savepoint(savepoint)
-                    .map_err(ExecError::from)?;
+                self.release_statement(statement)?;
                 Ok(value)
             }
             Err(e) => {
-                self.txn.rollback_to(savepoint).map_err(ExecError::from)?;
-                self.txn
-                    .release_savepoint(savepoint)
-                    .map_err(ExecError::from)?;
-                self.aborted = true;
+                self.rollback_statement(statement)?;
                 Err(e)
             }
         }
+    }
+
+    /// Begin a statement: advance to the next statement, so it sees every
+    /// earlier statement's writes but not its own, and open its implicit
+    /// savepoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::TransactionAborted`] if an earlier statement failed.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(txn: &mut interlaken_exec::Transaction) -> Result<(), interlaken_exec::ExecError> {
+    /// let statement = txn.begin_statement()?;
+    /// // ... run plans through `txn.txn()`, pulling their streams ...
+    /// txn.release_statement(statement)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn begin_statement(&mut self) -> Result<Statement, ExecError> {
+        if self.aborted {
+            return Err(ExecError::TransactionAborted);
+        }
+        self.txn.next_statement();
+        Ok(Statement {
+            savepoint: self.txn.savepoint(),
+        })
+    }
+
+    /// End `statement` successfully, keeping its writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the statement's savepoint is no longer
+    /// open (a rollback to an earlier savepoint closed it).
+    pub fn release_statement(&mut self, statement: Statement) -> Result<(), ExecError> {
+        Ok(self.txn.release_savepoint(statement.savepoint)?)
+    }
+
+    /// End `statement` as failed: undo its writes and mark the transaction
+    /// aborted, so later statements fail with `25P02` until a rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the statement's savepoint is no longer
+    /// open; the transaction is aborted all the same.
+    pub fn rollback_statement(&mut self, statement: Statement) -> Result<(), ExecError> {
+        self.aborted = true;
+        self.txn.rollback_to(statement.savepoint)?;
+        Ok(self.txn.release_savepoint(statement.savepoint)?)
+    }
+
+    /// End `statement` as cancelled by its caller, who stopped reading its
+    /// results: undo its writes, as if it had never run, without aborting
+    /// the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the statement's savepoint is no longer
+    /// open, after marking the transaction aborted, since the statement's
+    /// writes could not be undone.
+    pub fn cancel_statement(&mut self, statement: Statement) -> Result<(), ExecError> {
+        let undone = self
+            .txn
+            .rollback_to(statement.savepoint)
+            .and_then(|()| self.txn.release_savepoint(statement.savepoint));
+        if undone.is_err() {
+            self.aborted = true;
+        }
+        Ok(undone?)
     }
 
     /// Open a savepoint at the current state.
