@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use super::defs::{FunctionDef, TableDef};
+use super::defs::{FunctionDef, FunctionProperties, TableDef};
 use super::entities::{EntityDef, MembershipDef};
 use super::lookup::Catalog;
 use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
@@ -24,6 +24,9 @@ pub enum CatalogError {
     /// An overload with the same name and argument types already exists.
     #[error("function {0} already has an overload with these argument types")]
     DuplicateOverload(QualifiedName),
+    /// No function has this ID.
+    #[error("no function has ID {0:?}")]
+    UnknownFunction(FunctionId),
     /// The entity or membership declaration conflicts with another or refers to missing tables or columns.
     #[error("invalid entity declaration {name}: {reason}")]
     InvalidEntity {
@@ -203,6 +206,31 @@ impl InMemoryCatalog {
 }
 
 impl InMemoryCatalog {
+    /// Return every table, in ID order.
+    #[must_use]
+    pub fn tables(&self) -> Vec<Arc<TableDef>> {
+        self.tables.values().cloned().collect()
+    }
+
+    /// Replace the properties of function `id`, as an administrator's
+    /// catalog change does (ADR-0011).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::UnknownFunction`] if no function has the ID.
+    pub fn set_function_properties(
+        &mut self,
+        id: FunctionId,
+        properties: FunctionProperties,
+    ) -> Result<(), CatalogError> {
+        let def = self
+            .functions
+            .get_mut(&id)
+            .ok_or(CatalogError::UnknownFunction(id))?;
+        Arc::make_mut(def).properties = properties;
+        Ok(())
+    }
+
     /// Fail unless `table` exists and has every column in `columns`.
     fn check_columns(
         &self,

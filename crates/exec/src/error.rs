@@ -43,6 +43,10 @@ pub enum ExecError {
         /// Which limit it crossed.
         scope: MemoryScope,
     },
+    /// The statement ran longer than its `statement_timeout` and was
+    /// cancelled; its writes were rolled back (SQLSTATE `57014`).
+    #[error("canceling statement due to statement timeout")]
+    QueryCanceled,
 }
 
 impl ExecError {
@@ -68,6 +72,7 @@ impl ExecError {
             Self::TransactionAborted => "25P02",
             Self::PermissionDenied { .. } => "42501",
             Self::MemoryExceeded { .. } => "53200",
+            Self::QueryCanceled => "57014",
         }
     }
 }

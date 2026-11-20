@@ -9,11 +9,13 @@
 //! Policy logic is shown only to principals allowed to read policy
 //! definitions ([`ExplainOptions::show_policies`]). Everyone else sees
 //! `PolicyFilter(table)` with no residual. The subplans security lowering
-//! adds beneath a policy filter (the inner side of each join or apply on
-//! the way down to the governed rows) are collapsed to one line. A
-//! governed scan hides its policy conjuncts and key values, and a
-//! `WriteCheck` hides its check. The plan's shape stays visible, but its
-//! policy logic does not.
+//! adds carry a marker (their scans' aliases and literal relations'
+//! column names use the reserved policy prefix), so each is collapsed to
+//! one line wherever the optimizer put it beneath a policy filter or write
+//! check, and the conditions joining them are hidden. Beneath a policy
+//! filter every expression is hidden. A governed scan hides its policy
+//! conjuncts and key values, and a `WriteCheck` hides its check. The
+//! plan's shape stays visible, but its policy logic does not.
 
 use std::fmt::Write as _;
 use std::ops::Bound;
@@ -48,7 +50,7 @@ pub fn explain(node: &Physical, options: ExplainOptions) -> String {
         metrics: None,
         out: &mut out,
     }
-    .node(node, 0, false);
+    .node(node, 0, Scope::Open);
     out
 }
 
@@ -74,7 +76,7 @@ pub async fn explain_analyze(
         metrics: Some(&metrics),
         out: &mut out,
     }
-    .node(node, 0, false);
+    .node(node, 0, Scope::Open);
     Ok(out)
 }
 
@@ -173,13 +175,39 @@ impl Renderer<'_> {
         !self.options.show_policies
     }
 
-    /// Write `node` and its inputs at `depth`.
+    /// Render `e`, or `<policy>` if expressions in `scope` are policy logic to hide.
+    fn shown(&self, scope: Scope, e: &Expr) -> String {
+        if self.hiding() && scope == Scope::Policy {
+            HIDDEN.to_owned()
+        } else {
+            expr(e)
+        }
+    }
+
+    /// Render a list of expressions, or `<policy>` as for [`Renderer::shown`].
+    fn shown_list(&self, scope: Scope, items: &[Expr]) -> String {
+        if self.hiding() && scope == Scope::Policy && !items.is_empty() {
+            HIDDEN.to_owned()
+        } else {
+            list(items)
+        }
+    }
+
+    /// Write `node` and its inputs at `depth`, in `scope`.
     ///
-    /// `governed` is set on the path from a policy filter down to the rows
-    /// it governs: joins and applies there have their inner side hidden.
+    /// Under a policy filter or write check, a subplan security lowering
+    /// added (one whose every leaf carries the policy marker) is written as
+    /// one hidden line, and so is the condition of a join with such a side.
+    /// Under a policy filter, every other expression is policy logic too,
+    /// since the filter's input is the governed scan and what lowering
+    /// joined to it.
     #[allow(clippy::too_many_lines)]
-    fn node(&mut self, node: &Physical, depth: usize, governed: bool) {
+    fn node(&mut self, node: &Physical, depth: usize, scope: Scope) {
         let hide = self.hiding();
+        if hide && scope != Scope::Open && policy_subplan(node) {
+            self.hidden_subplan(depth);
+            return;
+        }
         match &node.op {
             Op::TableScan {
                 table,
@@ -213,8 +241,9 @@ impl Renderer<'_> {
                 self.line(node, depth, &text);
             }
             Op::Filter { input, predicate } => {
-                self.line(node, depth, &format!("Filter {}", expr(predicate)));
-                self.node(input, depth + 1, governed);
+                let text = format!("Filter {}", self.shown(scope, predicate));
+                self.line(node, depth, &text);
+                self.node(input, depth + 1, scope);
             }
             Op::PolicyFilter {
                 input,
@@ -227,7 +256,7 @@ impl Renderer<'_> {
                     format!("PolicyFilter({table}) {}", expr(residual))
                 };
                 self.line(node, depth, &text);
-                self.node(input, depth + 1, true);
+                self.node(input, depth + 1, Scope::Policy);
             }
             Op::WriteCheck {
                 input,
@@ -240,11 +269,12 @@ impl Renderer<'_> {
                     format!("WriteCheck({table}) {}", expr(check))
                 };
                 self.line(node, depth, &text);
-                self.node(input, depth + 1, false);
+                self.node(input, depth + 1, scope.max(Scope::Check));
             }
             Op::Project { input, exprs } => {
-                self.line(node, depth, &format!("Project {}", list(exprs)));
-                self.node(input, depth + 1, false);
+                let text = format!("Project {}", self.shown_list(scope, exprs));
+                self.line(node, depth, &text);
+                self.node(input, depth + 1, scope);
             }
             Op::Limit {
                 input,
@@ -253,13 +283,13 @@ impl Renderer<'_> {
             } => {
                 let mut text = "Limit".to_owned();
                 if let Some(l) = limit {
-                    let _ = write!(text, " count: {}", expr(l));
+                    let _ = write!(text, " count: {}", self.shown(scope, l));
                 }
                 if let Some(o) = offset {
-                    let _ = write!(text, " offset: {}", expr(o));
+                    let _ = write!(text, " offset: {}", self.shown(scope, o));
                 }
                 self.line(node, depth, &text);
-                self.node(input, depth + 1, false);
+                self.node(input, depth + 1, scope);
             }
             Op::Join {
                 kind,
@@ -274,7 +304,9 @@ impl Renderer<'_> {
                     "HashJoin"
                 };
                 let mut text = format!("{algorithm} {}", join_kind(*kind));
-                if governed && hide {
+                let policy_side =
+                    scope != Scope::Open && (policy_subplan(left) || policy_subplan(right));
+                if hide && (scope == Scope::Policy || policy_side) {
                     let _ = write!(text, " on {HIDDEN}");
                 } else {
                     if !keys.is_empty() {
@@ -289,55 +321,52 @@ impl Renderer<'_> {
                     }
                 }
                 self.line(node, depth, &text);
-                self.node(left, depth + 1, governed);
-                if governed && hide {
-                    self.hidden_subplan(depth + 1);
-                } else {
-                    self.node(right, depth + 1, false);
-                }
+                self.node(left, depth + 1, scope);
+                self.node(right, depth + 1, scope);
             }
             Op::Apply { kind, outer, inner } => {
                 let kind = format!("{kind:?}").to_lowercase();
                 self.line(node, depth, &format!("Apply {kind}"));
-                self.node(outer, depth + 1, governed);
-                if governed && hide {
-                    self.hidden_subplan(depth + 1);
-                } else {
-                    self.node(inner, depth + 1, false);
-                }
+                self.node(outer, depth + 1, scope);
+                self.node(inner, depth + 1, scope);
             }
             Op::Aggregate { input, keys, aggs } => {
                 let aggs: Vec<String> = aggs
                     .iter()
                     .map(|a| {
                         let distinct = if a.distinct { "distinct " } else { "" };
-                        let mut s = format!("{}({distinct}{})", a.def.name, list(&a.args));
+                        let mut s = format!(
+                            "{}({distinct}{})",
+                            a.def.name,
+                            self.shown_list(scope, &a.args)
+                        );
                         if let Some(f) = &a.filter {
-                            let _ = write!(s, " filter {}", expr(f));
+                            let _ = write!(s, " filter {}", self.shown(scope, f));
                         }
                         s
                     })
                     .collect();
-                self.line(
-                    node,
-                    depth,
-                    &format!(
-                        "HashAggregate keys: [{}] aggs: [{}]",
-                        list(keys),
-                        aggs.join(", ")
-                    ),
+                let text = format!(
+                    "HashAggregate keys: [{}] aggs: [{}]",
+                    self.shown_list(scope, keys),
+                    aggs.join(", ")
                 );
-                self.node(input, depth + 1, false);
+                self.line(node, depth, &text);
+                self.node(input, depth + 1, scope);
             }
             Op::Distinct { input } => {
                 self.line(node, depth, "Distinct");
-                self.node(input, depth + 1, false);
+                self.node(input, depth + 1, scope);
             }
             Op::Sort { input, keys, fetch } => {
-                let keys: Vec<String> = keys.iter().map(sort_key).collect();
+                let keys: Vec<String> = if hide && scope == Scope::Policy {
+                    vec![HIDDEN.to_owned()]
+                } else {
+                    keys.iter().map(sort_key).collect()
+                };
                 let name = if fetch.is_some() { "TopN" } else { "Sort" };
                 self.line(node, depth, &format!("{name} {}", keys.join(", ")));
-                self.node(input, depth + 1, false);
+                self.node(input, depth + 1, scope);
             }
             Op::SetOp {
                 op,
@@ -352,27 +381,29 @@ impl Renderer<'_> {
                 };
                 let all = if *all { " all" } else { "" };
                 self.line(node, depth, &format!("{name}{all}"));
-                self.node(left, depth + 1, false);
-                self.node(right, depth + 1, false);
+                self.node(left, depth + 1, scope);
+                self.node(right, depth + 1, scope);
             }
-            Op::Values { rows } => {
+            Op::Values { rows, .. } => {
                 self.line(node, depth, &format!("Values rows: {}", rows.len()));
             }
             Op::Unnest { input, expr: e, .. } => {
-                self.line(node, depth, &format!("Unnest {}", expr(e)));
-                self.node(input, depth + 1, governed);
+                let text = format!("Unnest {}", self.shown(scope, e));
+                self.line(node, depth, &text);
+                self.node(input, depth + 1, scope);
             }
             Op::Nest {
                 input,
                 keys,
                 fields,
             } => {
-                self.line(
-                    node,
-                    depth,
-                    &format!("Nest keys: [{}] fields: [{}]", list(keys), list(fields)),
+                let text = format!(
+                    "Nest keys: [{}] fields: [{}]",
+                    self.shown_list(scope, keys),
+                    self.shown_list(scope, fields)
                 );
-                self.node(input, depth + 1, false);
+                self.line(node, depth, &text);
+                self.node(input, depth + 1, scope);
             }
             Op::Insert { dml, .. } => {
                 self.line(
@@ -380,7 +411,7 @@ impl Renderer<'_> {
                     depth,
                     &format!("Insert into {}", dml.table.name.last()),
                 );
-                self.node(&dml.input, depth + 1, false);
+                self.node(&dml.input, depth + 1, scope);
             }
             Op::Update {
                 dml, assignments, ..
@@ -401,7 +432,7 @@ impl Renderer<'_> {
                     depth,
                     &format!("Update {} set {}", dml.table.name.last(), sets.join(", ")),
                 );
-                self.node(&dml.input, depth + 1, false);
+                self.node(&dml.input, depth + 1, scope);
             }
             Op::Delete { dml, .. } => {
                 self.line(
@@ -409,8 +440,31 @@ impl Renderer<'_> {
                     depth,
                     &format!("Delete from {}", dml.table.name.last()),
                 );
-                self.node(&dml.input, depth + 1, false);
+                self.node(&dml.input, depth + 1, scope);
             }
+        }
+    }
+}
+
+/// Where in the plan an operator sits, for hiding policy logic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Scope {
+    /// Outside any policy filter or write check: nothing is policy logic.
+    Open,
+    /// Beneath a write check: subplans lowering added are policy logic.
+    Check,
+    /// Beneath a policy filter: all expressions are policy logic.
+    Policy,
+}
+
+/// Return whether security lowering added the whole subplan: every leaf
+/// carries the policy marker.
+fn policy_subplan(node: &Physical) -> bool {
+    match &node.op {
+        Op::TableScan { policy_added, .. } | Op::Values { policy_added, .. } => *policy_added,
+        op => {
+            let inputs = op.inputs();
+            !inputs.is_empty() && inputs.into_iter().all(policy_subplan)
         }
     }
 }

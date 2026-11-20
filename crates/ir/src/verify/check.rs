@@ -8,6 +8,7 @@ use crate::expr::{Expr, NamedExpr, SubqueryKind};
 use crate::names::{BindingId, ColumnId, ColumnRef, FunctionRef, TableRef, TargetColumn};
 use crate::rel::{ApplyKind, DmlTarget, JoinKind, Plan, Rel};
 use crate::schema::{OutputColumn, RelSchema};
+use crate::security::{POLICY_ALIAS_PREFIX, is_policy_alias};
 use crate::text::print_expr;
 use crate::types::{DataType, Field, ScalarType, Type};
 use crate::typing;
@@ -358,7 +359,17 @@ impl Verifier<'_> {
     #[allow(clippy::too_many_lines)]
     fn rel_inner(&mut self, rel: &Rel, outer: &[&Schema]) -> Result<Schema> {
         Ok(match rel {
-            Rel::Get { table, binding, .. } => {
+            Rel::Get {
+                table,
+                binding,
+                alias,
+            } => {
+                if !self.options.trusted && alias.as_ref().is_some_and(is_policy_alias) {
+                    return Err(VerifyError::Privileged(format!(
+                        "the alias {} uses the reserved prefix {POLICY_ALIAS_PREFIX}",
+                        alias.as_ref().map_or("", |a| a.as_str())
+                    )));
+                }
                 let def = self.table(table, false)?;
                 let binding = self.bind(*binding, "a get")?;
                 Self::table_columns(&def, binding)
@@ -568,6 +579,11 @@ impl Verifier<'_> {
                 rows,
                 binding,
             } => {
+                if !self.options.trusted && columns.iter().any(is_policy_alias) {
+                    return Err(VerifyError::Privileged(format!(
+                        "values column names may not use the reserved prefix {POLICY_ALIAS_PREFIX}"
+                    )));
+                }
                 if rows.is_empty() {
                     return Err(structure("values needs at least one row"));
                 }

@@ -1,8 +1,8 @@
 //! Tuple encoder.
 
 use super::tags::{
-    BOOL, BYTEA, CANONICAL_NAN_BITS, ESCAPE, ESCAPED_ZERO, FLOAT8, INT2, INT4, INT8, NULL_FIRST,
-    NULL_LAST, TERMINATOR, TEXT,
+    BOOL, BYTEA, CANONICAL_NAN_BITS, DATE, ESCAPE, ESCAPED_ZERO, FLOAT8, INT2, INT4, INT8,
+    NULL_FIRST, NULL_LAST, TERMINATOR, TEXT, TIMESTAMPTZ, UUID,
 };
 use super::{Datum, Direction, EncodeError, NullOrder, SortOrder, VERSION_SUFFIX_LEN};
 
@@ -36,7 +36,7 @@ const SIGN_BIT: u64 = 1 << 63;
 pub struct KeyBuilder {
     buf: Vec<u8>,
     max_len: usize,
-    /// An array was pushed; arrays have no key encoding.
+    /// An array or `jsonb` value was pushed; they have no key encoding.
     unkeyable: bool,
 }
 
@@ -110,8 +110,22 @@ impl KeyBuilder {
                 self.buf.push(BYTEA);
                 self.push_escaped(b);
             }
-            Datum::Array(_) => {
-                // Arrays have no key encoding; `finish` reports it.
+            Datum::Date(v) => {
+                self.buf.push(DATE);
+                self.buf
+                    .extend_from_slice(&(v.cast_unsigned() ^ 0x8000_0000).to_be_bytes());
+            }
+            Datum::Timestamptz(v) => {
+                self.buf.push(TIMESTAMPTZ);
+                self.buf
+                    .extend_from_slice(&(v.cast_unsigned() ^ SIGN_BIT).to_be_bytes());
+            }
+            Datum::Uuid(bytes) => {
+                self.buf.push(UUID);
+                self.buf.extend_from_slice(bytes);
+            }
+            Datum::Array(_) | Datum::Jsonb(_) => {
+                // Arrays and jsonb have no key encoding; `finish` reports it.
                 self.unkeyable = true;
                 return self;
             }
@@ -141,7 +155,7 @@ impl KeyBuilder {
     /// # Errors
     ///
     /// Returns [`EncodeError::KeyTooLong`] if the tuple exceeds the builder's limit,
-    /// or [`EncodeError::Unkeyable`] if an array was pushed.
+    /// or [`EncodeError::Unkeyable`] if an array or `jsonb` value was pushed.
     pub fn finish(self) -> Result<Vec<u8>, EncodeError> {
         if self.unkeyable {
             return Err(EncodeError::Unkeyable);
@@ -249,6 +263,21 @@ mod tests {
     }
 
     #[test]
+    /// Assert temporal values encode like integers and UUIDs as their raw bytes.
+    fn temporal_and_uuid() {
+        assert_eq!(asc(Datum::Date(-1)), [DATE, 0x7F, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(
+            asc(Datum::Timestamptz(0)),
+            [TIMESTAMPTZ, 0x80, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let mut uuid = [0u8; 16];
+        uuid[15] = 7;
+        let mut expected = vec![UUID];
+        expected.extend_from_slice(&uuid);
+        assert_eq!(asc(Datum::Uuid(uuid)), expected);
+    }
+
+    #[test]
     /// Assert text escapes zero bytes and ends with the terminator.
     fn text_escapes_zero() {
         assert_eq!(
@@ -309,6 +338,10 @@ mod tests {
         );
         assert_eq!(
             encode_tuple(&[(Datum::Array(vec![]), SortOrder::ASC)]),
+            Err(EncodeError::Unkeyable)
+        );
+        assert_eq!(
+            encode_tuple(&[(Datum::Jsonb("{}".into()), SortOrder::ASC)]),
             Err(EncodeError::Unkeyable)
         );
     }

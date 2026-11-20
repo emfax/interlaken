@@ -677,3 +677,72 @@ async fn array_columns() {
         ]
     );
 }
+
+#[tokio::test]
+/// Assert date, timestamptz, uuid and jsonb columns store and survive a restart,
+/// the first three can be keys and indexed, and jsonb can't.
+async fn temporal_uuid_and_jsonb_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = |key: &str| TableSpec {
+        name: "events".into(),
+        columns: vec![
+            ColumnDef::new("id", ColumnType::Uuid),
+            ColumnDef::new("day", ColumnType::Date),
+            ColumnDef::new("at", ColumnType::Timestamptz),
+            ColumnDef::new("body", ColumnType::Jsonb),
+        ],
+        primary_key: vec![key.into()],
+    };
+    let row = |n: u8, day: i32| {
+        vec![
+            Datum::Uuid([n; 16]),
+            Datum::Date(day),
+            Datum::Timestamptz(i64::from(day) * 86_400_000_000),
+            Datum::Jsonb(format!("{{\"n\": {n}}}")),
+        ]
+    };
+    {
+        let storage = open(&dir);
+        let txn = begin(&storage, Isolation::Serializable).await;
+        let err = catalog::create_table(&txn, spec("body")).await.unwrap_err();
+        assert!(err.to_string().contains("jsonb"), "{err}");
+        catalog::create_table(&txn, spec("id")).await.unwrap();
+        let def = catalog::create_index(
+            &txn,
+            IndexSpec {
+                name: "events_day".into(),
+                table: "events".into(),
+                columns: vec![
+                    ("day".into(), SortOrder::DESC),
+                    ("at".into(), SortOrder::ASC),
+                ],
+                unique: true,
+            },
+        )
+        .await
+        .unwrap();
+        for (n, day) in [(1, -3), (2, 19_000), (3, 0)] {
+            rows::insert(&txn, &def, row(n, day)).await.unwrap();
+        }
+        let err = rows::insert(&txn, &def, row(4, 0)).await.unwrap_err();
+        assert!(matches!(err, Error::Constraint(_)), "{err}");
+        txn.commit().await.unwrap();
+    }
+    let storage = open(&dir);
+    let txn = begin(&storage, Isolation::Serializable).await;
+    let def = catalog::table(&txn, "events").await.unwrap().unwrap();
+    assert_eq!(
+        def.types(),
+        [
+            ColumnType::Uuid,
+            ColumnType::Date,
+            ColumnType::Timestamptz,
+            ColumnType::Jsonb
+        ]
+    );
+    assert_eq!(
+        all_rows(&txn, &def).await,
+        [row(1, -3), row(2, 19_000), row(3, 0)]
+    );
+    assert_consistent(&txn, &def).await;
+}

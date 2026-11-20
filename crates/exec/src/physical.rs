@@ -23,10 +23,11 @@ use std::sync::Arc;
 use arrow_schema::{Schema, SchemaRef};
 use interlaken_ir::catalog::{Catalog, FunctionDef, TableDef};
 use interlaken_ir::optimize::is_leakproof;
+use interlaken_ir::security::is_policy_alias;
 use interlaken_ir::verify::{column_types, expr_type};
 use interlaken_ir::{
-    ApplyKind, BinaryOp, BindingId, ColumnId, ColumnRef, DmlTarget, Expr, FunctionRef, JoinKind,
-    NamedExpr, Plan, Rel, SetOpKind, SortKey, TableRef, TargetColumn, Type,
+    ApplyKind, BinaryOp, BindingId, ColumnId, ColumnRef, DmlTarget, Expr, FunctionRef, Ident,
+    JoinKind, NamedExpr, Plan, Rel, SetOpKind, SortKey, TableRef, TargetColumn, Type,
 };
 
 use crate::access::{Access, choose};
@@ -81,6 +82,9 @@ pub enum Op {
         /// Whether a policy filter governs the scan; `EXPLAIN` then hides
         /// its key values from principals who may not see policies.
         secured: bool,
+        /// Whether security lowering added the scan to evaluate a policy
+        /// (its alias carries the policy marker); `EXPLAIN` hides it.
+        policy_added: bool,
         /// Rows per storage call.
         batch_rows: usize,
     },
@@ -167,6 +171,10 @@ pub enum Op {
     Values {
         /// The rows' expressions.
         rows: Vec<Vec<Expr>>,
+        /// Whether security lowering built the relation (its columns carry
+        /// the policy marker, or none are left); `EXPLAIN` hides it under
+        /// policy filters and write checks.
+        policy_added: bool,
     },
     /// One row per element of an array, after the input row's columns.
     Unnest {
@@ -471,6 +479,49 @@ fn governed_table(rel: &Rel, catalog: &dyn Catalog) -> String {
     }
 }
 
+/// What a scan evaluates in storage, and whether a policy governs it.
+#[derive(Default)]
+struct Pushdown {
+    /// Leakproof conjuncts from the query's filters.
+    pushed: Option<Expr>,
+    /// Leakproof conjuncts from policy residuals.
+    policy: Option<Expr>,
+    /// Whether a policy filter governs the scan.
+    secured: bool,
+}
+
+/// Name `table` as the target of every write check in a DML input,
+/// wherever the optimizer left it.
+fn name_write_checks(node: &mut Physical, table: &str) {
+    if let Op::WriteCheck { table: checked, .. } = &mut node.op {
+        table.clone_into(checked);
+    }
+    match &mut node.op {
+        Op::TableScan { .. } | Op::Values { .. } => {}
+        Op::Filter { input, .. }
+        | Op::Project { input, .. }
+        | Op::Limit { input, .. }
+        | Op::Aggregate { input, .. }
+        | Op::Distinct { input }
+        | Op::Sort { input, .. }
+        | Op::Unnest { input, .. }
+        | Op::Nest { input, .. }
+        | Op::PolicyFilter { input, .. }
+        | Op::WriteCheck { input, .. } => name_write_checks(input, table),
+        Op::Join { left, right, .. } | Op::SetOp { left, right, .. } => {
+            name_write_checks(left, table);
+            name_write_checks(right, table);
+        }
+        Op::Apply { outer, inner, .. } => {
+            name_write_checks(outer, table);
+            name_write_checks(inner, table);
+        }
+        Op::Insert { dml, .. } | Op::Update { dml, .. } | Op::Delete { dml, .. } => {
+            name_write_checks(&mut dml.input, table);
+        }
+    }
+}
+
 /// Return the distinct bindings of a layout.
 fn bindings_of(layout: &Layout) -> HashSet<BindingId> {
     layout.iter().map(|(b, _)| *b).collect()
@@ -541,16 +592,21 @@ impl Planner<'_> {
         expr_type(expr, self.catalog, &columns).ok()
     }
 
-    /// Build a table scan, with `pushed` and `policy` conjuncts evaluated in storage.
+    /// Build a table scan of `table` (aliased `alias`), reaching rows by
+    /// `access`, with `pushdown`'s conjuncts evaluated in storage.
     fn scan(
         &self,
         table: &TableRef,
         binding: Option<BindingId>,
+        alias: Option<&Ident>,
         access: Access,
-        pushed: Option<Expr>,
-        policy: Option<Expr>,
-        secured: bool,
+        pushdown: Pushdown,
     ) -> Result<Physical, ExecError> {
+        let Pushdown {
+            pushed,
+            policy,
+            secured,
+        } = pushdown;
         let def = self.table(table)?;
         let binding =
             binding.ok_or_else(|| ExecError::Unsupported("get without a binding".into()))?;
@@ -562,6 +618,7 @@ impl Planner<'_> {
                 pushed,
                 policy,
                 secured,
+                policy_added: alias.is_some_and(is_policy_alias),
                 batch_rows: self.options.batch_rows.max(1),
             },
             layout,
@@ -608,7 +665,7 @@ impl Planner<'_> {
             Rel::Get {
                 table,
                 binding: Some(binding),
-                ..
+                alias,
             } => {
                 let own = HashSet::from([*binding]);
                 let def = self.table(table)?;
@@ -644,10 +701,13 @@ impl Planner<'_> {
                 self.scan(
                     table,
                     Some(*binding),
+                    alias.as_ref(),
                     access,
-                    conjoin(pushed),
-                    conjoin(policy),
-                    secured,
+                    Pushdown {
+                        pushed: conjoin(pushed),
+                        policy: conjoin(policy),
+                        secured,
+                    },
                 )?
             }
             other => self.build(other)?,
@@ -757,9 +817,7 @@ impl Planner<'_> {
             }
         };
         let mut input = self.build(input)?;
-        if let Op::WriteCheck { table: checked, .. } = &mut input.op {
-            *checked = table.name.last().to_string();
-        }
+        name_write_checks(&mut input, table.name.last().as_str());
         Ok(Dml {
             input: Box::new(input),
             returning: returning.iter().map(|e| e.expr.clone()).collect(),
@@ -771,9 +829,17 @@ impl Planner<'_> {
     /// Build the physical form of `rel`.
     fn build(&self, rel: &Rel) -> Result<Physical, ExecError> {
         match rel {
-            Rel::Get { table, binding, .. } => {
-                self.scan(table, *binding, Access::Full, None, None, false)
-            }
+            Rel::Get {
+                table,
+                binding,
+                alias,
+            } => self.scan(
+                table,
+                *binding,
+                alias.as_ref(),
+                Access::Full,
+                Pushdown::default(),
+            ),
             Rel::Filter { .. } | Rel::PolicyFilter { .. } => self.filters(rel),
             Rel::WriteCheck { input, check } => {
                 let input = self.build(input)?;
@@ -1051,7 +1117,14 @@ impl Planner<'_> {
                 binding,
             } => {
                 let layout = columns_of(*binding, columns.len())?;
-                self.node(Op::Values { rows: rows.clone() }, layout)
+                let policy_added = columns.iter().all(is_policy_alias);
+                self.node(
+                    Op::Values {
+                        rows: rows.clone(),
+                        policy_added,
+                    },
+                    layout,
+                )
             }
         }
     }

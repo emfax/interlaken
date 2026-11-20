@@ -20,6 +20,7 @@ mod eval;
 mod expr;
 mod impact;
 mod lower;
+mod marker;
 mod plan;
 mod provider;
 mod store;
@@ -32,6 +33,7 @@ pub use error::SecurityError;
 pub use eval::{EntityStore, EvalFailure, ResourceData};
 pub use expr::{Action, ArithOp, CmpOp, Effect, EntityKey, EntityUid, Policy, SecExpr, SecValue};
 pub use impact::{Change, ImpactReport, forbid_hazard, impact_analysis};
+pub use marker::{POLICY_ALIAS_PREFIX, is_policy_alias};
 pub use plan::secure;
 pub use provider::{
     CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request, Residual,

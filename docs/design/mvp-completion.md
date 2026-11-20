@@ -25,6 +25,8 @@ Roughly 9–10 weeks for one experienced engineer. F2 and F3 can run in parallel
 
 ### F1: Engine integration
 
+*Status: complete (2026-11-20), recorded in [ADR-0031](0031-engine-sessions-and-storage-backed-catalog.md).*
+
 The `interlaken-engine` crate becomes the one entry point.
 - **Storage-backed IR catalog** (ADR-0013 phase 3). An IR `Catalog` read from storage's `sys_*` tables, extended with what the IR needs and storage lacks:
   - IR types per column;

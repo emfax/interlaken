@@ -1,26 +1,29 @@
 [package]
 name = "interlaken-engine"
-description = "Ties the IR to storage: transactional authorization data and, later, query execution."
+description = "The database engine: sessions that run IR statements through security, optimization and execution over storage."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+interlaken-exec.workspace = true
 interlaken-ir.workspace = true
 interlaken-storage.workspace = true
 thiserror.workspace = true
 cedar-policy = { workspace = true, optional = true }
 cedar-policy-symcc = { workspace = true, optional = true }
-tokio = { version = "1", features = ["process"], optional = true }
+tokio.workspace = true
 
 [features]
 # Prover nodes: prove policy changes with cvc5 (ADR-0030). Never needed by embedded builds.
-smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "dep:tokio"]
+smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "tokio/process"]
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

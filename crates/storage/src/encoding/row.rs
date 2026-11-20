@@ -116,13 +116,16 @@ fn write_values(out: &mut Vec<u8>, values: &[Datum]) -> Result<(), RowFormatErro
             Datum::Int4(v) => out.extend_from_slice(&v.to_le_bytes()),
             Datum::Int8(v) => out.extend_from_slice(&v.to_le_bytes()),
             Datum::Float8(v) => out.extend_from_slice(&v.to_bits().to_le_bytes()),
-            Datum::Null | Datum::Text(_) | Datum::Bytea(_) | Datum::Array(_) => {}
+            Datum::Date(v) => out.extend_from_slice(&v.to_le_bytes()),
+            Datum::Timestamptz(v) => out.extend_from_slice(&v.to_le_bytes()),
+            Datum::Uuid(bytes) => out.extend_from_slice(bytes),
+            Datum::Null | Datum::Text(_) | Datum::Bytea(_) | Datum::Jsonb(_) | Datum::Array(_) => {}
         }
     }
     for value in values {
         let len_at = out.len();
         match value {
-            Datum::Text(s) => write_bytes(out, s.as_bytes())?,
+            Datum::Text(s) | Datum::Jsonb(s) => write_bytes(out, s.as_bytes())?,
             Datum::Bytea(b) => write_bytes(out, b)?,
             Datum::Array(items) => {
                 out.extend_from_slice(&[0; 4]);
@@ -204,7 +207,12 @@ fn read_values(
             ColumnType::Float8 => {
                 Datum::Float8(f64::from_bits(u64::from_le_bytes(reader.array()?)))
             }
-            ColumnType::Text | ColumnType::Bytea | ColumnType::Array(_) => continue,
+            ColumnType::Date => Datum::Date(i32::from_le_bytes(reader.array()?)),
+            ColumnType::Timestamptz => Datum::Timestamptz(i64::from_le_bytes(reader.array()?)),
+            ColumnType::Uuid => Datum::Uuid(reader.array()?),
+            ColumnType::Text | ColumnType::Bytea | ColumnType::Jsonb | ColumnType::Array(_) => {
+                continue;
+            }
         };
     }
     for (i, ty) in types.iter().enumerate() {
@@ -215,10 +223,15 @@ fn read_values(
         let len = usize::try_from(len).map_err(|_| RowFormatError::TooLarge)?;
         let body = reader.take(len)?;
         values[i] = match ty {
-            ColumnType::Text => {
+            ColumnType::Text | ColumnType::Jsonb => {
                 let text = std::str::from_utf8(body)
-                    .map_err(|_| RowFormatError::Corrupt("text is not valid UTF-8"))?;
-                Datum::Text(text.to_owned())
+                    .map_err(|_| RowFormatError::Corrupt("text is not valid UTF-8"))?
+                    .to_owned();
+                if *ty == ColumnType::Jsonb {
+                    Datum::Jsonb(text)
+                } else {
+                    Datum::Text(text)
+                }
             }
             ColumnType::Array(element) => {
                 let mut inner = Reader {
@@ -274,7 +287,7 @@ mod tests {
     use super::*;
 
     /// One column of every type.
-    const TYPES: [ColumnType; 7] = ColumnType::ALL;
+    const TYPES: [ColumnType; 11] = ColumnType::ALL;
 
     /// Return one non-NULL value per column of [`TYPES`].
     fn sample() -> Vec<Datum> {
@@ -286,6 +299,10 @@ mod tests {
             Datum::Float8(-0.0),
             Datum::Text("héllo".into()),
             Datum::Bytea(vec![0, 1, 2]),
+            Datum::Date(-719_528),
+            Datum::Timestamptz(1_700_000_000_000_000),
+            Datum::Uuid([0xAB; 16]),
+            Datum::Jsonb(r#"{"a": [1, null]}"#.into()),
         ]
     }
 

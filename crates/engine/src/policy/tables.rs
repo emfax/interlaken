@@ -9,13 +9,13 @@ use super::document::{ActivePolicies, PolicyDocument, PolicyLanguage};
 use crate::error::EngineError;
 
 /// The table holding the active policy set: one row.
-pub const POLICY_TABLE: &str = "policy_set";
+pub const POLICY_TABLE: &str = "engine_policy_set";
 /// The table holding policy settings: one row.
-pub(crate) const SETTINGS_TABLE: &str = "policy_settings";
+pub(crate) const SETTINGS_TABLE: &str = "engine_policy_settings";
 /// The table of proposed policy changes.
-pub(crate) const PROPOSALS_TABLE: &str = "policy_proposals";
+pub(crate) const PROPOSALS_TABLE: &str = "engine_policy_proposals";
 /// The table of gate results recorded by verifiers.
-pub(crate) const VERIFICATIONS_TABLE: &str = "policy_verifications";
+pub(crate) const VERIFICATIONS_TABLE: &str = "engine_policy_verifications";
 
 /// What a proposal needs before it can be activated (ADR-0030).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

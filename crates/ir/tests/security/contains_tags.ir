@@ -12,7 +12,7 @@
           (limit :count 1
             (filter
               (unnest :bind 3
-                (values (columns one) (row true) :bind 2)
+                (values (columns |sec$2|) (row true) :bind 2)
                 #1.5
                 (columns |sec$1|))
               (= #3.0 "a")))
@@ -33,7 +33,7 @@
           (limit :count 1
             (filter
               (unnest :bind 3
-                (values (columns one) (row true) :bind 2)
+                (values (columns |sec$2|) (row true) :bind 2)
                 #1.5
                 (columns |sec$1|))
               (= #3.0 "a")))

@@ -56,6 +56,7 @@ The optimizer needs to know which functions can be folded, reordered or cached. 
 ## Implementation Phases
 
 - [x] **Phase 1: Function catalog with properties** - I2
+  - *Leakproof marking (F1):* administrators set a built-in function's leakproofness through `Session::set_function_leakproof`. The override is stored in `engine_functions` and applied when the catalog loads. Nobody else can change it, and client IR never carries properties ([ADR-0031](0031-engine-sessions-and-storage-backed-catalog.md)).
 
 ## Consequences
 

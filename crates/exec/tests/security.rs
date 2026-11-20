@@ -28,8 +28,8 @@ use interlaken_ir::interp::{Database, Datum, ExecOptions, RowKey, execute as int
 use interlaken_ir::optimize::{is_leakproof, optimize};
 use interlaken_ir::resolve::resolve;
 use interlaken_ir::security::{
-    Action, ArithOp, CmpOp, DatabaseEntities, Effect, EntityUid, Policy, RlsProvider, SecExpr,
-    SecValue, SecurityContext, parse_policies, print_sec_expr, secure,
+    DatabaseEntities, EntityUid, RlsProvider, SecValue, SecurityContext, parse_policies,
+    print_sec_expr, secure,
 };
 use interlaken_ir::text::{parse_plan, print_plan};
 use interlaken_ir::{Expr, Plan, TableId};
@@ -42,7 +42,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestRunner};
 
 use security::{DOCS, catalog, sample};
-use security_gen::{data, query, visible};
+use security_gen::{data, doc_atom, policies_for, query, user_atom, visible};
 
 /// Every table of the fixture.
 const TABLES: std::ops::RangeInclusive<u32> = 200..=210;
@@ -215,7 +215,7 @@ fn exprs(op: &Op) -> Vec<&Expr> {
             )
             .collect(),
         Op::Sort { keys, .. } => keys.iter().map(|k| &k.expr).collect(),
-        Op::Values { rows } => rows.iter().flatten().collect(),
+        Op::Values { rows, .. } => rows.iter().flatten().collect(),
         Op::Unnest { expr, .. } => vec![expr],
         Op::Nest { keys, fields, .. } => keys.iter().chain(fields).collect(),
         Op::WriteCheck { check, .. } => vec![check],
@@ -263,126 +263,6 @@ fn assert_barriers_hold(node: &Physical, plan: &Plan, catalog: &dyn Catalog, bel
     for input in node.op.inputs() {
         assert_barriers_hold(input, plan, catalog, below || secured);
     }
-}
-
-/// Box an expression.
-fn bx(e: SecExpr) -> Box<SecExpr> {
-    Box::new(e)
-}
-
-/// Return `base.a.b...`.
-fn path(base: SecExpr, attrs: &[&str]) -> SecExpr {
-    attrs
-        .iter()
-        .fold(base, |e, a| SecExpr::Attr(bx(e), (*a).into()))
-}
-
-/// Construct a comparison.
-fn cmp(op: CmpOp, a: SecExpr, b: SecExpr) -> SecExpr {
-    SecExpr::Cmp(op, bx(a), bx(b))
-}
-
-/// Return an integer literal.
-fn long(n: i64) -> SecExpr {
-    SecExpr::Lit(SecValue::Long(n))
-}
-
-/// Return an entity literal.
-fn entity(ty: &str, key: i64) -> SecExpr {
-    SecExpr::Lit(SecValue::Entity(EntityUid::long(ty, key)))
-}
-
-/// Generate atomic conditions over documents: ownership, hierarchies,
-/// comparisons, patterns, attribute paths, tags and context.
-fn doc_atom() -> BoxedStrategy<SecExpr> {
-    use SecExpr::{Principal as P, Resource as R};
-    prop_oneof![
-        Just(cmp(CmpOp::Eq, path(R, &["owner"]), P)),
-        (1i64..4).prop_map(|g| SecExpr::In(bx(P), bx(entity("Group", g)))),
-        (1i64..5).prop_map(|f| SecExpr::In(bx(R), bx(entity("Folder", f)))),
-        (0i64..12).prop_map(|k| cmp(CmpOp::Lt, path(R, &["secret"]), long(k))),
-        prop_oneof![Just("a*"), Just("*a*"), Just("x")]
-            .prop_map(|g| SecExpr::Like(bx(path(R, &["title"])), g.into())),
-        Just(SecExpr::Has(bx(R), "secret".into())),
-        prop_oneof![Just("a"), Just("b")].prop_map(|t| SecExpr::Contains(
-            bx(path(R, &["tags"])),
-            bx(SecExpr::Lit(SecValue::Str(t.into())))
-        )),
-        Just(cmp(
-            CmpOp::Eq,
-            path(R, &["owner", "dept"]),
-            path(P, &["dept"])
-        )),
-        Just(cmp(
-            CmpOp::Eq,
-            path(SecExpr::Context, &["app", "tenant"]),
-            SecExpr::Lit(SecValue::Str("t1".into()))
-        )),
-        (0i64..12).prop_map(|k| cmp(
-            CmpOp::Gt,
-            SecExpr::Arith(ArithOp::Add, bx(path(R, &["secret"])), bx(long(1))),
-            long(k)
-        )),
-        Just(SecExpr::In(bx(P), bx(path(R, &["owner"])))),
-        prop_oneof![Just("f1"), Just("f*")]
-            .prop_map(|g| SecExpr::Like(bx(path(R, &["folder", "name"])), g.into())),
-        Just(SecExpr::Lit(SecValue::Bool(true))),
-    ]
-    .boxed()
-}
-
-/// Generate atomic conditions over users.
-fn user_atom() -> BoxedStrategy<SecExpr> {
-    use SecExpr::{Principal as P, Resource as R};
-    prop_oneof![
-        Just(cmp(CmpOp::Eq, R, P)),
-        Just(cmp(CmpOp::Eq, path(R, &["dept"]), path(P, &["dept"]))),
-        (1i64..4).prop_map(|g| SecExpr::In(bx(R), bx(entity("Group", g)))),
-        (0i64..5).prop_map(|k| cmp(CmpOp::Lt, path(R, &["level"]), long(k))),
-        Just(SecExpr::Lit(SecValue::Bool(true))),
-    ]
-    .boxed()
-}
-
-/// Generate conditions combining atoms with `&&`, `||`, `!` and `if`.
-fn condition(atom: BoxedStrategy<SecExpr>) -> BoxedStrategy<SecExpr> {
-    atom.prop_recursive(2, 8, 3, |inner| {
-        prop_oneof![
-            (inner.clone(), inner.clone()).prop_map(|(a, b)| SecExpr::And(bx(a), bx(b))),
-            (inner.clone(), inner.clone()).prop_map(|(a, b)| SecExpr::Or(bx(a), bx(b))),
-            inner.clone().prop_map(|a| SecExpr::Not(bx(a))),
-            (inner.clone(), inner.clone(), inner).prop_map(|(c, a, b)| SecExpr::If(
-                bx(c),
-                bx(a),
-                bx(b)
-            )),
-        ]
-    })
-    .boxed()
-}
-
-/// Generate the read policies for one resource type.
-fn policies_for(
-    resource_type: &'static str,
-    atom: BoxedStrategy<SecExpr>,
-) -> impl Strategy<Value = Vec<Policy>> {
-    let policy = move |effect| {
-        condition(atom.clone()).prop_map(move |condition| Policy {
-            effect,
-            actions: vec![Action::Read],
-            resource_type: resource_type.into(),
-            condition,
-            column: None,
-        })
-    };
-    (
-        proptest::collection::vec(policy(Effect::Permit), 0..4),
-        proptest::collection::vec(policy(Effect::Forbid), 0..3),
-    )
-        .prop_map(|(mut permits, forbids)| {
-            permits.extend(forbids);
-            permits
-        })
 }
 
 #[test]
@@ -812,4 +692,125 @@ fn explain_hides_write_checks() {
     );
     assert!(shown.contains("31337"), "{shown}");
     assert_eq!(DOCS, TableId::new(203));
+}
+
+#[test]
+/// Assert the subplans a write check's policy adds are hidden, not just its condition.
+fn explain_hides_write_check_subplans() {
+    let fixture = Fixture::new();
+    let db = sample().database();
+    let (_, physical) = secured_plan(
+        &fixture,
+        "(policies (permit (read) Doc true) (permit (insert) Doc (in resource (entity Folder 77))))",
+        &db,
+        "(plan (insert docs (project (filter (get docs :as d) (> d.id 1)) (+ d.id 100) d.owner_id d.title d.secret) (columns id owner_id title secret)))",
+    );
+    let shown = explain(
+        &physical,
+        ExplainOptions {
+            show_policies: true,
+        },
+    );
+    let hidden = explain(&physical, ExplainOptions::default());
+    // The user's own query stays visible; the policy's lookup does not.
+    assert!(hidden.contains("WriteCheck(docs)"), "{hidden}");
+    assert!(hidden.contains("TableScan docs"), "{hidden}");
+    assert!(hidden.contains("> #"), "{hidden}");
+    for secret in ["77", "sec$"] {
+        assert!(!hidden.contains(secret), "{secret} visible in\n{hidden}");
+    }
+    assert!(shown.contains("77"), "{shown}");
+}
+
+/// Swap the inputs of every join whose right side security lowering added.
+fn swap_policy_joins(node: &mut Physical) {
+    if let Op::Join { left, right, .. } = &mut node.op
+        && matches!(
+            right.op,
+            Op::TableScan {
+                policy_added: true,
+                ..
+            } | Op::Distinct { .. }
+        )
+    {
+        std::mem::swap(left, right);
+    }
+    match &mut node.op {
+        Op::Join { left, right, .. } => {
+            swap_policy_joins(left);
+            swap_policy_joins(right);
+        }
+        Op::Apply { outer, inner, .. } => {
+            swap_policy_joins(outer);
+            swap_policy_joins(inner);
+        }
+        Op::Filter { input, .. }
+        | Op::PolicyFilter { input, .. }
+        | Op::Project { input, .. }
+        | Op::Distinct { input } => swap_policy_joins(input),
+        _ => {}
+    }
+}
+
+#[test]
+/// Assert redaction follows the policy marker, not the plan's shape: a
+/// policy subplan on the outer side of a join is hidden too.
+fn explain_hides_reshaped_policy_subplans() {
+    let fixture = Fixture::new();
+    let db = sample().database();
+    let (_, mut physical) = secured_plan(
+        &fixture,
+        "(policies (permit (read) Doc (in resource (entity Folder 4242))))",
+        &db,
+        "(plan (project (get docs :as d) d.id))",
+    );
+    swap_policy_joins(&mut physical);
+    let hidden = explain(&physical, ExplainOptions::default());
+    assert!(hidden.contains("TableScan docs"), "{hidden}");
+    for secret in ["4242", "closure", "sec$"] {
+        assert!(!hidden.contains(secret), "{secret} visible in\n{hidden}");
+    }
+}
+
+#[test]
+/// Assert client plans can't forge the policy marker.
+fn clients_cannot_use_the_policy_marker() {
+    use interlaken_ir::verify::{VerifyOptions, verify};
+    let fixture = Fixture::new();
+    let catalog = fixture.catalog.as_ref();
+    for query in [
+        "(plan (project (get docs :as sec$1) sec$1.id))",
+        "(plan (values (columns sec$2) (row 1)))",
+    ] {
+        let plan = resolve(&parse_plan(query).unwrap(), catalog)
+            .unwrap_or_else(|e| panic!("{e}: {query}"))
+            .plan;
+        let err = verify(&plan, catalog, &VerifyOptions { trusted: false }).unwrap_err();
+        assert!(err.to_string().contains("reserved prefix"), "{err}");
+    }
+}
+
+#[test]
+/// Assert the subplans lowering adds are hidden in unoptimized plans too,
+/// where the optimizer hasn't pruned their columns.
+fn explain_hides_unoptimized_policy_subplans() {
+    let fixture = Fixture::new();
+    let db = sample().database();
+    let catalog = fixture.catalog.as_ref();
+    let store = DatabaseEntities { catalog, db: &db };
+    let provider = RlsProvider::new(
+        parse_policies(
+            "(policies (permit (read) Doc true) (permit (insert) Doc (contains resource.tags \"quokka\")))",
+        )
+        .unwrap(),
+    );
+    let context = SecurityContext::new(EntityUid::long("User", 1));
+    let query = "(plan (insert docs (project (get docs :as d) (+ d.id 100) d.owner_id d.title d.tags) (columns id owner_id title tags)))";
+    let plan = resolve(&parse_plan(query).unwrap(), catalog).unwrap().plan;
+    let secured = secure(&plan, catalog, &provider, &context, &store).unwrap();
+    let physical = plan_with(&secured, catalog, PlanOptions::default()).unwrap();
+    let hidden = explain(&physical, ExplainOptions::default());
+    assert!(hidden.contains("WriteCheck(docs)"), "{hidden}");
+    assert!(hidden.contains("<policy> subplan"), "{hidden}");
+    assert!(!hidden.contains("quokka"), "{hidden}");
 }

@@ -42,6 +42,6 @@ pub use explain::{ExplainOptions, explain, explain_analyze};
 pub use kernels::CompiledExpr;
 pub use memory::{DEFAULT_QUERY_BUDGET, MemoryPool, MemoryScope, QueryMemory};
 pub use metrics::{Metrics, NodeMetrics, NodeStats};
-pub use operators::stored_type;
+pub use operators::{from_stored, stored_type, to_stored};
 pub use physical::{Aggregate, BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};
 pub use transaction::Transaction;

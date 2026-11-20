@@ -20,6 +20,14 @@ pub enum ColumnType {
     Text,
     /// `bytea`.
     Bytea,
+    /// `date`: days since 1970-01-01.
+    Date,
+    /// `timestamptz`: microseconds since the Unix epoch.
+    Timestamptz,
+    /// `uuid`.
+    Uuid,
+    /// `jsonb`, stored as text. Values only: it can't be a key or index column.
+    Jsonb,
     /// A one-dimensional array of a scalar type, whose elements may be NULL.
     ///
     /// Arrays are values only: they can't be key or index columns.
@@ -44,6 +52,14 @@ pub enum ElementType {
     Text,
     /// `bytea`.
     Bytea,
+    /// `date`.
+    Date,
+    /// `timestamptz`.
+    Timestamptz,
+    /// `uuid`.
+    Uuid,
+    /// `jsonb`.
+    Jsonb,
 }
 
 impl ElementType {
@@ -58,6 +74,10 @@ impl ElementType {
             Self::Float8 => ColumnType::Float8,
             Self::Text => ColumnType::Text,
             Self::Bytea => ColumnType::Bytea,
+            Self::Date => ColumnType::Date,
+            Self::Timestamptz => ColumnType::Timestamptz,
+            Self::Uuid => ColumnType::Uuid,
+            Self::Jsonb => ColumnType::Jsonb,
         }
     }
 
@@ -72,6 +92,10 @@ impl ElementType {
             ColumnType::Float8 => Self::Float8,
             ColumnType::Text => Self::Text,
             ColumnType::Bytea => Self::Bytea,
+            ColumnType::Date => Self::Date,
+            ColumnType::Timestamptz => Self::Timestamptz,
+            ColumnType::Uuid => Self::Uuid,
+            ColumnType::Jsonb => Self::Jsonb,
             ColumnType::Array(_) => return None,
         })
     }
@@ -82,7 +106,7 @@ const ARRAY_CODE_BASE: i16 = 100;
 
 impl ColumnType {
     /// Every scalar column type, in code order. Each also has an array type.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::Bool,
         Self::Int2,
         Self::Int4,
@@ -90,6 +114,10 @@ impl ColumnType {
         Self::Float8,
         Self::Text,
         Self::Bytea,
+        Self::Date,
+        Self::Timestamptz,
+        Self::Uuid,
+        Self::Jsonb,
     ];
 
     /// Return the stored width of a non-NULL value, or `None` for variable-length types.
@@ -98,16 +126,17 @@ impl ColumnType {
         match self {
             Self::Bool => Some(1),
             Self::Int2 => Some(2),
-            Self::Int4 => Some(4),
-            Self::Int8 | Self::Float8 => Some(8),
-            Self::Text | Self::Bytea | Self::Array(_) => None,
+            Self::Int4 | Self::Date => Some(4),
+            Self::Int8 | Self::Float8 | Self::Timestamptz => Some(8),
+            Self::Uuid => Some(16),
+            Self::Text | Self::Bytea | Self::Jsonb | Self::Array(_) => None,
         }
     }
 
-    /// Return `true` if the type can be a key or index column (every scalar type).
+    /// Return `true` if the type can be a key or index column (every scalar type but `jsonb`).
     #[must_use]
     pub const fn is_keyable(self) -> bool {
-        !matches!(self, Self::Array(_))
+        !matches!(self, Self::Array(_) | Self::Jsonb)
     }
 
     /// Return `true` if `datum` is NULL or a value of this type.
@@ -137,6 +166,10 @@ impl ColumnType {
                 | (Self::Float8, Datum::Float8(_))
                 | (Self::Text, Datum::Text(_))
                 | (Self::Bytea, Datum::Bytea(_))
+                | (Self::Date, Datum::Date(_))
+                | (Self::Timestamptz, Datum::Timestamptz(_))
+                | (Self::Uuid, Datum::Uuid(_))
+                | (Self::Jsonb, Datum::Jsonb(_))
         )
     }
 
@@ -151,6 +184,10 @@ impl ColumnType {
             Self::Float8 => 5,
             Self::Text => 6,
             Self::Bytea => 7,
+            Self::Date => 8,
+            Self::Timestamptz => 9,
+            Self::Uuid => 10,
+            Self::Jsonb => 11,
             Self::Array(element) => ARRAY_CODE_BASE + element.column_type().code(),
         }
     }
@@ -180,6 +217,10 @@ impl std::fmt::Display for ColumnType {
             Self::Float8 => "float8",
             Self::Text => "text",
             Self::Bytea => "bytea",
+            Self::Date => "date",
+            Self::Timestamptz => "timestamptz",
+            Self::Uuid => "uuid",
+            Self::Jsonb => "jsonb",
             Self::Array(_) => unreachable!("arrays are rendered above"),
         })
     }
@@ -200,7 +241,8 @@ mod tests {
                 assert!(codes.insert(ty.code()), "{ty} repeats a code");
             }
             assert_eq!(array.to_string(), format!("{scalar}[]"));
-            assert!(scalar.is_keyable() && !array.is_keyable());
+            assert_eq!(scalar.is_keyable(), scalar != ColumnType::Jsonb);
+            assert!(!array.is_keyable());
         }
         for code in [0, 100, 200, 207, -1] {
             assert_eq!(ColumnType::from_code(code), None, "{code}");

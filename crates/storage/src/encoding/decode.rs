@@ -2,8 +2,8 @@
 
 use super::encode::ordered_to_float_bits;
 use super::tags::{
-    BOOL, BYTEA, CANONICAL_NAN_BITS, ESCAPE, ESCAPED_ZERO, FLOAT8, INT2, INT4, INT8, NULL_FIRST,
-    NULL_LAST, TERMINATOR, TEXT,
+    BOOL, BYTEA, CANONICAL_NAN_BITS, DATE, ESCAPE, ESCAPED_ZERO, FLOAT8, INT2, INT4, INT8,
+    NULL_FIRST, NULL_LAST, TERMINATOR, TEXT, TIMESTAMPTZ, UUID,
 };
 use super::{Datum, DecodeError, Direction, SortOrder};
 
@@ -123,6 +123,15 @@ impl<'a> TupleDecoder<'a> {
                 Datum::Text(text)
             }
             BYTEA => Datum::Bytea(self.take_escaped(mask)?),
+            DATE => {
+                let raw = u32::from_be_bytes(self.take_fixed(mask)?) ^ 0x8000_0000;
+                Datum::Date(raw.cast_signed())
+            }
+            TIMESTAMPTZ => {
+                let raw = u64::from_be_bytes(self.take_fixed(mask)?) ^ (1 << 63);
+                Datum::Timestamptz(raw.cast_signed())
+            }
+            UUID => Datum::Uuid(self.take_fixed(mask)?),
             _ => unreachable!("is_value_tag accepted {tag:#04x}"),
         };
         Ok((datum, order))
@@ -245,7 +254,10 @@ pub fn decode_tuple(input: &[u8], orders: &[SortOrder]) -> Result<Vec<Datum>, De
 
 /// Return `true` if `tag` is the ascending form of a value type tag.
 fn is_value_tag(tag: u8) -> bool {
-    matches!(tag, BOOL | INT2 | INT4 | INT8 | FLOAT8 | TEXT | BYTEA)
+    matches!(
+        tag,
+        BOOL | INT2 | INT4 | INT8 | DATE | TIMESTAMPTZ | FLOAT8 | TEXT | BYTEA | UUID
+    )
 }
 
 #[cfg(test)]

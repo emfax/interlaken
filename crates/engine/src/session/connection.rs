@@ -1,0 +1,619 @@
+//! Sessions: a principal's statements, in transactions (ADR-0031).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use interlaken_exec::{ExecError, ExplainOptions, Transaction, collect, explain, explain_analyze};
+use interlaken_ir::catalog::InMemoryCatalog;
+use interlaken_ir::interp::{Datum, ExecOptions};
+use interlaken_ir::security::{EntityUid, SecurityContext};
+use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
+use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
+
+use super::engine::Engine;
+use super::pipeline::{Step, exec_context, parse, pin, prepare};
+use super::result::QueryResult;
+use crate::catalog::{self, ColumnSpec, EntitySpec, IndexSpec, MembershipSpec, TableSpec};
+use crate::error::EngineError;
+use crate::policy::{
+    GateResult, PolicyDocument, PolicySettings, activate, set_policy_settings, submit_proposal,
+    verify_locally,
+};
+use crate::privileges::{self, Privilege, Privileges};
+
+/// What a statement may change, which decides the privilege it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A query or DML statement: governed by policies, no privilege needed.
+    Query,
+    /// DDL: needs `admin`; the transaction's catalog is then uncommitted.
+    Catalog,
+    /// A policy change: needs `admin`; the transaction's policies are then uncommitted.
+    Policy,
+    /// Another administrative change (privileges, verification records).
+    Admin,
+}
+
+/// An open transaction.
+struct Open {
+    /// The statement runner (ADR-0026).
+    exec: Transaction,
+    /// Evaluation settings fixed at the transaction's start.
+    options: ExecOptions,
+    /// DDL ran in this transaction.
+    catalog_dirty: bool,
+    /// A policy change ran in this transaction.
+    policies_dirty: bool,
+}
+
+/// A connection's worth of statements, run for one principal.
+///
+/// Statements run in the open transaction, or each in its own transaction
+/// when none is open (autocommit). Each statement is atomic: if it fails,
+/// its writes are undone, and an explicit transaction accepts nothing more
+/// until it is rolled back (to a savepoint or entirely), as in Postgres.
+///
+/// Queries are IR text (or built [`Plan`]s). Policies govern every query.
+/// DDL, policy changes and privileges are methods that need the `admin`
+/// privilege.
+pub struct Session {
+    /// The engine.
+    engine: Engine,
+    /// The principal and request facts.
+    context: SecurityContext,
+    /// How long a statement may run before it is cancelled.
+    statement_timeout: Option<Duration>,
+    /// The open transaction, if any.
+    txn: Option<Open>,
+}
+
+impl Session {
+    /// Construct a session with no transaction open.
+    pub(crate) fn new(engine: Engine, context: SecurityContext) -> Self {
+        Self {
+            engine,
+            context,
+            statement_timeout: None,
+            txn: None,
+        }
+    }
+
+    /// Return the principal and request facts statements run with.
+    #[must_use]
+    pub fn context(&self) -> &SecurityContext {
+        &self.context
+    }
+
+    /// Cancel any statement that runs longer than `timeout` (`None` for no limit).
+    ///
+    /// A cancelled statement fails with SQLSTATE `57014` and its writes are undone.
+    pub fn set_statement_timeout(&mut self, timeout: Option<Duration>) {
+        self.statement_timeout = timeout;
+    }
+
+    /// Return whether a transaction is open.
+    #[must_use]
+    pub fn in_transaction(&self) -> bool {
+        self.txn.is_some()
+    }
+
+    /// Return whether the open transaction is aborted: a statement failed
+    /// and only a rollback is accepted.
+    #[must_use]
+    pub fn is_aborted(&self) -> bool {
+        self.txn.as_ref().is_some_and(|open| open.exec.is_aborted())
+    }
+
+    /// Open a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::TransactionInProgress`] if one is open, or a storage error.
+    pub async fn begin(&mut self, options: TxnOptions) -> Result<(), EngineError> {
+        if self.txn.is_some() {
+            return Err(EngineError::TransactionInProgress);
+        }
+        let txn = self.engine.inner.storage.begin(options).await?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
+        let options = ExecOptions {
+            now,
+            seed: now.cast_unsigned(),
+        };
+        // Statements plan against the catalog they load; the runner's own
+        // catalog is only a placeholder.
+        let placeholder = Arc::new(InMemoryCatalog::new(SchemaVersion::new(0)));
+        let exec = Transaction::new(txn, placeholder, options).with_memory(
+            self.engine.inner.query_budget,
+            self.engine.inner.pool.clone(),
+        );
+        self.txn = Some(Open {
+            exec,
+            options,
+            catalog_dirty: false,
+            policies_dirty: false,
+        });
+        Ok(())
+    }
+
+    /// Commit the open transaction, or roll it back if it is aborted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NoTransaction`] if none is open, or the
+    /// commit's error (a serialization failure is SQLSTATE `40001`; the
+    /// caller decides whether to retry).
+    pub async fn commit(&mut self) -> Result<(), EngineError> {
+        let open = self.txn.take().ok_or(EngineError::NoTransaction)?;
+        open.exec.commit().await?;
+        Ok(())
+    }
+
+    /// Roll the open transaction back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NoTransaction`] if none is open.
+    pub fn rollback(&mut self) -> Result<(), EngineError> {
+        let open = self.txn.take().ok_or(EngineError::NoTransaction)?;
+        open.exec.rollback();
+        Ok(())
+    }
+
+    /// Return the open transaction's runner.
+    fn open(&mut self) -> Result<&mut Open, EngineError> {
+        self.txn.as_mut().ok_or(EngineError::NoTransaction)
+    }
+
+    /// Open a savepoint in the open transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NoTransaction`] if none is open, or
+    /// SQLSTATE `25P02` if it is aborted.
+    pub fn savepoint(&mut self) -> Result<SavepointId, EngineError> {
+        Ok(self.open()?.exec.savepoint()?)
+    }
+
+    /// Undo everything since `savepoint`, leaving the aborted state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NoTransaction`] if none is open, or a storage
+    /// error if the savepoint is not open.
+    pub fn rollback_to(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+        Ok(self.open()?.exec.rollback_to(savepoint)?)
+    }
+
+    /// Release `savepoint`, keeping its writes.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::savepoint`].
+    pub fn release(&mut self, savepoint: SavepointId) -> Result<(), EngineError> {
+        Ok(self.open()?.exec.release(savepoint)?)
+    }
+
+    /// Run `body` as one statement of `kind`, in the open transaction or in
+    /// its own.
+    async fn run<T>(
+        &mut self,
+        kind: Kind,
+        body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let implicit = self.txn.is_none();
+        if implicit {
+            self.begin(TxnOptions::default()).await?;
+        }
+        let result = self.run_in_open(kind, body).await;
+        if !implicit {
+            return result;
+        }
+        match result {
+            Ok(value) => self.commit().await.map(|()| value),
+            Err(e) => {
+                self.rollback()?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Run `body` as one statement of `kind` in the open transaction.
+    async fn run_in_open<T>(
+        &mut self,
+        kind: Kind,
+        body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let engine = self.engine.inner.clone();
+        let context = &self.context;
+        let timeout = self.statement_timeout;
+        let open = self.txn.as_mut().ok_or(EngineError::NoTransaction)?;
+        let (catalog_dirty, policies_dirty, options) =
+            (open.catalog_dirty, open.policies_dirty, open.options);
+        let deadline = timeout.map(|limit| Instant::now() + limit);
+        let result = open
+            .exec
+            .statement(async |txn: &Txn| {
+                let work = async {
+                    let catalog = engine.catalogs.catalog(txn, catalog_dirty).await?;
+                    let privileges = privileges::privileges(txn, &context.principal).await?;
+                    if kind != Kind::Query && !privileges.admin {
+                        return Err(EngineError::PermissionDenied(format!(
+                            "{} requires the admin privilege",
+                            match kind {
+                                Kind::Catalog => "changing the catalog",
+                                Kind::Policy => "changing policies",
+                                Kind::Query | Kind::Admin => "this operation",
+                            }
+                        )));
+                    }
+                    let step = Step {
+                        engine: &engine,
+                        txn,
+                        catalog,
+                        context,
+                        privileges,
+                        use_caches: !catalog_dirty && !policies_dirty,
+                        options,
+                        deadline,
+                    };
+                    let value = body(&step).await?;
+                    if kind == Kind::Catalog {
+                        // Reloading checks the changed declarations fit
+                        // together; it must see this statement's writes.
+                        txn.next_statement();
+                        catalog::load_catalog(txn).await?;
+                    }
+                    Ok(value)
+                };
+                match timeout {
+                    Some(limit) => tokio::time::timeout(limit, work)
+                        .await
+                        .unwrap_or(Err(EngineError::Exec(ExecError::QueryCanceled))),
+                    None => work.await,
+                }
+            })
+            .await;
+        if result.is_ok() {
+            match kind {
+                Kind::Catalog => open.catalog_dirty = true,
+                Kind::Policy => open.policies_dirty = true,
+                Kind::Query | Kind::Admin => {}
+            }
+        }
+        result
+    }
+
+    /// Run a query or DML statement given as IR text, with parameters `$1`, `$2`, ...
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::Syntax`] if the text doesn't parse, a
+    /// resolution, verification or security error, or the execution error,
+    /// after undoing the statement.
+    pub async fn query(
+        &mut self,
+        text: &str,
+        params: Vec<Datum>,
+    ) -> Result<QueryResult, EngineError> {
+        let plan = parse(text);
+        self.run(Kind::Query, async move |step: &Step<'_>| {
+            let prepared = prepare(step, &plan?).await?;
+            let batches = collect(&prepared.physical, &exec_context(step, params)).await?;
+            Ok(QueryResult {
+                columns: prepared.columns,
+                types: prepared.types,
+                batches,
+            })
+        })
+        .await
+    }
+
+    /// Run a built query or DML plan, resolved or not, with parameters.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::query`].
+    pub async fn query_plan(
+        &mut self,
+        plan: &Plan,
+        params: Vec<Datum>,
+    ) -> Result<QueryResult, EngineError> {
+        self.run(Kind::Query, async move |step: &Step<'_>| {
+            let prepared = prepare(step, plan).await?;
+            let batches = collect(&prepared.physical, &exec_context(step, params)).await?;
+            Ok(QueryResult {
+                columns: prepared.columns,
+                types: prepared.types,
+                batches,
+            })
+        })
+        .await
+    }
+
+    /// Resolve and verify IR text against the current catalog without
+    /// running it, returning the plan pinned to the catalog's schema
+    /// version, as a prepared statement keeps it.
+    ///
+    /// The pinned plan runs with [`Session::query_plan`] until DDL changes
+    /// the schema version; then it fails verification (SQLSTATE `0A000`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a syntax, resolution or verification error.
+    pub async fn prepare(&mut self, text: &str) -> Result<Plan, EngineError> {
+        let plan = parse(text);
+        self.run(Kind::Query, async move |step: &Step<'_>| {
+            Ok(pin(&plan?, step.catalog.as_ref())?.0)
+        })
+        .await
+    }
+
+    /// Return the physical plan of IR text, one operator per line (ADR-0028).
+    ///
+    /// With `analyze`, the statement runs (its writes are kept, as in
+    /// Postgres) and each operator's metrics are appended. Policy logic is
+    /// shown only to principals with the `read-policies` privilege.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::query`].
+    pub async fn explain(&mut self, text: &str, analyze: bool) -> Result<String, EngineError> {
+        let plan = parse(text);
+        self.run(Kind::Query, async move |step: &Step<'_>| {
+            let prepared = prepare(step, &plan?).await?;
+            let options = ExplainOptions {
+                show_policies: step.privileges.read_policies,
+            };
+            if analyze {
+                let ctx = exec_context(step, Vec::new());
+                Ok(explain_analyze(&prepared.physical, &ctx, options).await?)
+            } else {
+                Ok(explain(&prepared.physical, options))
+            }
+        })
+        .await
+    }
+
+    /// Return the privileges the session's principal holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn privileges(&mut self) -> Result<Privileges, EngineError> {
+        self.run(Kind::Query, async |step: &Step<'_>| Ok(step.privileges))
+            .await
+    }
+
+    /// Create a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or the
+    /// definition's error (see [`catalog::create_table`]).
+    pub async fn create_table(&mut self, spec: &TableSpec) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::create_table(step.txn, spec).await
+        })
+        .await
+    }
+
+    /// Drop a table.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_table`]).
+    pub async fn drop_table(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::drop_table(step.txn, name).await
+        })
+        .await
+    }
+
+    /// Add a nullable column to a table.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::add_column`]).
+    pub async fn add_column(
+        &mut self,
+        table: &str,
+        column: &ColumnSpec,
+    ) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::add_column(step.txn, table, column).await
+        })
+        .await
+    }
+
+    /// Create an index.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::create_index`]).
+    pub async fn create_index(&mut self, spec: &IndexSpec) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::create_index(step.txn, spec).await
+        })
+        .await
+    }
+
+    /// Drop an index.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_index`]).
+    pub async fn drop_index(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::drop_index(step.txn, name).await
+        })
+        .await
+    }
+
+    /// Declare an entity type.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::declare_entity`]).
+    pub async fn declare_entity(&mut self, spec: &EntitySpec) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::declare_entity(step.txn, spec).await
+        })
+        .await
+    }
+
+    /// Remove an entity type's declaration.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_entity`]).
+    pub async fn drop_entity(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::drop_entity(step.txn, name).await
+        })
+        .await
+    }
+
+    /// Declare a membership between entity types.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::declare_membership`]).
+    pub async fn declare_membership(&mut self, spec: &MembershipSpec) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::declare_membership(step.txn, spec).await
+        })
+        .await
+    }
+
+    /// Remove a membership's declaration.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_membership`]).
+    pub async fn drop_membership(&mut self, member: &str, group: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::drop_membership(step.txn, member, group).await
+        })
+        .await
+    }
+
+    /// Mark a built-in function overload leakproof or not (ADR-0011).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::set_function_leakproof`]).
+    pub async fn set_function_leakproof(
+        &mut self,
+        name: &str,
+        args: &[DataType],
+        leakproof: bool,
+    ) -> Result<(), EngineError> {
+        let name = QualifiedName::from(name);
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::set_function_leakproof(step.txn, &name, args, leakproof).await
+        })
+        .await
+    }
+
+    /// Grant `privilege` to `principal`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or a storage error.
+    pub async fn grant(
+        &mut self,
+        principal: &EntityUid,
+        privilege: Privilege,
+    ) -> Result<(), EngineError> {
+        self.run(Kind::Admin, async |step: &Step<'_>| {
+            privileges::grant(step.txn, principal, privilege).await
+        })
+        .await
+    }
+
+    /// Revoke `privilege` from `principal`; return whether it was held.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::grant`].
+    pub async fn revoke(
+        &mut self,
+        principal: &EntityUid,
+        privilege: Privilege,
+    ) -> Result<bool, EngineError> {
+        self.run(Kind::Admin, async |step: &Step<'_>| {
+            privileges::revoke(step.txn, principal, privilege).await
+        })
+        .await
+    }
+
+    /// Propose a policy change; return the proposal's ID (ADR-0030).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::grant`].
+    pub async fn submit_policies(
+        &mut self,
+        document: &PolicyDocument,
+        invariants: &str,
+    ) -> Result<i64, EngineError> {
+        let proposer = format!("{}", self.context.principal);
+        self.run(Kind::Admin, async |step: &Step<'_>| {
+            submit_proposal(step.txn, document, invariants, &proposer).await
+        })
+        .await
+    }
+
+    /// Run the local gates on a proposal and record the results (ADR-0030),
+    /// analysing impact with this session's context as the base request.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::grant`].
+    pub async fn verify_policies(&mut self, proposal: i64) -> Result<Vec<GateResult>, EngineError> {
+        let verifier = format!("{}", self.context.principal);
+        let base = self.context.clone();
+        self.run(Kind::Admin, async |step: &Step<'_>| {
+            let catalog: Arc<dyn interlaken_ir::catalog::Catalog> = step.catalog.clone();
+            verify_locally(step.txn, catalog, proposal, &verifier, &base).await
+        })
+        .await
+    }
+
+    /// Activate a verified proposal; return the new policy version
+    /// (ADR-0030). With `confirm`, this session's principal confirms gates
+    /// that flagged the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or the
+    /// activation's error (see [`activate`]).
+    pub async fn activate_policies(
+        &mut self,
+        proposal: i64,
+        confirm: bool,
+    ) -> Result<i64, EngineError> {
+        let confirmed_by = confirm.then(|| format!("{}", self.context.principal));
+        self.run(Kind::Policy, async |step: &Step<'_>| {
+            activate(step.txn, proposal, confirmed_by.as_deref()).await
+        })
+        .await
+    }
+
+    /// Replace the policy settings.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::activate_policies`].
+    pub async fn set_policy_settings(
+        &mut self,
+        settings: &PolicySettings,
+    ) -> Result<(), EngineError> {
+        self.run(Kind::Policy, async |step: &Step<'_>| {
+            set_policy_settings(step.txn, settings).await
+        })
+        .await
+    }
+}

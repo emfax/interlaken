@@ -16,7 +16,7 @@ use futures::StreamExt;
 use interlaken_ir::interp::{Datum, RowKey};
 use interlaken_ir::{Expr, Type};
 use interlaken_storage::catalog::TableDef as StoredTable;
-use interlaken_storage::encoding::Datum as Stored;
+use interlaken_storage::encoding::{ColumnType, Datum as Stored};
 use interlaken_storage::rows;
 
 use super::pull::{Pull, batch, into_stream};
@@ -67,6 +67,32 @@ fn stored_row(row: &[Datum]) -> Result<Vec<Stored>, ExecError> {
     row.iter()
         .map(|d| to_stored(d).ok_or_else(|| ExecError::Unsupported(format!("storing {d:?}"))))
         .collect()
+}
+
+/// Convert a whole table row to its stored form, for columns of `types`.
+///
+/// Arrow carries `jsonb` as text, so text bound for a `jsonb` column (or
+/// array elements) is stored as `jsonb`.
+fn stored_table_row(row: &[Datum], types: &[ColumnType]) -> Result<Vec<Stored>, ExecError> {
+    Ok(stored_row(row)?
+        .into_iter()
+        .zip(types)
+        .map(|(value, ty)| as_column_type(value, *ty))
+        .collect())
+}
+
+/// Return `value` as a value of column type `ty` where Arrow lost the distinction.
+fn as_column_type(value: Stored, ty: ColumnType) -> Stored {
+    match (value, ty) {
+        (Stored::Text(s), ColumnType::Jsonb) => Stored::Jsonb(s),
+        (Stored::Array(items), ColumnType::Array(element)) => Stored::Array(
+            items
+                .into_iter()
+                .map(|item| as_column_type(item, element.column_type()))
+                .collect(),
+        ),
+        (value, _) => value,
+    }
 }
 
 impl DmlState {
@@ -128,7 +154,7 @@ impl DmlState {
                     for (k, &c) in columns.iter().enumerate() {
                         row[c] = datum_at(b.column(k).as_ref(), r)?;
                     }
-                    rows::insert(txn, stored, stored_row(&row)?).await?;
+                    rows::insert(txn, stored, stored_table_row(&row, &stored.types())?).await?;
                     written.push(row);
                 }
             }
@@ -164,7 +190,14 @@ impl DmlState {
                     for (c, array) in &values {
                         new[*c] = datum_at(array.as_ref(), k)?;
                     }
-                    if rows::update(txn, stored, &pk_of(old)?, stored_row(&new)?).await? {
+                    if rows::update(
+                        txn,
+                        stored,
+                        &pk_of(old)?,
+                        stored_table_row(&new, &stored.types())?,
+                    )
+                    .await?
+                    {
                         written.push(new);
                     }
                 }

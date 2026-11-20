@@ -119,3 +119,5 @@ pub async fn setup(dir: &std::path::Path, mode: VerificationMode) -> FjallStorag
     txn.commit().await.unwrap();
     storage
 }
+
+pub mod session;

@@ -50,13 +50,6 @@ Entry format:
 
 ## IR
 
-### leakproof-admin-only: Enforce that only administrators mark functions leakproof
-- **Origin:** ADR-0011, I2
-- **Why:** Leakproofness decides whether a predicate may move below a security barrier. The in-memory catalog accepts any `FunctionDef`. The rule belongs with catalog DDL and roles, which do not exist yet.
-- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: with the storage-backed catalog (ADR-0013 phase 3), or when user-defined functions arrive, whichever is first.
-- **Size:** About 1 day once roles exist.
-- **Status:** open
-
 ### subquery-positions: Lower subqueries in the positions the resolver rejects
 - **Origin:** ADR-0013 (resolver), I2
 - **Why:** The resolver rejects subqueries:
@@ -140,20 +133,6 @@ Entry format:
 - **Size:** About 2 days.
 - **Status:** open
 
-### explain-policy-markers: Mark the subplans security lowering adds
-- **Origin:** ADR-0025 phase 1, E5
-- **Why:** `EXPLAIN` hides policy logic from principals without policy privilege, and it finds the parts to hide by plan shape: the inner side of joins and applies on the path from a policy filter down to its rows. That is safe for the plans lowering produces today, but an optimizer change that reshapes them could expose a policy subplan. A marker that lowering sets on the operators it adds would make the redaction exact.
-- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: before the optimizer gains rules that move joins across policy filters, or before `EXPLAIN` is exposed to untrusted clients.
-- **Size:** About 1–2 days across the IR and the executor.
-- **Status:** open
-
-### storage-temporal-types: Store dates, timestamps and UUIDs
-- **Origin:** E5
-- **Why:** Storage has types only for the scalars the MVP tables needed (plus, since E5, arrays of them). The IR and executor support `date`, `timestamptz`, `uuid` and `jsonb`, but tables can't hold them, so `stored_type` returns `None` for them.
-- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: when the SQL front end needs those column types.
-- **Size:** About 2–3 days (tuple encoding, row format, catalog codes, property tests).
-- **Status:** open
-
 ## Executor and IR open questions
 
 ### default-memory-budgets: Choose default per-query and per-node memory budgets
@@ -171,6 +150,27 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### storage-temporal-types: Store dates, timestamps and UUIDs
+- **Origin:** E5
+- **Why:** Storage has types only for the scalars the MVP tables needed (plus, since E5, arrays of them). The IR and executor support `date`, `timestamptz`, `uuid` and `jsonb`, but tables can't hold them, so `stored_type` returns `None` for them.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: when the SQL front end needs those column types.
+- **Size:** About 2–3 days (tuple encoding, row format, catalog codes, property tests).
+- **Status:** done (F1): `date`, `timestamptz`, `uuid` and `jsonb` columns and arrays of them, in the tuple encoding, row format and catalog codes; `jsonb` isn't keyable (ADR-0003, ADR-0031).
+
+### leakproof-admin-only: Enforce that only administrators mark functions leakproof
+- **Origin:** ADR-0011, I2
+- **Why:** Leakproofness decides whether a predicate may move below a security barrier. The in-memory catalog accepts any `FunctionDef`. The rule belongs with catalog DDL and roles, which do not exist yet.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: with the storage-backed catalog (ADR-0013 phase 3), or when user-defined functions arrive, whichever is first.
+- **Size:** About 1 day once roles exist.
+- **Status:** done (F1): only principals with the `admin` privilege can call `Session::set_function_leakproof`; overrides live in `engine_functions` (ADR-0011, ADR-0031).
+
+### explain-policy-markers: Mark the subplans security lowering adds
+- **Origin:** ADR-0025 phase 1, E5
+- **Why:** `EXPLAIN` hides policy logic from principals without policy privilege, and it finds the parts to hide by plan shape: the inner side of joins and applies on the path from a policy filter down to its rows. That is safe for the plans lowering produces today, but an optimizer change that reshapes them could expose a policy subplan. A marker that lowering sets on the operators it adds would make the redaction exact.
+- **When:** Milestone F1 (`design/mvp-completion.md`). Originally: before the optimizer gains rules that move joins across policy filters, or before `EXPLAIN` is exposed to untrusted clients.
+- **Size:** About 1–2 days across the IR and the executor.
+- **Status:** done (F1): lowering marks its subplans with the reserved `sec$` prefix, which the verifier rejects in client plans, and `EXPLAIN` hides marked subplans wherever they sit (ADR-0025, ADR-0031).
 
 ### nest-output-format: Decide `Nest` output: jsonb or Arrow list/struct
 - **Origin:** `executor-design.md` open questions, ADR-0012

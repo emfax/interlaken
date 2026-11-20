@@ -27,7 +27,11 @@ use crate::metrics::NodeMetrics;
 use crate::physical::{Layout, Physical};
 
 /// Convert an interpreter value to its stored form, if it has one.
-pub(crate) fn to_stored(d: &Datum) -> Option<Stored> {
+///
+/// Scalars convert to their storage namesakes and arrays of scalars to
+/// storage arrays; records and nested arrays have no stored form.
+#[must_use]
+pub fn to_stored(d: &Datum) -> Option<Stored> {
     Some(match d {
         Datum::Null => Stored::Null,
         Datum::Bool(v) => Stored::Bool(*v),
@@ -37,6 +41,10 @@ pub(crate) fn to_stored(d: &Datum) -> Option<Stored> {
         Datum::Float8(v) => Stored::Float8(*v),
         Datum::Text(v) => Stored::Text(v.clone()),
         Datum::Bytea(v) => Stored::Bytea(v.clone()),
+        Datum::Date(v) => Stored::Date(*v),
+        Datum::Timestamptz(v) => Stored::Timestamptz(*v),
+        Datum::Uuid(v) => Stored::Uuid(*v),
+        Datum::Jsonb(v) => Stored::Jsonb(v.clone()),
         Datum::Array(items) => Stored::Array(
             items
                 .iter()
@@ -51,7 +59,8 @@ pub(crate) fn to_stored(d: &Datum) -> Option<Stored> {
 }
 
 /// Convert a stored value to an interpreter value.
-pub(crate) fn from_stored(d: &Stored) -> Datum {
+#[must_use]
+pub fn from_stored(d: &Stored) -> Datum {
     match d {
         Stored::Null => Datum::Null,
         Stored::Bool(v) => Datum::Bool(*v),
@@ -61,15 +70,19 @@ pub(crate) fn from_stored(d: &Stored) -> Datum {
         Stored::Float8(v) => Datum::Float8(*v),
         Stored::Text(v) => Datum::Text(v.clone()),
         Stored::Bytea(v) => Datum::Bytea(v.clone()),
+        Stored::Date(v) => Datum::Date(*v),
+        Stored::Timestamptz(v) => Datum::Timestamptz(*v),
+        Stored::Uuid(v) => Datum::Uuid(*v),
+        Stored::Jsonb(v) => Datum::Jsonb(v.clone()),
         Stored::Array(items) => Datum::Array(items.iter().map(from_stored).collect()),
     }
 }
 
 /// Return the storage column type that holds values of an IR type, if any.
 ///
-/// Scalars map to their storage namesakes, and arrays of those to storage
-/// arrays. Other types (dates, timestamps, UUIDs, records, nested arrays)
-/// have no stored form yet.
+/// Every scalar maps to its storage namesake, and arrays of scalars to
+/// storage arrays. Records, nested arrays and entity references have no
+/// stored form.
 #[must_use]
 pub fn stored_type(ty: &interlaken_ir::DataType) -> Option<ColumnType> {
     use interlaken_ir::{DataType, ScalarType};
@@ -83,7 +96,10 @@ pub fn stored_type(ty: &interlaken_ir::DataType) -> Option<ColumnType> {
             ScalarType::Float8 => ColumnType::Float8,
             ScalarType::Text => ColumnType::Text,
             ScalarType::Bytea => ColumnType::Bytea,
-            _ => return None,
+            ScalarType::Date => ColumnType::Date,
+            ScalarType::Timestamptz => ColumnType::Timestamptz,
+            ScalarType::Uuid => ColumnType::Uuid,
+            ScalarType::Jsonb => ColumnType::Jsonb,
         },
         DataType::Array(element) => {
             ColumnType::Array(ElementType::of(stored_type(&element.data)?)?)
@@ -174,9 +190,10 @@ fn stored_bytes(d: &Stored) -> usize {
         Stored::Null => 0,
         Stored::Bool(_) => 1,
         Stored::Int2(_) => 2,
-        Stored::Int4(_) => 4,
-        Stored::Int8(_) | Stored::Float8(_) => 8,
-        Stored::Text(s) => s.len(),
+        Stored::Int4(_) | Stored::Date(_) => 4,
+        Stored::Int8(_) | Stored::Float8(_) | Stored::Timestamptz(_) => 8,
+        Stored::Uuid(_) => 16,
+        Stored::Text(s) | Stored::Jsonb(s) => s.len(),
         Stored::Bytea(b) => b.len(),
         Stored::Array(items) => items.iter().map(stored_bytes).sum(),
     }

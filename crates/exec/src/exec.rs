@@ -1,6 +1,7 @@
 //! Running physical plans.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use arrow_array::RecordBatch;
 use futures::StreamExt;
@@ -54,6 +55,9 @@ pub struct ExecContext {
     pub memory: Arc<QueryMemory>,
     /// Per-operator metrics, collected when set.
     pub metrics: Option<Arc<Metrics>>,
+    /// When the statement times out, if it has a timeout: every operator
+    /// fails with [`ExecError::QueryCanceled`] at its next batch after it.
+    pub deadline: Option<Instant>,
 }
 
 impl ExecContext {
@@ -73,6 +77,7 @@ impl ExecContext {
             outer: Arc::new([]),
             memory: QueryMemory::new(DEFAULT_QUERY_BUDGET, None),
             metrics: None,
+            deadline: None,
         }
     }
 
@@ -87,6 +92,15 @@ impl ExecContext {
     pub fn with_metrics(self, metrics: Arc<Metrics>) -> Self {
         Self {
             metrics: Some(metrics),
+            ..self
+        }
+    }
+
+    /// Return this context cancelling the statement at `deadline`.
+    #[must_use]
+    pub fn with_deadline(self, deadline: Instant) -> Self {
+        Self {
+            deadline: Some(deadline),
             ..self
         }
     }
@@ -115,10 +129,24 @@ impl ExecContext {
 /// Start executing `node`, returning its batches as a stream.
 ///
 /// Execution is pull-based and lazy: nothing reads storage until the stream
-/// is polled, and dropping the stream cancels the query.
+/// is polled, and dropping the stream cancels the query. With a deadline
+/// (`statement_timeout`), the query fails once it passes.
 #[must_use]
 pub fn execute(node: &Physical, ctx: &ExecContext) -> BatchStream {
-    let stream = start(node, ctx);
+    let mut stream = start(node, ctx);
+    if let Some(deadline) = ctx.deadline {
+        // Checked per batch, so a statement stops on time even when its
+        // operators never wait on storage (and so never yield).
+        stream = stream
+            .map(move |batch| {
+                if Instant::now() >= deadline {
+                    Err(ExecError::QueryCanceled)
+                } else {
+                    batch
+                }
+            })
+            .boxed();
+    }
     match ctx.node_metrics(node.id) {
         Some(metrics) => metered(stream, metrics),
         None => stream,
@@ -195,7 +223,7 @@ fn start(node: &Physical, ctx: &ExecContext) -> BatchStream {
             left,
             right,
         } => set_op(node, *op, *all, left, right, ctx),
-        Op::Values { rows } => values(node, rows, ctx),
+        Op::Values { rows, .. } => values(node, rows, ctx),
         Op::Unnest { input, expr, width } => match compile(expr, input, ctx) {
             Ok(expr) => unnest(execute(input, ctx), expr, *width, node.schema.clone()),
             Err(e) => failed(e),

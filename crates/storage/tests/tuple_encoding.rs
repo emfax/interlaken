@@ -22,6 +22,9 @@ enum ColType {
     Float8,
     Text,
     Bytea,
+    Date,
+    Timestamptz,
+    Uuid,
 }
 
 /// A schema: one type and sort order per column.
@@ -37,6 +40,9 @@ fn col_type() -> impl Strategy<Value = ColType> {
         Just(ColType::Float8),
         Just(ColType::Text),
         Just(ColType::Bytea),
+        Just(ColType::Date),
+        Just(ColType::Timestamptz),
+        Just(ColType::Uuid),
     ]
 }
 
@@ -109,6 +115,23 @@ fn datum(t: ColType) -> BoxedStrategy<Datum> {
         ColType::Float8 => float().prop_map(Datum::Float8).boxed(),
         ColType::Text => text().prop_map(Datum::Text).boxed(),
         ColType::Bytea => bytes().prop_map(Datum::Bytea).boxed(),
+        ColType::Date => prop_oneof![-2i32..=2, any::<i32>()]
+            .prop_map(Datum::Date)
+            .boxed(),
+        ColType::Timestamptz => prop_oneof![-2i64..=2, any::<i64>()]
+            .prop_map(Datum::Timestamptz)
+            .boxed(),
+        ColType::Uuid => prop_oneof![
+            (0u8..=2, 0u8..=2).prop_map(|(a, b)| {
+                let mut u = [0u8; 16];
+                u[0] = a;
+                u[15] = b;
+                u
+            }),
+            any::<[u8; 16]>(),
+        ]
+        .prop_map(Datum::Uuid)
+        .boxed(),
     };
     prop_oneof![1 => Just(Datum::Null), 4 => value].boxed()
 }
@@ -155,6 +178,9 @@ fn cmp_value(a: &Datum, b: &Datum) -> Ordering {
         (Datum::Float8(x), Datum::Float8(y)) => cmp_float(*x, *y),
         (Datum::Text(x), Datum::Text(y)) => x.as_bytes().cmp(y.as_bytes()),
         (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
+        (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
+        (Datum::Timestamptz(x), Datum::Timestamptz(y)) => x.cmp(y),
+        (Datum::Uuid(x), Datum::Uuid(y)) => x.cmp(y),
         _ => panic!("cannot compare {a:?} with {b:?}"),
     }
 }

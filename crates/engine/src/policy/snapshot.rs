@@ -1,28 +1,13 @@
 //! Copying entity data from storage for local policy analysis.
 
+use interlaken_exec::from_stored;
 use interlaken_ir::catalog::Catalog;
-use interlaken_ir::interp::{Database, Datum};
+use interlaken_ir::interp::Database;
 use interlaken_storage::Txn;
 use interlaken_storage::catalog;
-use interlaken_storage::encoding::Datum as Stored;
 use interlaken_storage::rows::{self, RowScan};
 
 use crate::error::EngineError;
-
-/// Convert a stored value.
-fn datum(d: &Stored) -> Datum {
-    match d {
-        Stored::Null => Datum::Null,
-        Stored::Bool(v) => Datum::Bool(*v),
-        Stored::Int2(v) => Datum::Int2(*v),
-        Stored::Int4(v) => Datum::Int4(*v),
-        Stored::Int8(v) => Datum::Int8(*v),
-        Stored::Float8(v) => Datum::Float8(*v),
-        Stored::Text(v) => Datum::Text(v.clone()),
-        Stored::Bytea(v) => Datum::Bytea(v.clone()),
-        Stored::Array(items) => Datum::Array(items.iter().map(datum).collect()),
-    }
-}
 
 /// Read every entity table and closure table through `txn` into an interpreter database.
 ///
@@ -53,7 +38,12 @@ pub async fn entity_snapshot(txn: &Txn, catalog: &dyn Catalog) -> Result<Databas
         let mut scan = RowScan::all();
         loop {
             let batch = rows::scan(txn, &stored, &scan).await?;
-            out.extend(batch.rows.iter().map(|r| r.iter().map(datum).collect()));
+            out.extend(
+                batch
+                    .rows
+                    .iter()
+                    .map(|r| r.iter().map(from_stored).collect()),
+            );
             match batch.resume {
                 Some(resume) => scan.resume = Some(resume),
                 None => break,

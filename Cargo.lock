@@ -869,10 +869,14 @@ dependencies = [
 name = "interlaken-engine"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "cedar-policy",
  "cedar-policy-symcc",
+ "interlaken-exec",
  "interlaken-ir",
  "interlaken-storage",
+ "proptest",
  "tempfile",
  "thiserror",
  "tokio",

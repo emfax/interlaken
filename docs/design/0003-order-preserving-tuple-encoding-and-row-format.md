@@ -60,6 +60,13 @@ As implemented in M4 (`encoding::encode_row` / `decode_row`): little-endian `u32
 
 *Arrays (E5):* a column may hold a one-dimensional array of a scalar type, with NULL elements (`ColumnType::Array`, catalog code 100 plus the element type's code). An array is a variable-length row value whose bytes are a `u32` element count followed by the elements in the row's own layout: a NULL bitmap, the fixed-width elements, then the variable-length ones. Arrays have no key encoding: `KeyBuilder::finish` rejects a tuple containing one (`EncodeError::Unkeyable`), and DDL refuses array columns in primary keys and indexes ([ADR-0007](0007-minimal-catalog-and-row-layer.md)).
 
+*Dates, timestamps, UUIDs and `jsonb` (F1):*
+- `date` (days since 1970-01-01, `i32`) and `timestamptz` (microseconds since the Unix epoch, `i64`) are encoded in keys like `int4` and `int8`. Their tags are `0x23` and `0x24`.
+- `uuid` is its sixteen bytes, unescaped since it is fixed-width, with tag `0x50`. Ascending tags now span `0x10..=0x50` and DESC tags `0xAF..=0xEF`, still strictly between the NULL tags.
+- In rows, the three are fixed-width (4, 8 and 16 bytes).
+- `jsonb` is a variable-length value holding its text, and like arrays it has no key encoding.
+- Catalog codes are 8 to 11, and 108 to 111 for their arrays ([ADR-0031](0031-engine-sessions-and-storage-backed-catalog.md)).
+
 ## Implementation Phases
 
 - [x] **Phase 1: Tuple encoding with property tests and fuzzing** - M1

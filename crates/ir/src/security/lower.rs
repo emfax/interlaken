@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use super::error::SecurityError;
 use super::expr::{ArithOp, CmpOp, EntityKey, EntityUid, SecExpr, SecValue};
+use super::marker::POLICY_ALIAS_PREFIX;
 use crate::catalog::{Catalog, EntityDef, TableDef};
 use crate::expr::{BinaryOp, Expr, NamedExpr, SubqueryKind, UnaryOp};
 use crate::names::{ColumnId, ColumnRef, FunctionRef, Ident, TableRef};
@@ -192,7 +193,7 @@ impl Lowerer<'_> {
     /// Return a fresh subquery alias.
     fn alias(&mut self) -> Ident {
         self.next_alias += 1;
-        Ident::new(format!("sec${}", self.next_alias))
+        Ident::new(format!("{POLICY_ALIAS_PREFIX}{}", self.next_alias))
     }
 
     /// Look up an entity type.
@@ -438,7 +439,7 @@ impl Lowerer<'_> {
                 let element = self.alias();
                 let unnested = Rel::Unnest {
                     input: Box::new(Rel::Values {
-                        columns: vec!["one".into()],
+                        columns: vec![self.alias()],
                         rows: vec![vec![boolean(true)]],
                         binding: None,
                     }),

@@ -73,6 +73,26 @@ impl Transaction {
         self.aborted
     }
 
+    /// Replace the catalog later statements are planned and run against,
+    /// as after DDL earlier in the transaction.
+    pub fn set_catalog(&mut self, catalog: Arc<dyn Catalog>) {
+        self.catalog = catalog;
+    }
+
+    /// Return the catalog statements run against.
+    #[must_use]
+    pub fn catalog(&self) -> &Arc<dyn Catalog> {
+        &self.catalog
+    }
+
+    /// Return a context for running a statement's plan with `params`, with
+    /// this transaction's catalog, settings and memory budget.
+    #[must_use]
+    pub fn context(&self, params: Vec<Datum>) -> ExecContext {
+        ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options)
+            .with_memory(QueryMemory::new(self.query_budget, self.pool.clone()))
+    }
+
     /// Run one statement and return its result rows (or `RETURNING` rows).
     ///
     /// # Errors
@@ -85,23 +105,50 @@ impl Transaction {
         plan: &Physical,
         params: Vec<Datum>,
     ) -> Result<Vec<RecordBatch>, ExecError> {
+        let ctx = self.context(params);
+        self.statement(async move |_| collect(plan, &ctx).await)
+            .await
+    }
+
+    /// Run `body` as one statement: it sees every earlier statement's
+    /// writes but none of its own reads' later writes, and its writes are
+    /// rolled back if it fails.
+    ///
+    /// This is how statements other than plans (DDL, policy changes) get
+    /// the same atomicity, and how a caller cancels a statement: `body`
+    /// returns an error (such as [`ExecError::QueryCanceled`]) after
+    /// dropping whatever it was running, and the statement is undone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecError::TransactionAborted`] (converted) if an earlier
+    /// statement failed, or `body`'s error, after rolling its writes back
+    /// and marking the transaction aborted.
+    pub async fn statement<T, E>(
+        &mut self,
+        body: impl AsyncFnOnce(&Txn) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<ExecError>,
+    {
         if self.aborted {
-            return Err(ExecError::TransactionAborted);
+            return Err(ExecError::TransactionAborted.into());
         }
         self.txn.next_statement();
         let savepoint = self.txn.savepoint();
-        let ctx = ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options)
-            .with_memory(QueryMemory::new(self.query_budget, self.pool.clone()));
-        let result = collect(plan, &ctx).await;
-        drop(ctx);
+        let result = body(&self.txn).await;
         match result {
-            Ok(batches) => {
-                self.txn.release_savepoint(savepoint)?;
-                Ok(batches)
+            Ok(value) => {
+                self.txn
+                    .release_savepoint(savepoint)
+                    .map_err(ExecError::from)?;
+                Ok(value)
             }
             Err(e) => {
-                self.txn.rollback_to(savepoint)?;
-                self.txn.release_savepoint(savepoint)?;
+                self.txn.rollback_to(savepoint).map_err(ExecError::from)?;
+                self.txn
+                    .release_savepoint(savepoint)
+                    .map_err(ExecError::from)?;
                 self.aborted = true;
                 Err(e)
             }

@@ -1,12 +1,12 @@
 ---
 id: 0013
 title: IR Forms, Formats, Resolver and Verifier
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [ir, security]
 feature-flag:
 created: 2026-11-17
 accepted: 2026-11-19
-implemented:
+implemented: 2026-11-20
 spec-sections: ["ir-design.md#names-resolution-and-formats", "ir-design.md#compilation-pipeline"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 
@@ -140,7 +140,8 @@ flowchart TB
 
 - [x] **Phase 1: Builder, text format, `Catalog` trait and in-memory implementation** - I1
 - [x] **Phase 2: Resolver and verifier against the in-memory catalog** - I2
-- [ ] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - F1 ([mvp-completion.md](mvp-completion.md))
+- [x] **Phase 3: Storage-backed `Catalog` over `sys_*` tables** - F1
+  - *As implemented:* `interlaken_engine::catalog::load_catalog` builds an `InMemoryCatalog` from storage's `sys_*` tables and the engine's `engine_*` tables, which hold IR column types, entity and membership declarations, function property overrides and a catalog-wide schema version. Every read goes through the statement's transaction. Building the in-memory catalog runs its own checks, so the two implementations behave identically by construction. Catalogs are cached by schema version, and every engine DDL statement bumps it ([ADR-0031](0031-engine-sessions-and-storage-backed-catalog.md)).
 
 ## Consequences
 
