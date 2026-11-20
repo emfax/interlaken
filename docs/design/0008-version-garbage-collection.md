@@ -46,6 +46,12 @@ Alternative considered: **fjall custom compaction filters**. A filter sees one S
 - **Schedule.** A background thread runs a pass every `gc_interval` (default 10 s, `None` disables it). `FjallStorage::run_gc` runs a pass on demand and returns a `GcReport`. Each completed pass writes its watermark to `meta`.
 - **Metrics.** `FjallStorage::metrics()` returns `StorageMetrics`: visible timestamp, active transactions, oldest snapshot, expired-transaction count, commit pipeline counters, GC counters (passes, failures, versions examined and removed, last pass) and disk usage.
 
+### As implemented (F4): disk space levels off
+
+- **Soak.** `tests/disk_space.rs` overwrites a fixed key set at a target rate with GC every 100 ms and samples `disk_space_bytes`. It asserts that, after a warm-up third, the later half of the run peaks at most 25% (plus 8 MiB) above the earlier half. A 12-second version runs in the normal suite; the long one is `#[ignore]`d and run by `scripts/disk-space-soak.sh` (`SOAK_SECS`, default 600).
+- **Result.** Space levels off, but the footprint is dominated by fjall's journals, not by MVCC garbage. It saws between roughly the live data and fjall's journal cap (512 MiB by default) plus memtables: journals are deleted only once the memtables they cover are flushed. A 300 s run with default limits at 16 MiB/s wrote 4.8 GiB and GC removed 9.6 million versions. Disk use ranged 80–696 MiB once warm, with per-minute peaks of 577, 684, 696, 568 and 645 MiB: no growth trend. With a 64 MiB journal cap and 4 MiB memtables the short test levels off at 70–160 MiB.
+- **Limits are configurable.** Because the journal cap sets the steady-state footprint, `StorageOptions` gained `max_journal_bytes` (default 512 MiB, at least 64 MiB) and `memtable_bytes` (default 64 MiB, at least 1 MiB; fjall records it when the database is created). An embedded deployment that cares about disk footprint should lower both.
+
 ## Implementation Phases
 
 - [x] **Phase 1: Watermark tracking and background GC scanner** - M5

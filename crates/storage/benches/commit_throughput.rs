@@ -1,7 +1,8 @@
 //! Commit throughput of the single sequencer thread (ADR-0005).
 //!
 //! Concurrent clients commit transactions for a fixed time. Each run reports
-//! client-side throughput and latency, plus the sequencer's own counters:
+//! client-side throughput and latency (p50, p99 and max, the last for
+//! spotting fsync stalls), plus the sequencer's own counters:
 //! mean group size, and how busy the sequencer thread was. A busy fraction
 //! near 100% means the single sequencer, not the clients or the disk wait,
 //! limits throughput; `cap` extrapolates the rate the sequencer could reach
@@ -213,7 +214,7 @@ async fn run(workload: Workload, durability: Durability, clients: usize, secs: f
         stats.write.as_secs_f64() * 1e6 / stats.groups as f64
     };
     println!(
-        "{:<6} {:<8} {:>7} {:>10.0} {:>7} {:>7.1} {:>9.1} {:>9.1} {:>6.1}% {:>9.1} {:>10.1} {:>10.0}",
+        "{:<6} {:<8} {:>7} {:>10.0} {:>7} {:>7.1} {:>9.1} {:>9.1} {:>10.1} {:>6.1}% {:>9.1} {:>10.1} {:>10.0}",
         workload.name(),
         format!("{durability:?}").to_lowercase(),
         clients,
@@ -222,6 +223,7 @@ async fn run(workload: Workload, durability: Durability, clients: usize, secs: f
         stats.mean_group_size(),
         quantile(&latencies, 0.5).as_secs_f64() * 1e6,
         quantile(&latencies, 0.99).as_secs_f64() * 1e6,
+        latencies.last().copied().unwrap_or_default().as_secs_f64() * 1e6,
         busy_fraction * 100.0,
         per_txn_validation_us,
         per_group_write_us,
@@ -245,7 +247,7 @@ fn main() {
         .unwrap();
 
     println!(
-        "{:<6} {:<8} {:>7} {:>10} {:>7} {:>7} {:>9} {:>9} {:>7} {:>9} {:>10} {:>10}",
+        "{:<6} {:<8} {:>7} {:>10} {:>7} {:>7} {:>9} {:>9} {:>10} {:>7} {:>9} {:>10} {:>10}",
         "load",
         "durab.",
         "clients",
@@ -254,6 +256,7 @@ fn main() {
         "group",
         "p50 µs",
         "p99 µs",
+        "max µs",
         "seq",
         "val µs/tx",
         "write µs/g",

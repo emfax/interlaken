@@ -20,25 +20,18 @@ Entry format:
 
 ## Storage
 
-### lazyfs-power-loss: Power-loss testing with a fault-injecting filesystem
-- **Origin:** ADR-0009 phase 6, ADR-0005 (crash harness section), M6
-- **Why:** The crash harness kills the process with `SIGKILL`. That loses nothing already handed to the kernel, so it checks crash consistency and recovery, not power loss. A bug in how `Durability::Sync` reaches stable storage (fjall's `SyncAll`, directory fsyncs, journal rotation) would go unnoticed. Run the crash workload on LazyFS (or a similar FUSE filesystem that drops unsynced writes on demand) and check that every commit acknowledged under `Sync` survives while `Buffered` commits may be lost.
-- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before anything relies on `Sync` durability in production.
-- **Size:** About 2–3 days. Most of the time goes on LazyFS setup and CI plumbing; the checks in `tests/crash.rs` can be reused.
-- **Status:** open
-
 ### fsync-stalls-other-hardware: Re-measure commit stalls on other hardware
 - **Origin:** ADR-0005 measurements, M3
-- **Why:** Under `Sync`, rare commit stalls of 0.2–2 s matched raw fsync stalls on the development disk (up to 354 ms with plain `fsync`). We concluded they come from the disk, not the sequencer, but checked on only one machine. Run `benches/commit_throughput.rs` and a raw-fsync probe on the target deployment storage (cloud block volume, NVMe) and record p99/max commit latency in ADR-0005.
+- **Why:** Under `Sync`, rare commit stalls of 0.2–2 s matched raw fsync stalls on the development disk (up to 354 ms with plain `fsync`). We concluded they come from the disk, not the sequencer, but checked on only one machine. Run `scripts/commit-stalls.sh DIR` with `DIR` on the target deployment storage (cloud block volume, NVMe). It runs a raw fsync probe and the `Sync` rows of `benches/commit_throughput.rs`, which report p50, p99 and max commit latency. Record the figures in ADR-0005.
 - **When:** Milestone F4 (`design/mvp-completion.md`), but it doesn't block the milestone: once the target deployment hardware is known, or if latency SLOs are set.
-- **Size:** About half a day.
-- **Status:** open
+- **Size:** About an hour now that the script exists.
+- **Status:** open. F4 added the script and a short baseline on the development disk (ADR-0005, *As implemented (F4)*); the deployment hardware is still unknown.
 
-### disk-space-boundedness: Assert disk space, not only versions, stays bounded
-- **Origin:** ADR-0009 phase 5, M5/M6
-- **Why:** `space_stays_bounded_under_sustained_updates` shows the number of live versions stays bounded, but not on-disk bytes. GC removes are physical fjall deletes, so space comes back only after compaction drops the tombstones. A long soak should track `StorageMetrics::disk_space_bytes` and assert it levels off under a steady update workload.
-- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before the first long-running deployment, or sooner if disk growth shows up.
-- **Size:** About 1 day, plus a soak run.
+### nightly-durability-ci: Run the power-loss and disk-space scripts nightly
+- **Origin:** F4
+- **Why:** `scripts/power-loss.sh` (LazyFS, 50 cycles per test) and `scripts/disk-space-soak.sh` (10 minutes) are too slow for every commit. The normal suite runs only short versions, and skips power loss without `LAZYFS_ROOT`. Both scripts exit non-zero on failure, but nothing runs them yet. The CI runner needs FUSE (`/dev/fuse`, `fusermount3`), CMake and g++. It also needs either `libfuse3-dev` or `apt-get download`; `scripts/build-lazyfs.sh` handles the latter.
+- **When:** When the repository gets CI.
+- **Size:** About half a day.
 - **Status:** open
 
 ### pipelined-commit-validation: Validate the next commit group while the current one syncs
@@ -150,6 +143,20 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### lazyfs-power-loss: Power-loss testing with a fault-injecting filesystem
+- **Origin:** ADR-0009 phase 6, ADR-0005 (crash harness section), M6
+- **Why:** The crash harness kills the process with `SIGKILL`. That loses nothing already handed to the kernel, so it checks crash consistency and recovery, not power loss. A bug in how `Durability::Sync` reaches stable storage (fjall's `SyncAll`, directory fsyncs, journal rotation) would go unnoticed. Run the crash workload on LazyFS (or a similar FUSE filesystem that drops unsynced writes on demand) and check that every commit acknowledged under `Sync` survives while `Buffered` commits may be lost.
+- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before anything relies on `Sync` durability in production.
+- **Size:** About 2–3 days. Most of the time goes on LazyFS setup and CI plumbing; the checks in `tests/crash.rs` can be reused.
+- **Status:** done (F4): `tests/crash.rs` runs on LazyFS (`LAZYFS_ROOT`, `scripts/power-loss.sh`). No `Sync` commit was lost; `Buffered` loses only a suffix. It found and fixed `Buffered` losing commits on a process crash (ADR-0005, ADR-0009).
+
+### disk-space-boundedness: Assert disk space, not only versions, stays bounded
+- **Origin:** ADR-0009 phase 5, M5/M6
+- **Why:** `space_stays_bounded_under_sustained_updates` shows the number of live versions stays bounded, but not on-disk bytes. GC removes are physical fjall deletes, so space comes back only after compaction drops the tombstones. A long soak should track `StorageMetrics::disk_space_bytes` and assert it levels off under a steady update workload.
+- **When:** Milestone F4 (`design/mvp-completion.md`). Originally: before the first long-running deployment, or sooner if disk growth shows up.
+- **Size:** About 1 day, plus a soak run.
+- **Status:** done (F4): `tests/disk_space.rs` (12 s in the suite, `scripts/disk-space-soak.sh` for long runs) shows disk space levelling off, bounded by fjall's journal cap. The cap is now configurable through `StorageOptions::max_journal_bytes` and `memtable_bytes` (ADR-0008).
 
 ### storage-temporal-types: Store dates, timestamps and UUIDs
 - **Origin:** E5

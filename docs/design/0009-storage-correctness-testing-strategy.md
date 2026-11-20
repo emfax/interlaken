@@ -41,9 +41,18 @@ The MVP's success criteria are that concurrent transactions show no anomalies un
 - **Negative isolation tests:** under REPEATABLE READ, the checker should *find* write skew (G2-item), proving the harness can detect anomalies.
 - **As implemented (M6):**
   - `tests/elle.rs` records list-append histories and checks them with `elle-cli` (found via `ELLE_CLI` or `target/elle-cli.jar`). SERIALIZABLE must be strict-serializable, REPEATABLE READ must satisfy snapshot isolation, and READ COMMITTED must satisfy read-committed. REPEATABLE READ is also checked as serializable, where Elle must find G2-item: that is the negative test. Without Java or the jar, histories are saved and the check is skipped.
-  - `tests/crash.rs` re-runs its own binary as a child committing under `Sync` with GC running, kills it with `SIGKILL` at random times, and verifies after recovery that no acknowledged commit is lost, no transaction is torn and the commit clock resumes correctly; it repeats on the same directory. `SIGKILL` does not simulate power loss, so fsync behaviour is not covered.
+  - `tests/crash.rs` re-runs its own binary as a child committing under `Sync` with GC running, kills it with `SIGKILL` at random times, and verifies after recovery that no acknowledged commit is lost, no transaction is torn and the commit clock resumes correctly; it repeats on the same directory. `SIGKILL` does not simulate power loss, so fsync behaviour is not covered (F4 added that, below).
   - The exit run: 1,200 Elle histories, 300 crash cycles, 200 runs each of the serializability, uniqueness, GC and catalog suites, and 13,000 model-test cases, with no anomalies, lost commits or hangs. `ELLE_RUNS`, `CRASH_CYCLES` and `PROPTEST_CASES` scale each part.
   - An independent code review during hardening found two bugs, both fixed with regression tests: READ COMMITTED dependency validation against a refreshed snapshot ([ADR-0004](0004-optimistic-transactions-and-isolation-levels.md)), and a stranded low-priority pool job after a cancelled submission ([ADR-0001](0001-fjall-storage-engine-and-async-sync-boundary.md)).
+- **As implemented (F4): power loss and disk space.**
+  - `tests/crash.rs` now runs its workload four ways. Process crashes under `Sync` and under `Buffered` must lose nothing. Power loss under `Sync` and under `Buffered` runs on a [LazyFS](https://github.com/dsrhaslab/lazyfs) mount (`tests/support/lazyfs.rs`). After each `SIGKILL` the parent sends `lazyfs::clear-cache`, which drops every write not yet synced, as a power cut does. LazyFS keeps directory operations, so this models lost file contents, not lost directory entries.
+  - The checks are stricter than in M6. A transaction counts as committed if its keys are present or a committed delete removed them. Every survivor must be at or below the recovered commit clock and every lost commit above it, so survivors form a prefix of the commit order. Under `Sync`, or after a process crash, nothing acknowledged may be lost.
+  - Power-loss children use 1 MiB memtables, so fjall flushes tables and rotates journals often and power loss also strikes those paths. That also makes `Buffered` keep part of its history, so the prefix check has something to bite on: with fjall's default memtables nothing is ever synced and every `Buffered` commit is lost.
+  - The power-loss tests need `LAZYFS_ROOT`, a LazyFS checkout built by `scripts/build-lazyfs.sh` (no root needed: if the FUSE 3 headers are missing it extracts `libfuse3-dev` from `apt-get download`). Without it they print a skip message and pass. `scripts/power-loss.sh` runs the whole file with `CRASH_CYCLES=50`.
+  - Results: 20 cycles each. `Sync` lost none of 119,467 acknowledged commits. `Buffered` lost 16,200 of 183,822, always a suffix and never torn. Planting `Buffer` in place of `SyncAll` for `Sync` failed at once.
+  - The harness found one bug: `Buffered` commits were lost on a plain process crash, because no persist mode was passed to fjall. It is fixed, with `crash_recovery_loses_no_buffered_commits` as the regression test ([ADR-0005](0005-commit-sequencer-group-commit-and-durability.md)).
+  - `tests/disk_space.rs` asserts `disk_space_bytes` levels off under sustained updates: 12 seconds in the normal suite, `SOAK_SECS` (default 600) in `scripts/disk-space-soak.sh`. Results are in [ADR-0008](0008-version-garbage-collection.md).
+  - Both scripts exit non-zero on failure, so CI can run them nightly. The repository has no CI configuration yet.
 - **Benchmarks:** baseline benchmarks (point reads, scans, commit throughput by group size) run in CI to catch regressions. They are not optimization targets for the MVP.
 
 ## Implementation Phases
@@ -54,6 +63,7 @@ The MVP's success criteria are that concurrent transactions show no anomalies un
 - [x] **Phase 4: Concurrent uniqueness tests** - M4
 - [x] **Phase 5: Bounded-space test under sustained updates** - M5
 - [x] **Phase 6: Elle checking, crash harness, hardening** - M6
+- [x] **Phase 7: Power-loss testing on LazyFS, disk-space soak** - F4
 
 ## Consequences
 

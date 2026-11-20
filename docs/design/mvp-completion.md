@@ -90,6 +90,8 @@ An ADR records the session API and the storage-backed catalog's tables.
 
 ### F4: Durability hardening
 
+*Status: complete (2026-11-20), recorded in [ADR-0009](0009-storage-correctness-testing-strategy.md) phase 7, [ADR-0005](0005-commit-sequencer-group-commit-and-durability.md) and [ADR-0008](0008-version-garbage-collection.md). Both exit criteria are met: no `Sync`-acknowledged commit was lost under injected power loss on LazyFS, and disk space levels off under sustained updates. The power-loss work found and fixed a bug: `Buffered` commits were lost on a plain process crash. Two things remain, and neither blocks the milestone: re-measuring commit stalls on the deployment hardware (`scripts/commit-stalls.sh`, once that hardware is known), and wiring `scripts/power-loss.sh` and `scripts/disk-space-soak.sh` into a nightly CI job, since the repository has no CI configuration yet.*
+
 - **Power-loss testing** (`lazyfs-power-loss`): the crash workload on LazyFS, dropping unsynced writes. Every commit acknowledged under `Sync` survives; `Buffered` commits may be lost but never corrupt the database.
 - **Disk-space soak** (`disk-space-boundedness`): a long sustained-update run asserting that `StorageMetrics::disk_space_bytes` levels off once compaction catches up with GC.
 - **Commit stalls on target hardware** (`fsync-stalls-other-hardware`): rerun when the deployment hardware is known; it doesn't block the milestone.

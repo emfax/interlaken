@@ -157,9 +157,9 @@ Range checks use an ordered set of the committed write keys, queried with a rang
 | Durability mode | Behaviour | Use |
 | --- | --- | --- |
 | `Sync` | `persist(SyncAll)` once per group before acknowledging | Default |
-| `Buffered` | Acknowledge after the write reaches OS buffers | Development and tests |
+| `Buffered` | `persist(Buffer)`: acknowledge once the group reaches OS buffers | Development and tests |
 
-fjall's own default only flushes to OS buffers, so `Sync` must call `persist(SyncAll)` explicitly. The crash tests verify it.
+Both modes must name a persist mode. With none, fjall leaves the batch in its in-process journal buffer, where even a process crash loses it. The crash tests check `Buffered` against process crashes, and the LazyFS power-loss tests check `Sync` against lost OS buffers (ADR-0005, ADR-0009).
 
 ### Limits
 
@@ -273,7 +273,8 @@ Correctness is the product, so the test harness gets as much attention as the en
 | Decoder | Fuzzing (`cargo fuzz`) on keys and row values | Panics on corrupt input |
 | MVCC and scans | Model-based testing against an in-memory reference store (`BTreeMap` of versions with serial semantics); random operation sequences, results compared | Visibility, resume and merge bugs |
 | Isolation | Concurrent randomized workloads (list-append, read-write registers); histories exported to Jepsen's Elle checker | G0, G1a–c, G-single, G2-item, phantoms |
-| Durability | Crash harness: kill the process at random points in the commit path, restart, check every acknowledged commit is present and no group is partially applied | Lost or torn commits |
+| Durability | Crash harness: kill the process at random points in the commit path, restart, check every acknowledged commit is present and no group is partially applied. The same workload on LazyFS, dropping unsynced writes after each kill, simulates power loss | Lost or torn commits, missing syncs |
+| Space | Soak: sustained updates with GC, asserting `disk_space_bytes` levels off | Unbounded disk growth |
 | Upper layers (later) | A deterministic in-memory `Storage` implementation behind the same trait, for `madsim`/`turmoil` simulation | Bugs above storage, replayable from a seed |
 
 The isolation tests also run in negative form: under REPEATABLE READ, the checker should *find* write skew (G2-item). That proves the harness can detect anomalies.
@@ -302,7 +303,7 @@ Roughly 14–15 weeks for one experienced engineer.
 - **Write amplification.** Our MVCC versions sit on top of fjall's own LSM versioning. That's acceptable for small workloads; GC keeps it bounded.
 - **Memory.** Write buffers and read sets live in memory. The write-set cap bounds the first. Large `get_many` read sets may need coalescing into ranges.
 - **READ COMMITTED deviation.** Aborting instead of re-checking may surprise Postgres users until pessimistic locks exist.
-- **fjall durability.** Correctness depends on calling `persist(SyncAll)` and on fjall's own fsync discipline for new files. The crash harness is the check.
+- **fjall durability.** Correctness depends on calling `persist(SyncAll)` and on fjall's own fsync discipline for new files. The crash harness and the LazyFS power-loss tests (F4) are the check.
 
 ### Open questions
 

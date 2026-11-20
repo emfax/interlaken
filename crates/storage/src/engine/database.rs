@@ -12,6 +12,15 @@ use super::stored::encode_stored;
 use crate::encoding::versioned_key;
 use crate::{Durability, Error, Result, Timestamp};
 
+/// Default cap on fjall's journals: fjall's own default, 512 MiB.
+pub(crate) const DEFAULT_MAX_JOURNAL_BYTES: u64 = 512 * 1024 * 1024;
+/// Smallest journal cap fjall accepts, 64 MiB.
+pub(crate) const MIN_MAX_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+/// Default memtable size per keyspace: fjall's own default, 64 MiB.
+pub(crate) const DEFAULT_MEMTABLE_BYTES: u64 = 64 * 1024 * 1024;
+/// Smallest memtable size the engine configures, 1 MiB.
+pub(crate) const MIN_MEMTABLE_BYTES: u64 = 1024 * 1024;
+
 /// Name of the versioned keyspace holding rows, index entries and the catalog.
 const DATA_KEYSPACE: &str = "data";
 /// Name of the unversioned keyspace holding engine state.
@@ -55,9 +64,34 @@ impl Engine {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let db = Database::builder(path.as_ref()).open()?;
-        let data = db.keyspace(DATA_KEYSPACE, KeyspaceCreateOptions::default)?;
-        let meta = db.keyspace(META_KEYSPACE, KeyspaceCreateOptions::default)?;
+        Self::open_with(path, DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES)
+    }
+
+    /// Open or create a database with explicit journal and memtable limits.
+    ///
+    /// `max_journal_bytes` caps the journals fjall keeps before it flushes
+    /// memtables so the oldest journal can be deleted (raised to at least
+    /// [`MIN_MAX_JOURNAL_BYTES`]). `memtable_bytes` is the size at which a
+    /// keyspace's memtable is flushed to a table (raised to at least
+    /// [`MIN_MEMTABLE_BYTES`]); fjall records it when a keyspace is created,
+    /// so it has no effect on an existing database. Smaller values shrink
+    /// the steady-state footprint at the cost of more flushes and compaction.
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::open`].
+    pub(crate) fn open_with(
+        path: impl AsRef<Path>,
+        max_journal_bytes: u64,
+        memtable_bytes: u64,
+    ) -> Result<Self> {
+        let memtable_bytes = memtable_bytes.max(MIN_MEMTABLE_BYTES);
+        let db = Database::builder(path.as_ref())
+            .max_journaling_size(max_journal_bytes.max(MIN_MAX_JOURNAL_BYTES))
+            .open()?;
+        let create = || KeyspaceCreateOptions::default().max_memtable_size(memtable_bytes);
+        let data = db.keyspace(DATA_KEYSPACE, create)?;
+        let meta = db.keyspace(META_KEYSPACE, create)?;
         let engine = Self { db, data, meta };
 
         match engine.meta.get(FORMAT_VERSION_KEY)? {
@@ -116,7 +150,11 @@ impl Engine {
     /// tombstone when the value is `None`), and `last_commit_ts` in `meta` is
     /// set to `last` in the same batch, so recovery never sees a partial group
     /// or a timestamp whose data is missing. Under [`Durability::Sync`] the
-    /// journal is synced with `SyncAll` before this returns.
+    /// journal is synced with `SyncAll` before this returns; under
+    /// [`Durability::Buffered`] it is flushed to OS buffers (`Buffer`), so the
+    /// group survives a process crash. Without a persist mode fjall leaves
+    /// the batch in its in-process journal buffer, where a crash loses it:
+    /// the F4 crash harness caught exactly that (ADR-0005).
     pub(crate) fn commit_group<'a>(
         &self,
         last: Timestamp,
@@ -124,10 +162,10 @@ impl Engine {
         durability: Durability,
     ) -> Result<()> {
         let mode = match durability {
-            Durability::Sync => Some(PersistMode::SyncAll),
-            Durability::Buffered => None,
+            Durability::Sync => PersistMode::SyncAll,
+            Durability::Buffered => PersistMode::Buffer,
         };
-        let mut batch = self.db.batch().durability(mode);
+        let mut batch = self.db.batch().durability(Some(mode));
         for (ts, key, value) in writes {
             batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
         }

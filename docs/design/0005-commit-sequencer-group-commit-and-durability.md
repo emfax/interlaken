@@ -21,7 +21,7 @@ Implemented
 
 ## Summary
 
-A single dedicated commit sequencer thread validates transactions, assigns `commit_ts`, and writes each group of transactions as one fjall write batch (plus the last-commit timestamp in `meta`). Durability is configurable: `Sync` (default) calls `persist(SyncAll)` once per group before acknowledging; `Buffered` acknowledges after writes reach OS buffers.
+A single dedicated commit sequencer thread validates transactions, assigns `commit_ts`, and writes each group of transactions as one fjall write batch (plus the last-commit timestamp in `meta`). Durability is configurable: `Sync` (default) calls `persist(SyncAll)` once per group before acknowledging; `Buffered` calls `persist(Buffer)`, acknowledging once writes reach OS buffers.
 
 ## Context
 
@@ -85,6 +85,12 @@ The sequencer becomes the leader's proposal path; an apply thread writes the sam
 ### Crash harness (M6)
 
 300 random `SIGKILL`s during `Sync` commits with GC running ([ADR-0009](0009-storage-correctness-testing-strategy.md)) lost no acknowledged commit and tore no group, and the commit clock always resumed after the last durable timestamp. Deliberately acknowledging before the group was written, or restarting the clock at zero, failed the harness at once. Power loss (unsynced data in OS buffers) is not simulated; verifying `persist(SyncAll)` needs a fault-injecting filesystem such as LazyFS, left as future work. The fsync stalls noted above were not re-checked on other hardware.
+
+### As implemented (F4): power loss and a `Buffered` fix
+
+- **`Buffered` lost commits on a process crash.** It passed no persist mode to fjall, and with none fjall leaves the batch in its in-process journal buffer, not the OS's. A `SIGKILL` lost acknowledged commits (the new `crash_recovery_loses_no_buffered_commits` failed in its second cycle). `Buffered` now uses `persist(Buffer)`, which writes the group to OS buffers before acknowledging, as this ADR always specified. That test is the regression test. `Sync` was unaffected.
+- **Power loss on LazyFS.** `tests/crash.rs` runs the same workload on a LazyFS mount and clears LazyFS's cache of unsynced writes after each kill. The child uses 1 MiB memtables there, so fjall flushes tables and rotates journals many times per cycle and power loss also strikes those paths. Results on the development machine (20 cycles each): `Sync` lost none of 119,467 acknowledged commits; `Buffered` lost 16,200 of 183,822, always a suffix of the commit order, never part of a transaction, and the database always reopened. Planting `Buffer` in place of `SyncAll` for `Sync` failed the `Sync` test in its first cycle. See [ADR-0009](0009-storage-correctness-testing-strategy.md) for the harness and `scripts/power-loss.sh` to rerun it.
+- **Commit stalls.** `scripts/commit-stalls.sh DIR` runs a raw fsync probe and the `Sync` rows of `commit_throughput` (which now report max latency as well as p50 and p99) on the disk holding `DIR`. A short check on the development NVMe disk: raw fsync p50 378 µs, p99 752 µs, max 1.9 ms over 300 probes; commit max latency 1.5–16 ms over 1 s runs. Re-measuring on the deployment hardware (`fsync-stalls-other-hardware`) still waits for that hardware to be known; it does not block the MVP.
 
 ## Open Questions
 

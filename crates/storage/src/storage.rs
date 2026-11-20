@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::commit::{CommitClock, CommitStats, Sequencer, SequencerConfig, SequencerStats};
+use crate::engine::{DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES};
 use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
 use crate::{Engine, Result, Timestamp, Txn, TxnOptions};
@@ -56,6 +57,18 @@ pub struct StorageOptions {
     /// Versions one GC chunk examines before yielding the storage thread.
     /// Defaults to 4,096.
     pub gc_chunk_versions: usize,
+    /// Most bytes of journal fjall keeps before flushing memtables so the
+    /// oldest journal can be deleted. Defaults to 512 MiB; values below
+    /// 64 MiB are raised to 64 MiB.
+    ///
+    /// Under sustained writes the journals dominate the on-disk footprint,
+    /// which saws between roughly the live data and this cap plus the
+    /// memtables (ADR-0008, *As implemented (F4)*).
+    pub max_journal_bytes: u64,
+    /// Size at which a keyspace's memtable is flushed to a table. Defaults
+    /// to 64 MiB; values below 1 MiB are raised to 1 MiB. Recorded when the
+    /// database is created; later opens keep the original size.
+    pub memtable_bytes: u64,
 }
 
 impl Default for StorageOptions {
@@ -72,6 +85,8 @@ impl Default for StorageOptions {
             max_transaction_age: Duration::from_secs(5 * 60),
             gc_interval: Some(Duration::from_secs(10)),
             gc_chunk_versions: 4096,
+            max_journal_bytes: DEFAULT_MAX_JOURNAL_BYTES,
+            memtable_bytes: DEFAULT_MEMTABLE_BYTES,
         }
     }
 }
@@ -165,7 +180,7 @@ impl FjallStorage {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn open(path: impl AsRef<Path>, options: StorageOptions) -> Result<Self> {
-        let engine = Engine::open(path)?;
+        let engine = Engine::open_with(path, options.max_journal_bytes, options.memtable_bytes)?;
         let last = engine.last_commit_ts()?;
         let clock = Arc::new(CommitClock::new(last));
         let pool = Arc::new(StoragePool::start(
