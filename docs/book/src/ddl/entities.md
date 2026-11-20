@@ -86,7 +86,7 @@ A membership needs two tables, which you create:
 - **The edges table** holds direct memberships, one row per (member, group) pair, such as `user_groups(member, grp)`. You write it like any table.
 - **The closure table** holds every (descendant, ancestor) pair connected by one or more edges, with the number of distinct paths between them, such as `user_group_closure(descendant, ancestor, paths)`. The engine writes it.
 
-`MembershipSpec` names both tables and their columns, in the order shown. Give the member and descendant columns the type of the member entity's key, the group and ancestor columns the type of the group entity's key, and `paths` the type `int8`. Give the closure table a primary key of (descendant, ancestor), as above. The engine checks that the columns exist but not yet their types, so a mismatch shows up only when memberships are written or tested.
+`MembershipSpec` names both tables and their columns, in the order shown. Give the member and descendant columns the type of the member entity's key, the group and ancestor columns the type of the group entity's key, and `paths` the type `int8`. Give the closure table a primary key of (descendant, ancestor), as above. A declaration whose columns don't exist or have other types fails with `42P16`, naming the column and the type it needs. Nullability doesn't matter.
 
 Policies test membership with `in`, as in `(in principal (entity Group 7))` or Cedar's `principal in Group::"7"`. That test becomes one indexed lookup in the closure table, however deep the hierarchy.
 

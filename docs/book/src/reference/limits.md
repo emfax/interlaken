@@ -21,7 +21,6 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 - **Constraints:** primary keys, unique indexes and NOT NULL only. There are no foreign keys, check constraints or sequences.
 - **Views:** none.
 - **Types tables can't hold:** records, entity references and arrays of arrays (`42P16`). Arrays and `jsonb` can't be key columns, and float columns are never used as index keys.
-- **Membership tables:** the engine checks that a membership's columns exist, not their types, so a mismatch shows up only when memberships are written or tested (see [Entities and memberships](../ddl/entities.md)).
 
 ### The IR text language
 

@@ -378,7 +378,12 @@ impl Session {
                         // Reloading checks the changed declarations fit
                         // together; it must see this statement's writes.
                         txn.next_statement();
-                        catalog::load_catalog(txn).await?;
+                        catalog::load_catalog(txn).await.map_err(|e| match e {
+                            // The declarations don't fit together: the
+                            // definition is at fault, not the engine.
+                            EngineError::Catalog(reason) => EngineError::InvalidDefinition(reason),
+                            other => other,
+                        })?;
                     }
                     Ok(value)
                 };

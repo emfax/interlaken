@@ -7,6 +7,7 @@ use super::defs::{FunctionDef, FunctionProperties, TableDef};
 use super::entities::{EntityDef, MembershipDef};
 use super::lookup::Catalog;
 use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
+use crate::{DataType, ScalarType};
 
 /// A definition that conflicts with the catalog's contents.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -313,8 +314,46 @@ impl InMemoryCatalog {
         self.check_columns(&name, membership.edges, &[m, g])?;
         let (d, a, p) = membership.closure_columns;
         self.check_columns(&name, membership.closure, &[d, a, p])?;
+        let member_key = self.entity_key_type(&membership.member);
+        let group_key = self.entity_key_type(&membership.group);
+        let int8 = DataType::Scalar(ScalarType::Int8);
+        for (table, column, expected, role) in [
+            (membership.edges, m, &member_key, "member"),
+            (membership.edges, g, &group_key, "group"),
+            (membership.closure, d, &member_key, "descendant"),
+            (membership.closure, a, &group_key, "ancestor"),
+            (membership.closure, p, &int8, "path count"),
+        ] {
+            let def = &self.tables[&table];
+            let col = def.column_by_id(column).expect("checked above");
+            if &col.ty.data != expected {
+                return Err(CatalogError::InvalidEntity {
+                    name,
+                    reason: format!(
+                        "the {role} column {}.{} has type {}, but must have type {expected}",
+                        def.name, col.name, col.ty.data
+                    ),
+                });
+            }
+        }
         self.memberships.insert(key, Arc::new(membership));
         Ok(())
+    }
+
+    /// Return the data type of the key column of declared entity type `name`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` isn't declared or its key column is missing, which
+    /// [`InMemoryCatalog::add_entity`] rules out.
+    fn entity_key_type(&self, name: &Ident) -> DataType {
+        let entity = &self.entities[name];
+        self.tables[&entity.table]
+            .column_by_id(entity.key)
+            .expect("entity key column checked when declared")
+            .ty
+            .data
+            .clone()
     }
 }
 

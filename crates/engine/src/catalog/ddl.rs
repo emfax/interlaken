@@ -332,7 +332,11 @@ pub async fn drop_entity(txn: &Txn, name: &str) -> Result<(), EngineError> {
 ///
 /// Returns [`EngineError::InvalidDefinition`] if it is already declared,
 /// or storage's error if a table or column doesn't exist. Reloading the
-/// catalog afterwards rejects undeclared entity types.
+/// catalog afterwards rejects, with [`EngineError::InvalidDefinition`],
+/// undeclared entity types and columns whose types don't match: member
+/// and descendant columns must have the member entity's key type, group
+/// and ancestor columns the group entity's key type, and the path count
+/// `int8`.
 pub async fn declare_membership(txn: &Txn, spec: &MembershipSpec) -> Result<(), EngineError> {
     let edges = user_table(txn, &spec.edges).await?;
     let closure = user_table(txn, &spec.closure).await?;

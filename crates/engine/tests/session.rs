@@ -337,6 +337,50 @@ async fn declarations_are_checked() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Group"), "{err}");
+    assert_eq!(err.sqlstate(), "42P16");
+    // Column types must match the entity keys (int8 here) and paths must be int8.
+    root.create_table(&table(
+        "text_edges",
+        &[("a", "(not-null text)"), ("b", "(not-null int8)")],
+        &["a", "b"],
+    ))
+    .await
+    .unwrap();
+    root.create_table(&table(
+        "int4_closure",
+        &[
+            ("a", "(not-null int8)"),
+            ("b", "(not-null int8)"),
+            ("paths", "(not-null int4)"),
+        ],
+        &["a", "b"],
+    ))
+    .await
+    .unwrap();
+    let err = root
+        .declare_membership(&MembershipSpec {
+            edges: "text_edges".into(),
+            ..membership("Doc")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), "42P16");
+    assert!(
+        err.to_string()
+            .contains("member column text_edges.a has type text, but must have type int8"),
+        "{err}"
+    );
+    let err = root
+        .declare_membership(&MembershipSpec {
+            closure: "int4_closure".into(),
+            ..membership("Doc")
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), "42P16");
+    assert!(err.to_string().contains("path count column"), "{err}");
+    root.drop_table("text_edges").await.unwrap();
+    root.drop_table("int4_closure").await.unwrap();
     let version = root
         .prepare("(plan (get edges))")
         .await
