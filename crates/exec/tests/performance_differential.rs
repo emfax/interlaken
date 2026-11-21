@@ -42,16 +42,16 @@ use proptest::test_runner::{Config, TestRunner};
 /// The IR catalog matching the stored tables.
 const CATALOG: &str = "(catalog (builtins)
   (table a :id 100
-    (column id (not-null int8)) (column k int8) (column g int4) (column n int8)
-    (column f float8) (column s text) (column b bool)
+    (column id int8) (column k (option int8)) (column g (option int4)) (column n (option int8))
+    (column f (option float8)) (column s (option text)) (column b (option bool))
     (primary-key id))
   (table b :id 101
-    (column id (not-null int8)) (column x int8) (column u int8) (column label text)
+    (column id int8) (column x (option int8)) (column u (option int8)) (column label (option text))
     (primary-key id)
     (index b_x x)
     (index b_u u :unique true))
   (table c :id 102
-    (column p (not-null int8)) (column q (not-null int8)) (column v int4)
+    (column p int8) (column q int8) (column v (option int4))
     (primary-key p q)))";
 
 /// A deterministic generator (xorshift64*), seeded per case.

@@ -90,7 +90,7 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
              plans pinned to an older version are rejected."
         }
         "engine_columns" => {
-            "The IR type, as type text (for example `(not-null int8)`), of each column created \
+            "The IR type, as type text (for example `int8` or `(option text)`), of each column created \
              through the engine; a column without a row, such as the catalog tables' own, has \
              its storage type's IR namesake."
         }

@@ -23,9 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .create_table(&TableSpec {
                 name: "notes".into(),
                 columns: vec![
-                    ColumnSpec::new("id", parse_type("(not-null int8)")?),
-                    ColumnSpec::new("body", parse_type("(not-null text)")?),
-                    ColumnSpec::new("pinned", parse_type("bool")?),
+                    ColumnSpec::new("id", parse_type("int8")?),
+                    ColumnSpec::new("body", parse_type("text")?),
+                    ColumnSpec::new("pinned", parse_type("(option bool)")?),
                 ],
                 primary_key: vec!["id".into()],
             })
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Parameters are passed separately from the text, as `(param N TYPE)`.
         let result = session
             .query(
-                "(plan (sort (filter (get notes :as n) (>= n.id (param 1 int8)))
+                "(plan (sort (filter (get notes :as n) (>= n.id (param 1 (option int8))))
                          (asc n.id)))",
                 vec![Datum::Int8(2)],
             )
@@ -91,7 +91,7 @@ An `Engine` is cheap to clone, and its clones share everything. Open a database 
 
 ## Tables
 
-`Session::create_table` takes a `TableSpec`: a name, columns with their IR types, and a primary key, which every table needs. A type is written in the [IR text form](../ir/types.md), so `(not-null int8)` is a non-NULL 64-bit integer and `text` a text column that allows NULL. Primary key columns are NOT NULL whether or not their type says so. See [Tables and column types](../ddl/tables.md) for the types a table can hold, and for adding columns, dropping tables and indexes.
+`Session::create_table` takes a `TableSpec`: a name, columns with their IR types, and a primary key, which every table needs. A type is written in the [IR text form](../ir/types.md), so `int8` is a 64-bit integer that is never NULL and `(option bool)` a boolean that may be NULL. Primary key columns never hold NULL, whatever their type says. See [Tables and column types](../ddl/tables.md) for the types a table can hold, and for adding columns, dropping tables and indexes.
 
 ## Statements
 

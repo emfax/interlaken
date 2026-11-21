@@ -9,7 +9,7 @@ use interlaken_ir::{ColumnId, TableId};
 /// A table with every index form.
 const CATALOG: &str = "(catalog (builtins)
   (table t :id 100
-    (column id (not-null int8)) (column a int4) (column b text)
+    (column id int8) (column a (option int4)) (column b (option text))
     (primary-key id)
     (index t_a a)
     (index t_ba (desc b) (asc a :nulls first))
@@ -49,7 +49,7 @@ fn malformed_indexes_are_rejected() {
         ("(index t_x (up a))", "expected asc or desc"),
     ] {
         let catalog = format!(
-            "(catalog (table t :id 100 (column id (not-null int8)) (column a int4) (column b text) (primary-key id) {text}))"
+            "(catalog (table t :id 100 (column id int8) (column a (option int4)) (column b (option text)) (primary-key id) {text}))"
         );
         let err = parse_catalog(&catalog)
             .err()

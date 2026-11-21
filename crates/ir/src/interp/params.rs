@@ -27,7 +27,7 @@ pub enum ParamError {
         /// The value passed, as `Debug` text.
         value: String,
     },
-    /// NULL was passed for a parameter declared NOT NULL.
+    /// NULL was passed for a parameter whose type isn't optional.
     Null {
         /// The 1-based parameter number.
         index: u32,
@@ -78,7 +78,7 @@ impl std::error::Error for ParamError {}
 /// use interlaken_ir::interp::declared_params;
 /// use interlaken_ir::text::parse_plan as parse;
 ///
-/// let plan = parse("(plan (filter (get t) (= x (param 2 int8))))")?;
+/// let plan = parse("(plan (filter (get t) (= x (param 2 (option int8)))))")?;
 /// let declared = declared_params(&plan.root);
 /// assert_eq!(declared.keys().copied().collect::<Vec<_>>(), [2]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -134,7 +134,7 @@ fn collect_expr(expr: &Expr, out: &mut BTreeMap<u32, Type>) {
 /// use interlaken_ir::interp::{Datum, ParamError, check_params, declared_params};
 /// use interlaken_ir::text::parse_plan as parse;
 ///
-/// let plan = parse("(plan (filter (get t) (= x (param 1 (not-null int8)))))")?;
+/// let plan = parse("(plan (filter (get t) (= x (param 1 int8))))")?;
 /// let declared = declared_params(&plan.root);
 /// assert!(check_params(&declared, &[Datum::Int8(7)]).is_ok());
 /// assert!(matches!(check_params(&declared, &[Datum::Null]), Err(ParamError::Null { .. })));
@@ -154,7 +154,7 @@ pub fn check_params(declared: &BTreeMap<u32, Type>, values: &[Datum]) -> Result<
     }
     for (&index, ty) in declared {
         let value = &values[usize::try_from(index).unwrap_or(usize::MAX) - 1];
-        if value.is_null() && !ty.nullable {
+        if value.is_null() && !ty.optional {
             return Err(ParamError::Null {
                 index,
                 expected: ty.clone(),
@@ -175,7 +175,7 @@ pub fn check_params(declared: &BTreeMap<u32, Type>, values: &[Datum]) -> Result<
 fn conforms(value: &Datum, ty: &Type) -> bool {
     use ScalarType as S;
     match (value, &ty.data) {
-        (Datum::Null, _) => ty.nullable,
+        (Datum::Null, _) => ty.optional,
         (Datum::Bool(_), DataType::Scalar(S::Bool))
         | (Datum::Int2(_), DataType::Scalar(S::Int2))
         | (Datum::Int4(_), DataType::Scalar(S::Int4))
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn collects_parameters_everywhere() {
         let found = declared(
-            "(plan (project (filter (get t :as a) (exists (filter (get u :as b) (= b.x (param 3 text)))))
-               (+ a.x (param 1 int8))))",
+            "(plan (project (filter (get t :as a) (exists (filter (get u :as b) (= b.x (param 3 (option text))))))
+               (+ a.x (param 1 (option int8)))))",
         );
         assert_eq!(found.keys().copied().collect::<Vec<_>>(), [1, 3]);
         assert!(declared("(plan (get t))").is_empty());
@@ -222,7 +222,7 @@ mod tests {
     /// Assert the count must match the highest declared number exactly.
     #[test]
     fn counts_must_match() {
-        let found = declared("(plan (filter (get t) (= x (param 2 int8))))");
+        let found = declared("(plan (filter (get t) (= x (param 2 (option int8)))))");
         // Parameter 1 isn't used, so any value fills its place.
         assert!(check_params(&found, &[Datum::Text("unused".into()), Datum::Int8(1)]).is_ok());
         assert_eq!(
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn values_must_conform() {
         let found = declared(
-            "(plan (filter (get t) (and (= x (param 1 int8)) (= y (param 2 (array (not-null text)))))))",
+            "(plan (filter (get t) (and (= x (param 1 (option int8))) (= y (param 2 (option (array text)))))))",
         );
         let tags = |items: Vec<Datum>| Datum::Array(items);
         assert!(
@@ -257,18 +257,18 @@ mod tests {
         let err = check_params(&found, &[Datum::Int4(1), Datum::Null]).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "parameter 1 is declared int8, but the value supplied is Int4(1)"
+            "parameter 1 is declared (option int8), but the value supplied is Int4(1)"
         );
         assert!(matches!(
             check_params(&found, &[Datum::Int8(1), tags(vec![Datum::Null])]),
             Err(ParamError::Type { index: 2, .. })
         ));
-        let strict = declared("(plan (filter (get t) (= x (param 1 (not-null int8)))))");
+        let strict = declared("(plan (filter (get t) (= x (param 1 int8))))");
         assert_eq!(
             check_params(&strict, &[Datum::Null])
                 .unwrap_err()
                 .to_string(),
-            "parameter 1 is declared (not-null int8), but NULL was supplied"
+            "parameter 1 is declared int8, but NULL was supplied"
         );
     }
 }

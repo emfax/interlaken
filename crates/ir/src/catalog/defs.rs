@@ -10,7 +10,7 @@ pub struct ColumnDef {
     pub id: ColumnId,
     /// The column name.
     pub name: Ident,
-    /// The column type, including nullability.
+    /// The column type: optional if the column may hold NULL.
     pub ty: Type,
 }
 
@@ -85,8 +85,8 @@ impl TableDef {
     /// use interlaken_ir::{DataType, ScalarType, TableId};
     ///
     /// let users = TableDef::new(TableId::new(100), "users")
-    ///     .column("id", DataType::from(ScalarType::Int8).not_null())
-    ///     .column("name", DataType::from(ScalarType::Text).nullable())
+    ///     .column("id", DataType::from(ScalarType::Int8).plain())
+    ///     .column("name", DataType::from(ScalarType::Text).option())
     ///     .primary_key(["id"]);
     /// assert_eq!(users.column_by_name("name").unwrap().id.get(), 1);
     /// ```

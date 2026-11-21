@@ -1,6 +1,6 @@
 # Types
 
-Every expression in a resolved plan has a type, and every type says whether the value may be NULL.
+Every expression in a resolved plan has a type, and every type says whether the value may be NULL: a type is either plain, and never NULL, or optional.
 
 ## Scalar types
 
@@ -20,33 +20,37 @@ Every expression in a resolved plan has a type, and every type says whether the 
 
 `null` is a NULL of no particular type; its type comes from its context (see below).
 
-## Nullability
+## Optional types
 
-In the type syntax, a type name alone is nullable. `(not-null T)` excludes NULL:
+A type name alone is plain: an `int8` is always an integer, never NULL. `(option T)` is the type whose values are those of `T` or NULL:
 
 ```ir,parse
-(param 1 (not-null int8))
+(param 1 (option int8))
 ```
 
-The resolver works out each expression's nullability:
-- A column reference is nullable if the column is.
-- Most operators return NULL if any operand is NULL, so they are nullable if any operand is.
-- Some expressions are never NULL whatever their operands: `is-null`, `is-distinct-from`, `count` and `exists`.
-- An outer join's nullable side makes its columns nullable.
+Options don't nest: `(option (option int8))` is rejected.
 
-Columns declared `(not-null ...)` reject NULLs when written, with `23502`. A table's primary key columns are always NOT NULL.
+The resolver works out which expressions are optional:
+- A column reference is optional if the column's type is.
+- Most operators return NULL if any operand is NULL, so they are optional if any operand is.
+- Some expressions are never NULL whatever their operands: `is-null`, `is-distinct-from`, `count` and `exists`.
+- An outer join pads its unmatched side with NULLs, so that side's columns become optional.
+
+Columns of plain type reject NULLs when written, with `23502`. A table's primary key columns never hold NULL, whatever their declared type.
+
+NULL itself still behaves as in SQL: comparisons with NULL are NULL, and `and`, `or` and `not` use three-valued logic (see [Expressions](expressions.md)). [ADR-0034](../reference/design-records.md) plans to replace this with two-valued logic and explicit operations on options; the types above are its first step.
 
 ## Composite types
 
 | Type | Syntax | Notes |
 | --- | --- | --- |
-| array | `(array T)` | Elements of type `T`. `(array text)` allows NULL elements; `(array (not-null text))` doesn't. Literal: `(array 1 2 3)`. |
+| array | `(array T)` | Elements of type `T`. `(array (option text))` allows NULL elements; `(array text)` doesn't. Literal: `(array 1 2 3)`. |
 | record | `(record (NAME T)...)` | Named fields. `nest` produces arrays of records; there is no record literal. |
 | entity | `(entity NAME)` | A reference to an entity of type `NAME`, used by policies. |
 
 Arrays, records and entities can't be compared, so they can't be sorted, grouped on, used with `distinct`, or combined by `union`, `intersect` or `except` (except `union :all true`).
 
-**Known limitation.** An array literal's element type records whether any element is NULL. `(array "a" "b")` has type `(array (not-null text))`, and array types convert only to themselves. So that literal can't be written to an `(array text)` column, and `(array "a" null)` can't be written to an `(array (not-null text))` column. Declare array columns with the element nullability your data has. Until conversions between element nullabilities exist (backlog `array-element-nullability`), a non-null literal can't be stored in a column that also holds arrays with NULL elements.
+An array literal's type says whether any element is NULL: `(array "a" "b")` has type `(array text)`, and `(array "a" null)` has type `(array (option text))`. Arrays with plain elements convert implicitly to arrays with optional ones (see below), so both literals can be written to an `(array (option text))` column. The reverse isn't allowed: `(array "a" null)` can't be written to an `(array text)` column.
 
 ## Implicit conversions
 
@@ -54,7 +58,10 @@ Operators need operands of the same type. Where operand types differ, the resolv
 
 - `int2` to `int4` to `int8`;
 - any integer to `float8`;
-- `date` to `timestamptz`.
+- `date` to `timestamptz`;
+- plain to optional inside arrays and records: `(array text)` to `(array (option text))`, and a record whose fields are plain to one whose fields are optional. Values don't change, so this conversion costs nothing at run time.
+
+A plain value is always acceptable where an optional one is expected, with no conversion at all.
 
 Each conversion becomes an explicit `cast` in the resolved plan.
 
@@ -83,7 +90,7 @@ There is no implicit conversion between unrelated types. `(= "a" 1)` fails with 
 | `date` | `timestamptz` | Midnight UTC. |
 | `timestamptz` | `date` | The UTC date. |
 
-Arrays, records and entities cast only to themselves.
+Arrays, records and entities cast only to themselves, and to the types their implicit conversions reach.
 
 Text is parsed after trimming spaces:
 

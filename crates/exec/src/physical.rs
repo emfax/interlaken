@@ -609,7 +609,7 @@ impl Planner<'_> {
                 field(
                     &format!("c{}_{}", b.get(), c.get()),
                     &Type {
-                        nullable: true,
+                        optional: true,
                         ..ty.clone()
                     },
                 )

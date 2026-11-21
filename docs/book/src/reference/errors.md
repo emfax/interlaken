@@ -11,14 +11,14 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `0A000` | `feature_not_supported` | The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it. |
 | `21000` | `cardinality_violation` | A scalar subquery returned more than one row. |
 | `22003` | `numeric_value_out_of_range` | Arithmetic overflowed, or a value does not fit its target type. |
-| `22004` | `null_value_not_allowed` | An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter declared NOT NULL. |
+| `22004` | `null_value_not_allowed` | An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter whose type isn't optional. |
 | `22011` | `substring_error` | `substr` was called with a negative length. |
 | `22012` | `division_by_zero` | Division or modulo by zero. |
 | `2201W` | `invalid_row_count_in_limit_clause` | A `LIMIT` is negative. |
 | `2201X` | `invalid_row_count_in_result_offset_clause` | An `OFFSET` is negative. |
 | `22025` | `invalid_escape_sequence` | A `LIKE` pattern ends with an escape character. |
 | `22P02` | `invalid_text_representation` | Text cast to another type is not a valid value of it. |
-| `23502` | `not_null_violation` | A NULL was written to a NOT NULL column. |
+| `23502` | `not_null_violation` | A NULL was written to a NOT NULL column: one whose type isn't optional. |
 | `23505` | `unique_violation` | A row duplicates another's primary key or unique index key. |
 | `23514` | `check_violation` | A membership edge written by DML would make its hierarchy cyclic. |
 | `25001` | `active_sql_transaction` | `begin` was called with a transaction already open. |

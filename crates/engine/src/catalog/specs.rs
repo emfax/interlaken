@@ -7,7 +7,7 @@ use interlaken_ir::Type;
 pub struct ColumnSpec {
     /// The column name, unique within its table.
     pub name: String,
-    /// The IR type, including nullability. Primary key columns become NOT NULL.
+    /// The IR type: `(option T)` if the column may hold NULL. Primary key columns never do.
     pub ty: Type,
 }
 

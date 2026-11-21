@@ -17,7 +17,7 @@ Inserts one row per input row. The input is any relation: `values` for literal r
 
 - **Column mapping:** `(columns ...)` names the target columns the input's columns fill, in order, and the counts must match. `(columns)` with no names means every column of the table, in table order.
 - **Defaults:** columns not named are NULL. There are no column defaults yet.
-- **Required columns:** an insert that omits a NOT NULL column fails with `42000` before it runs.
+- **Required columns:** an insert that omits a column of plain type fails with `42000` before it runs.
 - **Conversions:** the input's columns are converted to the target columns' types by [assignment conversions](types.md#assignment-conversions), so an `int4` value fills an `int8` column, and a number fills a `text` column as text.
 
 ## update
@@ -36,7 +36,7 @@ Changes the target rows the input reads. The input must read the target table ex
 
 - **What assignments see:** each `(set COLUMN EXPR)` assigns one column, and is evaluated over the input row. So `d.title` is the old value, and columns of joined tables are available. Unassigned columns keep their values.
 - **Duplicate matches:** an update changes each target row at most once. If several input rows match the same target row, as with a join to several matches, the first one is used.
-- **NULL into NOT NULL:** assigning a literal `null` to a NOT NULL column fails with `42000` before the statement runs. A NULL computed at run time fails with `23502`.
+- **NULL into a plain column:** assigning a literal `null` to a column of plain type fails with `42000` before the statement runs. A NULL computed at run time fails with `23502`.
 - **Errors in the input:** if the input doesn't read the target table, or reads it more than once, the plan fails with `42000`.
 
 ## delete
@@ -88,7 +88,7 @@ Every row written is checked against the table's constraints:
 | --- | --- |
 | primary key | `23505` |
 | unique index | `23505` |
-| NOT NULL column | `23502` |
+| column of plain type | `23502` |
 | membership hierarchy without cycles | `23514` |
 
 The checks see the statement's earlier writes. Shifting every key of a table by one, as in `(set id (+ u.id 1))`, can therefore collide with a row the statement hasn't moved yet, and fail with `23505`, as it can in Postgres.

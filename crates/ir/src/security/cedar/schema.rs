@@ -33,7 +33,7 @@ fn entity_declaration(catalog: &dyn Catalog, entity: &EntityDef) -> Result<Strin
                 None => continue,
             },
         };
-        let optional = if column.ty.nullable { "?" } else { "" };
+        let optional = if column.ty.optional { "?" } else { "" };
         attributes.push(format!("{:?}{optional}: {ty}", attribute.name.as_str()));
     }
     let groups: Vec<String> = catalog
@@ -56,7 +56,7 @@ fn entity_declaration(catalog: &dyn Catalog, entity: &EntityDef) -> Result<Strin
 /// Generate the Cedar schema (in Cedar's schema syntax) for the catalog's entity types.
 ///
 /// Each entity type becomes a Cedar entity type: columns become attributes
-/// (nullable columns optional, references typed by the referenced entity),
+/// (optional columns optional attributes, references typed by the referenced entity),
 /// memberships become parent types. The actions `read`, `insert`, `update`
 /// and `delete` apply to every entity type as principal and resource, with
 /// the standard context fields and `app`, the application record whose

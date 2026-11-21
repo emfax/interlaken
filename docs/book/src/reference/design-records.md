@@ -33,7 +33,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0013 | IR forms, formats, resolver and verifier | implemented |
 | 0014 | Rule-based optimizer for the MVP | implemented |
 | 0021 | IR correctness and security testing strategy | implemented |
-| 0034 | Two-valued logic with an explicit option type | accepted: designed, not built |
+| 0034 | Two-valued logic with an explicit option type | accepted: the option type is built; two-valued logic is not |
 
 ## Security
 

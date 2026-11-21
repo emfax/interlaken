@@ -106,9 +106,9 @@ impl Ty {
 
 /// The catalog: one table with a nullable column of every type.
 fn catalog() -> InMemoryCatalog {
-    let mut text = String::from("(catalog (builtins) (table t :id 100 (column id (not-null int8))");
+    let mut text = String::from("(catalog (builtins) (table t :id 100 (column id int8)");
     for ty in TYPES {
-        write!(text, " (column {} {})", ty.column(), ty.name()).unwrap();
+        write!(text, " (column {} (option {}))", ty.column(), ty.name()).unwrap();
     }
     text.push_str(" (primary-key id)))");
     parse_catalog(&text).unwrap()
@@ -659,7 +659,7 @@ fn kernels_agree_with_interpreter() {
 /// Compile `text`, an expression over `t(id, a int4, s text)`, and evaluate it on `rows`.
 fn run(text: &str, rows: &[(Option<i32>, Option<&str>)]) -> Result<Vec<Datum>, ExecError> {
     let catalog = parse_catalog(
-        "(catalog (builtins) (table t :id 100 (column id (not-null int8)) (column a int4) (column s text) (primary-key id)))",
+        "(catalog (builtins) (table t :id 100 (column id int8) (column a (option int4)) (column s (option text)) (primary-key id)))",
     )
     .unwrap();
     let plan = resolve(

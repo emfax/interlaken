@@ -24,9 +24,9 @@
     (as (cast |a.b| timestamptz) c_timestamptz)
     (as (cast |a.b| uuid) c_uuid)
     (as (cast |a.b| jsonb) c_jsonb)
-    (as (param 1 (not-null (array (not-null text)))) tags)
-    (as (param 2 (record (id (not-null int8)) (label text))) rec)
-    (as (param 3 (entity User)) principal)
+    (as (param 1 (array text)) tags)
+    (as (param 2 (option (record (id int8) (label (option text))))) rec)
+    (as (param 3 (option (entity User))) principal)
     (as
       (case
         (when (is-null |true|) "none")

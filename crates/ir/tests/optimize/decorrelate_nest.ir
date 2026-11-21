@@ -23,9 +23,5 @@
       (= #5.0 #1.0))
     (as #1.1 name)
     (as
-      (coalesce #5.1
-        (cast
-          (array)
-          (array
-            (not-null (record (title (not-null text)) (likes (not-null int4)))))))
+      (coalesce #5.1 (cast (array) (array (record (title text) (likes int4)))))
       posts)))

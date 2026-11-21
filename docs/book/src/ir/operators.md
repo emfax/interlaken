@@ -65,9 +65,9 @@ Combines the rows of two inputs where `CONDITION` is true. The condition can ref
 | Kind | Output rows | Output columns |
 | --- | --- | --- |
 | `inner` | each matching pair | left's, then right's |
-| `left` | each matching pair, plus each left row with no match, padded with NULLs | left's, then right's, now nullable |
-| `right` | each matching pair, plus each right row with no match | left's, now nullable, then right's |
-| `full` | each matching pair, plus unmatched rows of both sides | both sides', all nullable |
+| `left` | each matching pair, plus each left row with no match, padded with NULLs | left's, then right's, now optional |
+| `right` | each matching pair, plus each right row with no match | left's, now optional, then right's |
+| `full` | each matching pair, plus unmatched rows of both sides | both sides', all optional |
 | `semi` | each left row with at least one match, once | left's only |
 | `anti` | each left row with no match | left's only |
 
@@ -155,7 +155,7 @@ Orders the rows by each key in turn. By default NULLs sort last in ascending ord
 Skips the first `:offset` rows, then returns at most `:count`. Both are `int8` expressions that can't refer to columns: write literals or parameters. A NULL count means no limit. A negative count fails with `2201W`, and a negative offset with `2201X`. Without a `sort` beneath it, which rows a `limit` returns is unspecified.
 
 ```ir
-(plan (limit (sort (get users :as u) (asc u.id)) :count 10 :offset (param 1 int8)))
+(plan (limit (sort (get users :as u) (asc u.id)) :count 10 :offset (param 1 (option int8))))
 ```
 
 ## union, intersect and except
@@ -199,7 +199,7 @@ Groups the input by the keys, as `aggregate` does, and collects each group's row
 (plan (nest (get docs :as d) (keys d.folder) (fields d.id d.title) :as items))
 ```
 
-The output has columns `folder` and `items`, of type `(not-null (array (not-null (record (id (not-null int8)) (title text)))))`. The order of elements within an array is unspecified.
+The output has columns `folder` and `items`, of type `(array (record (id int8) (title (option text))))`. The order of elements within an array is unspecified.
 
 ## unnest
 

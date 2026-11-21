@@ -26,7 +26,7 @@ const ROWS: i64 = 5000;
 fn ir_catalog() -> Arc<dyn Catalog> {
     let catalog: InMemoryCatalog = parse_catalog(
         "(catalog (builtins)
-           (table t :id 100 (column id (not-null int8)) (column a int4) (column b text) (column r int8)
+           (table t :id 100 (column id int8) (column a (option int4)) (column b (option text)) (column r (option int8))
              (primary-key id) (index t_a a) (index t_r r :unique true)))",
     )
     .unwrap();
@@ -127,7 +127,7 @@ fn blocking_operators_yield_to_the_runtime() {
         let txn = storage.begin(TxnOptions::default()).await.unwrap();
         let values = Datum::Array((0..200_000).map(Datum::Int8).collect());
         // A sort's output is in memory, in many batches, so whatever consumes it never waits.
-        let source = "(sort (unnest (values (columns d) (row 0)) (param 1 (array int8)) (columns x)) (desc x))";
+        let source = "(sort (unnest (values (columns d) (row 0)) (param 1 (option (array (option int8)))) (columns x)) (desc x))";
         for text in [
             format!("(plan (aggregate {source} (keys) (aggs (agg count) (agg sum x))))"),
             format!("(plan (sort {source} (asc x)))"),

@@ -18,10 +18,10 @@ Every table is stored in primary key order. A secondary index stores the table's
 # session.create_table(&TableSpec {
 #     name: "docs".into(),
 #     columns: vec![
-#         ColumnSpec::new("id", parse_type("(not-null int8)")?),
-#         ColumnSpec::new("owner", parse_type("int8")?),
-#         ColumnSpec::new("updated", parse_type("timestamptz")?),
-#         ColumnSpec::new("slug", parse_type("text")?),
+#         ColumnSpec::new("id", parse_type("int8")?),
+#         ColumnSpec::new("owner", parse_type("(option int8)")?),
+#         ColumnSpec::new("updated", parse_type("(option timestamptz)")?),
+#         ColumnSpec::new("slug", parse_type("(option text)")?),
 #     ],
 #     primary_key: vec!["id".into()],
 # }).await?;

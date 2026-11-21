@@ -436,12 +436,12 @@ pub(crate) fn data_type(ty: &DataType) -> Sexp {
     }
 }
 
-/// Convert a type: the data type when nullable, `(not-null T)` otherwise.
+/// Convert a type: the data type when plain, `(option T)` otherwise.
 pub(crate) fn ty(ty: &Type) -> Sexp {
-    if ty.nullable {
-        data_type(&ty.data)
+    if ty.optional {
+        form("option", [data_type(&ty.data)])
     } else {
-        form("not-null", [data_type(&ty.data)])
+        data_type(&ty.data)
     }
 }
 

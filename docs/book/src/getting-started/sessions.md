@@ -20,8 +20,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = TableSpec {
         name: "counters".into(),
         columns: vec![
-            ColumnSpec::new("name", parse_type("(not-null text)")?),
-            ColumnSpec::new("value", parse_type("(not-null int8)")?),
+            ColumnSpec::new("name", parse_type("text")?),
+            ColumnSpec::new("value", parse_type("int8")?),
         ],
         primary_key: vec!["name".into()],
     };

@@ -18,7 +18,7 @@ fn ir_catalog() -> Arc<InMemoryCatalog> {
     Arc::new(
         parse_catalog(
             "(catalog (builtins)
-               (table t :id 100 (column id (not-null int8)) (column a int4) (column b text) (primary-key id)
+               (table t :id 100 (column id int8) (column a (option int4)) (column b (option text)) (primary-key id)
                  (index t_a a)
                  (index t_b b :unique true)))",
         )
@@ -327,7 +327,10 @@ async fn dml_returning_and_access_paths() {
     // A NULL key value matches nothing, and a parameter can supply a key.
     let p = physical("(plan (filter (get t) (= a (cast null int4))))", &catalog);
     assert!(rows(&txn.execute(&p, Vec::new()).await.unwrap()).is_empty());
-    let p = physical("(plan (filter (get t) (= id (param 1 int8))))", &catalog);
+    let p = physical(
+        "(plan (filter (get t) (= id (param 1 (option int8)))))",
+        &catalog,
+    );
     assert!(matches!(access(&p), Access::Primary(_)));
     let got = rows(&txn.execute(&p, vec![Datum::Int8(12)]).await.unwrap());
     assert_eq!(

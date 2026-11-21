@@ -102,7 +102,7 @@ impl Fixture {
                             c.name.as_str(),
                             stored_type(&c.ty.data).expect("storable column"),
                         );
-                        if c.ty.nullable {
+                        if c.ty.optional {
                             column
                         } else {
                             column.not_null()

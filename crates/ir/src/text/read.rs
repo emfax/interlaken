@@ -627,15 +627,24 @@ pub(crate) fn data_type(sexp: &Sexp) -> Result<DataType> {
     Ok(data)
 }
 
-/// Read a type: a data type (nullable) or `(not-null T)`.
+/// Read a type: a data type (plain) or `(option T)`.
 pub(crate) fn ty(sexp: &Sexp) -> Result<Type> {
-    if head_of(sexp) == Some("not-null") {
-        let mut form = Form::open(sexp)?;
-        let data = data_type(form.next("the type")?)?;
-        form.finish()?;
-        Ok(data.not_null())
-    } else {
-        data_type(sexp).map(DataType::nullable)
+    match head_of(sexp) {
+        Some("option") => {
+            let mut form = Form::open(sexp)?;
+            let inner = form.next("the type")?;
+            if head_of(inner) == Some("option") {
+                return Err(error(inner, "options don't nest"));
+            }
+            let data = data_type(inner)?;
+            form.finish()?;
+            Ok(data.option())
+        }
+        Some("not-null") => Err(error(
+            sexp,
+            "types are plain unless written (option T); write the type without not-null",
+        )),
+        _ => data_type(sexp).map(DataType::plain),
     }
 }
 

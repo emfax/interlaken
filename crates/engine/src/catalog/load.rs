@@ -68,7 +68,7 @@ pub async fn load_catalog(txn: &Txn) -> Result<InMemoryCatalog, EngineError> {
             let ty = ir_types.remove(&(id, column_id)).map_or_else(
                 || derived_type(column.ty, column.nullable),
                 |ty| Type {
-                    nullable: column.nullable,
+                    optional: column.nullable,
                     ..ty
                 },
             );

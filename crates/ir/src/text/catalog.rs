@@ -315,7 +315,7 @@ fn membership(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<MembershipDef> {
 ///
 /// let catalog = parse_catalog(
 ///     "(catalog :schema-version 2 (builtins)
-///        (table users :id 100 (column id (not-null int8)) (primary-key id)))",
+///        (table users :id 100 (column id int8) (primary-key id)))",
 /// )?;
 /// assert_eq!(catalog.schema_version().get(), 2);
 /// assert!(catalog.table_by_name(&"users".into()).is_some());

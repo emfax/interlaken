@@ -32,7 +32,7 @@ fn joined(
     nullable_right: bool,
 ) -> Scope {
     let pad = |mut c: ScopeColumn, nullable: bool| {
-        c.ty.nullable |= nullable;
+        c.ty.optional |= nullable;
         c
     };
     let mut columns: Vec<ScopeColumn> = left
@@ -78,7 +78,7 @@ fn wrap(mut input: Rel, mut scope: Scope, lowered: Vec<Lowered>) -> (Rel, Scope)
                 .columns
                 .extend(inner_scope.columns.into_iter().map(|mut c| {
                     c.hidden = true;
-                    c.ty.nullable |= nullable;
+                    c.ty.optional |= nullable;
                     c
                 }));
         }
@@ -633,7 +633,7 @@ impl Resolver<'_> {
                     .columns
                     .iter()
                     .zip(&right_scope.columns)
-                    .map(|(l, r)| l.ty.nullable || r.ty.nullable)
+                    .map(|(l, r)| l.ty.optional || r.ty.optional)
                     .collect();
                 let (left, _) = self.cast_columns(left, left_scope, &types, Mode::Implicit)?;
                 let (right, _) = self.cast_columns(right, right_scope, &types, Mode::Implicit)?;
@@ -642,7 +642,7 @@ impl Resolver<'_> {
                     types
                         .into_iter()
                         .zip(nullable)
-                        .map(|(t, n)| t.nullable().with_nullable(n)),
+                        .map(|(t, n)| t.option().with_optional(n)),
                 );
                 let out = Scope::derived(new, *binding, columns)?;
                 (
@@ -732,8 +732,7 @@ impl Resolver<'_> {
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let array =
-                    DataType::Array(Box::new(DataType::Record(record).not_null())).not_null();
+                let array = DataType::Array(Box::new(DataType::Record(record).plain())).plain();
                 let new = self.fresh()?;
                 let columns = keys
                     .iter()
@@ -779,7 +778,7 @@ impl Resolver<'_> {
                             (
                                 f.name.clone(),
                                 f.ty.clone()
-                                    .with_nullable(f.ty.nullable || element.nullable),
+                                    .with_optional(f.ty.optional || element.optional),
                             )
                         })
                         .collect(),
@@ -849,10 +848,10 @@ impl Resolver<'_> {
                 if let Some(missing) = table
                     .columns
                     .iter()
-                    .find(|c| !c.ty.nullable && !seen.contains(&c.id))
+                    .find(|c| !c.ty.optional && !seen.contains(&c.id))
                 {
                     return Err(ResolveError::Invalid(format!(
-                        "insert omits NOT NULL column {}",
+                        "insert omits column {}, whose type isn't optional",
                         missing.name
                     )));
                 }
@@ -902,9 +901,9 @@ impl Resolver<'_> {
                         )));
                     }
                     let typed = self.expr(&assignment.value, &mut cx)?;
-                    if typed.ty.is_none() && !def.ty.nullable {
+                    if typed.ty.is_none() && !def.ty.optional {
                         return Err(ResolveError::Invalid(format!(
-                            "cannot assign NULL to NOT NULL column {}",
+                            "cannot assign NULL to column {}, whose type isn't optional",
                             def.name
                         )));
                     }

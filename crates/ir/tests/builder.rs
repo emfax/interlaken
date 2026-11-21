@@ -35,7 +35,7 @@ fn assert_matches_golden(name: &str, built: Plan) {
 
 /// Construct a scalar type with the given nullability.
 fn scalar_type(s: ScalarType, nullable: bool) -> Type {
-    DataType::from(s).nullable().with_nullable(nullable)
+    DataType::from(s).option().with_optional(nullable)
 }
 
 #[test]
@@ -256,13 +256,13 @@ fn literals_and_types() {
         (ab(), ScalarType::Jsonb),
     ]
     .map(|(e, s)| e.cast(s).alias(format!("c_{}", s.name())));
-    let tags = DataType::Array(Box::new(scalar_type(ScalarType::Text, false))).not_null();
+    let tags = DataType::Array(Box::new(scalar_type(ScalarType::Text, false))).plain();
     let rec = DataType::Record(vec![
         Field::new("id", scalar_type(ScalarType::Int8, false)),
         Field::new("label", scalar_type(ScalarType::Text, true)),
     ])
-    .nullable();
-    let principal = DataType::Entity(Ident::new("User")).nullable();
+    .option();
+    let principal = DataType::Entity(Ident::new("User")).option();
     let mut items: Vec<NamedExpr> = casts.into();
     items.extend([
         param(1, tags).alias("tags"),

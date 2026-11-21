@@ -3,7 +3,7 @@
 //! The residual's errors must behave as in the sublanguage, where reading
 //! an absent attribute fails the whole condition (and `Try` turns that into
 //! `false`), not as SQL NULLs, which propagate differently through `AND`
-//! and `OR`. So nullable attributes are read through `assert_present`,
+//! and `OR`. So optional attributes are read through `assert_present`,
 //! which raises on NULL, and the IR's `Try` contains the error. Attribute
 //! paths through foreign keys become scalar subqueries on the referenced
 //! entity's table, hierarchy tests become `EXISTS` on the closure table
@@ -47,8 +47,8 @@ struct Lowered {
     expr: Expr,
     /// What it holds.
     kind: Kind,
-    /// For arrays: whether it may be NULL (an absent attribute).
-    nullable: bool,
+    /// For arrays: whether it may be absent (an absent attribute).
+    optional: bool,
 }
 
 impl Lowered {
@@ -57,7 +57,7 @@ impl Lowered {
         Self {
             expr,
             kind,
-            nullable: false,
+            optional: false,
         }
     }
 }
@@ -291,7 +291,7 @@ impl Lowerer<'_> {
             .column_by_id(def.column)
             .ok_or_else(|| SecurityError::Undeclared(format!("the column of attribute {attr}")))?;
         let expr = column_expr.expect("set above");
-        let maybe_null = column.ty.nullable || !matches!(base, SecExpr::Resource);
+        let maybe_null = column.ty.optional || !matches!(base, SecExpr::Resource);
         if has {
             let test = if maybe_null {
                 Expr::Unary {
@@ -310,7 +310,7 @@ impl Lowerer<'_> {
             Kind::Set(_) => Lowered {
                 expr,
                 kind,
-                nullable: maybe_null,
+                optional: maybe_null,
             },
             kind if maybe_null => Lowered::new(present(expr), kind),
             kind => Lowered::new(expr, kind),
@@ -462,7 +462,7 @@ impl Lowerer<'_> {
                     }),
                 };
                 let found = guarded(value_guard, found);
-                if set.nullable {
+                if set.optional {
                     // An absent set attribute is an error, like any absent attribute.
                     let is_present = Expr::NullIf {
                         left: Box::new(Expr::Unary {

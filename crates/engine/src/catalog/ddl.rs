@@ -119,7 +119,7 @@ pub async fn create_table(txn: &Txn, spec: &TableSpec) -> Result<(), EngineError
         .iter()
         .map(|c| {
             let column = ColumnDef::new(c.name.clone(), stored_type(&c.name, &c.ty)?);
-            Ok(if c.ty.nullable {
+            Ok(if c.ty.optional {
                 column
             } else {
                 column.not_null()
@@ -188,7 +188,7 @@ pub async fn add_column(txn: &Txn, table: &str, column: &ColumnSpec) -> Result<(
     let def = user_table(txn, table).await?;
     let mut stored_column =
         ColumnDef::new(column.name.clone(), stored_type(&column.name, &column.ty)?);
-    stored_column.nullable = column.ty.nullable;
+    stored_column.nullable = column.ty.optional;
     let def = catalog::add_column(txn, def.name(), stored_column).await?;
     insert_column_type(txn, def.id().get(), def.columns().len() - 1, column).await?;
     bump_schema_version(txn).await?;
@@ -407,7 +407,7 @@ pub async fn set_function_leakproof(
     let def = builtins.function_by_name(name, args).ok_or_else(|| {
         let args: Vec<String> = args
             .iter()
-            .map(|a| print_type(&a.clone().nullable()))
+            .map(|a| print_type(&a.clone().option()))
             .collect();
         invalid(format!(
             "function {name}({}) does not exist",

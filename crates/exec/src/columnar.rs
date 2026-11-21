@@ -48,7 +48,7 @@ pub fn arrow_type(ty: &DataType) -> ArrowType {
 /// Return the Arrow field for an IR type.
 #[must_use]
 pub fn field(name: &str, ty: &Type) -> Field {
-    Field::new(name, arrow_type(&ty.data), ty.nullable)
+    Field::new(name, arrow_type(&ty.data), ty.optional)
 }
 
 /// Return the Arrow field for a list element or record field: always

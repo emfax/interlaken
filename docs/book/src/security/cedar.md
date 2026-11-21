@@ -24,7 +24,7 @@ Policies are validated in Cedar's strict mode against a schema the engine genera
   - Its type follows its column: `bool` is `Bool`, the integers are `Long`, `text` is `String`, and arrays of those are `Set`s.
   - A reference attribute has the referenced entity type, so `resource.owner` is a `User`.
   - Columns of other types (`float8`, `date`, `timestamptz`, `uuid`, `bytea`, `jsonb`) aren't visible to Cedar.
-- **Optional attributes:** a nullable column is an optional attribute, which a policy must test with `has` before reading. Strict validation rejects `resource.owner == principal` on a nullable `owner`; write `resource has owner && resource.owner == principal`.
+- **Optional attributes:** a column of optional type is an optional attribute, which a policy must test with `has` before reading. Strict validation rejects `resource.owner == principal` on an optional `owner`; write `resource has owner && resource.owner == principal`.
 - **Actions:** `Action::"read"`, `Action::"insert"`, `Action::"update"` and `Action::"delete"` apply to every entity type, as principal and as resource.
 - **Context:** `context` has `time` (`Long`), `ip`, `auth_method` and `session_id` (`String`), and `app`, whose record type comes from the [policy settings](proposals.md#policy-settings).
 

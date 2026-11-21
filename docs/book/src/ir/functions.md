@@ -9,7 +9,7 @@ Scalar functions are called with `call`, and aggregates appear in an `aggregate`
 
 Each entry below lists the function's signatures and properties:
 
-- **Signatures** use the type names of the IR text format. `T` stands for each of the listed types in turn, at every position it appears. A return type without `(not-null ...)` may be NULL.
+- **Signatures** use the type names of the IR text format. `T` stands for each of the listed types in turn, at every position it appears. Only an `(option ...)` return type may be NULL.
 - **Immutable** functions return the same result for the same arguments, always, so the optimizer may evaluate them once. **Stable** functions return the same result throughout a statement. **Volatile** functions may return a different result on every call.
 - **Strict** functions return NULL when any argument is NULL, without being called. Strict aggregates skip rows whose argument is NULL.
 - **Leakproof** functions reveal nothing about their arguments through errors or side effects, so the optimizer may evaluate them below a policy filter, on rows the principal can't see. No built-in function is leakproof yet; each needs an audit first (ADR-0011). Comparisons, `NOT`, `IS [NOT] NULL` and `IS [NOT] DISTINCT FROM` are leakproof operators.
@@ -23,7 +23,7 @@ This reference is generated from the engine's function catalog (`builtin_functio
 
 immutable · strict · not leakproof
 
-- `abs(T) → T` for T: `float8`, `int2`, `int4`, `int8`
+- `abs(T) → (option T)` for T: `(option float8)`, `(option int2)`, `(option int4)`, `(option int8)`
 
 The absolute value; the minimum integer of its type overflows (`22003`).
 
@@ -31,7 +31,7 @@ The absolute value; the minimum integer of its type overflows (`22003`).
 
 immutable · not leakproof
 
-- `assert_present(T) → (not-null T)` for T: any type
+- `assert_present(T) → T` for T: any type
 
 Its argument, or an error (`22004`) if it is NULL. Security lowering uses it for entity attributes a policy reads that may be absent.
 
@@ -39,7 +39,7 @@ Its argument, or an error (`22004`) if it is NULL. Security lowering uses it for
 
 volatile · not leakproof
 
-- `gen_random_uuid() → (not-null uuid)`
+- `gen_random_uuid() → uuid`
 
 A random version 4 UUID, from the same generator as `random`.
 
@@ -47,7 +47,7 @@ A random version 4 UUID, from the same generator as `random`.
 
 immutable · strict · not leakproof
 
-- `length(text) → int4`
+- `length((option text)) → (option int4)`
 
 The number of characters (not bytes) in the text.
 
@@ -55,7 +55,7 @@ The number of characters (not bytes) in the text.
 
 immutable · strict · not leakproof
 
-- `lower(text) → text`
+- `lower((option text)) → (option text)`
 
 The text with every character converted to lower case.
 
@@ -63,7 +63,7 @@ The text with every character converted to lower case.
 
 immutable · strict · not leakproof
 
-- `mask_last4(text) → text`
+- `mask_last4((option text)) → (option text)`
 
 A column mask: every character but the last four replaced by `*`; text of four characters or fewer is unchanged.
 
@@ -71,7 +71,7 @@ A column mask: every character but the last four replaced by `*`; text of four c
 
 stable · not leakproof
 
-- `now() → (not-null timestamptz)`
+- `now() → timestamptz`
 
 The time the current transaction started; the same for every call in it.
 
@@ -79,7 +79,7 @@ The time the current transaction started; the same for every call in it.
 
 volatile · not leakproof
 
-- `policy_mask(bool, T, T) → T` for T: any type
+- `policy_mask((option bool), T, T) → (option T)` for T: any type
 
 `policy_mask(visible, value, masked)`: `value` where `visible` is true, else `masked`. Security lowering uses it for masked columns; it is volatile so the optimizer never moves the condition, and `EXPLAIN` hides it.
 
@@ -87,7 +87,7 @@ volatile · not leakproof
 
 volatile · not leakproof
 
-- `random() → (not-null float8)`
+- `random() → float8`
 
 A pseudo-random value in [0, 1), from a generator seeded when the transaction starts.
 
@@ -95,7 +95,7 @@ A pseudo-random value in [0, 1), from a generator seeded when the transaction st
 
 immutable · strict · not leakproof
 
-- `redact(text) → text`
+- `redact((option text)) → (option text)`
 
 A column mask: always `****`.
 
@@ -103,7 +103,7 @@ A column mask: always `****`.
 
 immutable · strict · not leakproof
 
-- `substr(text, int4, int4) → text`
+- `substr((option text), (option int4), (option int4)) → (option text)`
 
 `substr(t, start, count)`: the characters of `t` from 1-based position `start` for `count` characters; positions before the first character count towards `count`, and a negative `count` is an error (`22011`).
 
@@ -111,7 +111,7 @@ immutable · strict · not leakproof
 
 immutable · strict · not leakproof
 
-- `upper(text) → text`
+- `upper((option text)) → (option text)`
 
 The text with every character converted to upper case.
 
@@ -121,7 +121,7 @@ The text with every character converted to upper case.
 
 immutable · strict · not leakproof
 
-- `avg(T) → float8` for T: `float8`, `int2`, `int4`, `int8`
+- `avg(T) → (option float8)` for T: `(option float8)`, `(option int2)`, `(option int4)`, `(option int8)`
 
 The mean of the non-NULL values as `float8`, or NULL if there are none.
 
@@ -129,7 +129,7 @@ The mean of the non-NULL values as `float8`, or NULL if there are none.
 
 immutable · strict · not leakproof
 
-- `bool_and(bool) → bool`
+- `bool_and((option bool)) → (option bool)`
 
 True if every non-NULL value is true; NULL if there are none.
 
@@ -137,14 +137,14 @@ True if every non-NULL value is true; NULL if there are none.
 
 immutable · strict · not leakproof
 
-- `bool_or(bool) → bool`
+- `bool_or((option bool)) → (option bool)`
 
 True if any non-NULL value is true; NULL if there are none.
 
 ### `count`
 
-- `count() → (not-null int8)` (immutable · not leakproof)
-- `count(T) → (not-null int8)` for T: any type (immutable · strict · not leakproof)
+- `count() → int8` (immutable · not leakproof)
+- `count(T) → int8` for T: any type (immutable · strict · not leakproof)
 
 With no argument (`count(*)`), the number of rows; with one, the number of rows whose argument is not NULL.
 
@@ -152,7 +152,7 @@ With no argument (`count(*)`), the number of rows; with one, the number of rows 
 
 immutable · strict · not leakproof
 
-- `max(T) → T` for T: `bool`, `bytea`, `date`, `float8`, `int2`, `int4`, `int8`, `text`, `timestamptz`, `uuid`
+- `max(T) → (option T)` for T: `(option bool)`, `(option bytea)`, `(option date)`, `(option float8)`, `(option int2)`, `(option int4)`, `(option int8)`, `(option text)`, `(option timestamptz)`, `(option uuid)`
 
 The largest non-NULL value, or NULL if there are none.
 
@@ -160,7 +160,7 @@ The largest non-NULL value, or NULL if there are none.
 
 immutable · strict · not leakproof
 
-- `min(T) → T` for T: `bool`, `bytea`, `date`, `float8`, `int2`, `int4`, `int8`, `text`, `timestamptz`, `uuid`
+- `min(T) → (option T)` for T: `(option bool)`, `(option bytea)`, `(option date)`, `(option float8)`, `(option int2)`, `(option int4)`, `(option int8)`, `(option text)`, `(option timestamptz)`, `(option uuid)`
 
 The smallest non-NULL value, or NULL if there are none.
 
@@ -168,10 +168,10 @@ The smallest non-NULL value, or NULL if there are none.
 
 immutable · strict · not leakproof
 
-- `sum(int2) → int8`
-- `sum(int4) → int8`
-- `sum(int8) → int8`
-- `sum(float8) → float8`
+- `sum((option int2)) → (option int8)`
+- `sum((option int4)) → (option int8)`
+- `sum((option int8)) → (option int8)`
+- `sum((option float8)) → (option float8)`
 
 The sum of the non-NULL values, or NULL if there are none. Integer sums are exact and return `int8`, failing with `22003` if the total does not fit.
 

@@ -74,7 +74,7 @@ fn check_section(chapter: &str, name: &str, content: &str) {
 
 /// Return a function argument type's text form, without nullability.
 fn arg(ty: &DataType) -> String {
-    print_type(&ty.clone().nullable())
+    print_type(&ty.clone().option())
 }
 
 /// Return the scalar type at a signature position: an argument, or the
@@ -94,10 +94,10 @@ fn signature(f: &FunctionDef, generic: &[usize]) -> String {
     };
     let args: Vec<String> = (0..f.args.len()).map(show).collect();
     let returns = if generic.contains(&f.args.len()) {
-        if f.returns.nullable {
-            "T".to_owned()
+        if f.returns.optional {
+            "(option T)".to_owned()
         } else {
-            "(not-null T)".to_owned()
+            "T".to_owned()
         }
     } else {
         print_type(&f.returns)
@@ -123,7 +123,7 @@ fn overloads(group: &[&FunctionDef]) -> Vec<String> {
     };
     let same_return_nullability = group
         .iter()
-        .all(|f| f.returns.nullable == first.returns.nullable);
+        .all(|f| f.returns.optional == first.returns.optional);
     let types: Option<Vec<ScalarType>> = group.iter().map(|f| generic_type(f)).collect();
     match types {
         Some(types) if group.len() > 1 && !varying.is_empty() && same_return_nullability => {
@@ -547,50 +547,38 @@ type ExampleTable = (
 const EXAMPLE_TABLES: &[ExampleTable] = &[
     (
         "users",
-        &[
-            ("id", "(not-null int8)"),
-            ("name", "(not-null text)"),
-            ("dept", "text"),
-        ],
+        &[("id", "int8"), ("name", "text"), ("dept", "(option text)")],
         &["id"],
     ),
     (
         "folders",
-        &[
-            ("id", "(not-null int8)"),
-            ("name", "(not-null text)"),
-            ("owner", "int8"),
-        ],
+        &[("id", "int8"), ("name", "text"), ("owner", "(option int8)")],
         &["id"],
     ),
     (
         "docs",
         &[
-            ("id", "(not-null int8)"),
-            ("folder", "int8"),
-            ("title", "text"),
-            ("owner", "int8"),
-            ("updated", "timestamptz"),
-            ("tags", "(array text)"),
+            ("id", "int8"),
+            ("folder", "(option int8)"),
+            ("title", "(option text)"),
+            ("owner", "(option int8)"),
+            ("updated", "(option timestamptz)"),
+            ("tags", "(option (array (option text)))"),
         ],
         &["id"],
     ),
-    (
-        "groups",
-        &[("id", "(not-null int8)"), ("name", "(not-null text)")],
-        &["id"],
-    ),
+    ("groups", &[("id", "int8"), ("name", "text")], &["id"]),
     (
         "user_groups",
-        &[("member", "(not-null int8)"), ("grp", "(not-null int8)")],
+        &[("member", "int8"), ("grp", "int8")],
         &["member", "grp"],
     ),
     (
         "user_group_closure",
         &[
-            ("descendant", "(not-null int8)"),
-            ("ancestor", "(not-null int8)"),
-            ("paths", "(not-null int8)"),
+            ("descendant", "int8"),
+            ("ancestor", "int8"),
+            ("paths", "int8"),
         ],
         &["descendant", "ancestor"],
     ),

@@ -67,7 +67,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
     };
     let scalar = FunctionKind::Scalar;
     let aggregate = FunctionKind::Aggregate;
-    let text = || s(S::Text).nullable();
+    let text = || s(S::Text).option();
 
     add("lower", scalar, vec![s(S::Text)], text(), pure(true, false));
     add("upper", scalar, vec![s(S::Text)], text(), pure(true, false));
@@ -75,7 +75,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
         "length",
         scalar,
         vec![s(S::Text)],
-        s(S::Int4).nullable(),
+        s(S::Int4).option(),
         pure(true, false),
     );
     add(
@@ -86,20 +86,14 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
         pure(true, false),
     );
     for t in [S::Int2, S::Int4, S::Int8, S::Float8] {
-        add(
-            "abs",
-            scalar,
-            vec![s(t)],
-            s(t).nullable(),
-            pure(true, false),
-        );
+        add("abs", scalar, vec![s(t)], s(t).option(), pure(true, false));
     }
     let stable = FunctionProperties {
         volatility: Volatility::Stable,
         deterministic: false,
         ..pure(false, false)
     };
-    add("now", scalar, vec![], s(S::Timestamptz).not_null(), stable);
+    add("now", scalar, vec![], s(S::Timestamptz).plain(), stable);
     let volatile = FunctionProperties {
         volatility: Volatility::Volatile,
         deterministic: false,
@@ -109,18 +103,18 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
         "random",
         scalar,
         vec![],
-        s(S::Float8).not_null(),
+        s(S::Float8).plain(),
         volatile.clone(),
     );
     add(
         "gen_random_uuid",
         scalar,
         vec![],
-        s(S::Uuid).not_null(),
+        s(S::Uuid).plain(),
         volatile,
     );
 
-    let count = s(S::Int8).not_null();
+    let count = s(S::Int8).plain();
     add(
         "count",
         aggregate,
@@ -142,7 +136,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             "sum",
             aggregate,
             vec![s(t)],
-            s(S::Int8).nullable(),
+            s(S::Int8).option(),
             pure(true, false),
         );
     }
@@ -150,7 +144,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
         "sum",
         aggregate,
         vec![s(S::Float8)],
-        s(S::Float8).nullable(),
+        s(S::Float8).option(),
         pure(true, false),
     );
     for t in [S::Int2, S::Int4, S::Int8, S::Float8] {
@@ -158,7 +152,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             "avg",
             aggregate,
             vec![s(t)],
-            s(S::Float8).nullable(),
+            s(S::Float8).option(),
             pure(true, false),
         );
     }
@@ -171,7 +165,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
                 name,
                 aggregate,
                 vec![s(t)],
-                s(t).nullable(),
+                s(t).option(),
                 pure(true, false),
             );
         }
@@ -181,7 +175,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             name,
             aggregate,
             vec![s(S::Bool)],
-            s(S::Bool).nullable(),
+            s(S::Bool).option(),
             pure(true, false),
         );
     }
@@ -191,7 +185,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             "assert_present",
             scalar,
             vec![s(t)],
-            s(t).not_null(),
+            s(t).plain(),
             pure(false, false),
         );
     }
@@ -220,7 +214,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             "policy_mask",
             scalar,
             vec![s(S::Bool), s(t), s(t)],
-            s(t).nullable(),
+            s(t).option(),
             mask.clone(),
         );
     }

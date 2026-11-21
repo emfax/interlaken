@@ -16,8 +16,8 @@
 # session.create_table(&TableSpec {
 #     name: "docs".into(),
 #     columns: vec![
-#         ColumnSpec::new("id", parse_type("(not-null int8)")?),
-#         ColumnSpec::new("title", parse_type("text")?),
+#         ColumnSpec::new("id", parse_type("int8")?),
+#         ColumnSpec::new("title", parse_type("(option text)")?),
 #     ],
 #     primary_key: vec!["id".into()],
 # }).await?;

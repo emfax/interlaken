@@ -140,14 +140,14 @@ async fn load(engine: &Engine, name: &str, count: i64, row: impl Fn(i64) -> Vec<
 async fn build(engine: &Engine, n: i64) {
     let mut admin = engine.session(SecurityContext::new(admin()));
     let t_columns = [
-        ("id", "int8"),
-        ("k", "int8"),
-        ("g", "int8"),
-        ("r", "int8"),
-        ("a", "int4"),
-        ("f", "float8"),
-        ("s", "text"),
-        ("b", "bool"),
+        ("id", "(option int8)"),
+        ("k", "(option int8)"),
+        ("g", "(option int8)"),
+        ("r", "(option int8)"),
+        ("a", "(option int4)"),
+        ("f", "(option float8)"),
+        ("s", "(option text)"),
+        ("b", "(option bool)"),
     ];
     admin.create_table(&table("t", &t_columns)).await.unwrap();
     admin.create_table(&table("t2", &t_columns)).await.unwrap();
@@ -163,26 +163,36 @@ async fn build(engine: &Engine, n: i64) {
     admin
         .create_table(&table(
             "dim",
-            &[("id", "int8"), ("name", "text"), ("region", "int4")],
+            &[
+                ("id", "(option int8)"),
+                ("name", "(option text)"),
+                ("region", "(option int4)"),
+            ],
         ))
         .await
         .unwrap();
     admin
-        .create_table(&table("small", &[("id", "int8"), ("v", "int8")]))
+        .create_table(&table(
+            "small",
+            &[("id", "(option int8)"), ("v", "(option int8)")],
+        ))
         .await
         .unwrap();
     admin
-        .create_table(&table("users", &[("id", "int8"), ("name", "text")]))
+        .create_table(&table(
+            "users",
+            &[("id", "(option int8)"), ("name", "(option text)")],
+        ))
         .await
         .unwrap();
     admin
         .create_table(&table(
             "docs",
             &[
-                ("id", "int8"),
-                ("owner_id", "(not-null int8)"),
-                ("title", "text"),
-                ("secret", "int8"),
+                ("id", "(option int8)"),
+                ("owner_id", "int8"),
+                ("title", "(option text)"),
+                ("secret", "(option int8)"),
             ],
         ))
         .await

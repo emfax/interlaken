@@ -44,7 +44,7 @@ pub struct Resolved {
 /// let mut catalog = InMemoryCatalog::new(SchemaVersion::new(3));
 /// catalog.add_table(
 ///     TableDef::new(TableId::new(100), "users")
-///         .column("age", DataType::from(ScalarType::Int4).nullable()),
+///         .column("age", DataType::from(ScalarType::Int4).option()),
 /// )?;
 /// let plan = parse_plan("(plan (filter (get users :as u) (> u.age 18)))")?;
 /// let resolved = resolve(&plan, &catalog)?;

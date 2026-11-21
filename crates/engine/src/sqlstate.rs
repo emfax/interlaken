@@ -51,7 +51,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "22004",
         "null_value_not_allowed",
-        "An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter declared NOT NULL.",
+        "An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter whose type isn't optional.",
     ),
     state(
         "22011",
@@ -82,7 +82,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "23502",
         "not_null_violation",
-        "A NULL was written to a NOT NULL column.",
+        "A NULL was written to a NOT NULL column: one whose type isn't optional.",
     ),
     state(
         "23505",

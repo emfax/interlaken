@@ -19,7 +19,7 @@ use interlaken_storage::{Durability, FjallStorage, Storage, StorageOptions, TxnO
 fn ir_catalog() -> InMemoryCatalog {
     parse_catalog(
         "(catalog (builtins)
-           (table t :id 100 (column id (not-null int8)) (column a int4) (column b text) (primary-key id)))",
+           (table t :id 100 (column id int8) (column a (option int4)) (column b (option text)) (primary-key id)))",
     )
     .unwrap()
 }
@@ -99,7 +99,7 @@ fn arrow_round_trip() {
         ),
         ("uuid", vec![Datum::Uuid([7; 16]), Datum::Null]),
         (
-            "(array int4)",
+            "(array (option int4))",
             vec![
                 Datum::Array(vec![Datum::Int4(1), Datum::Null]),
                 Datum::Array(vec![]),
@@ -107,7 +107,7 @@ fn arrow_round_trip() {
             ],
         ),
         (
-            "(array (not-null (record (title (not-null text)) (likes int4))))",
+            "(array (record (title text) (likes (option int4))))",
             vec![
                 Datum::Array(vec![
                     Datum::Record(vec![Datum::Text("a".into()), Datum::Int4(1)]),
@@ -320,9 +320,9 @@ async fn nest_and_unnest_edge_cases() {
     );
     for text in [
         // A NULL record element reads as NULL in every field.
-        "(plan (unnest (values (columns x) (row 1) (row 2)) (array (cast null (record (a int4) (b text)))) (columns a b)))",
+        "(plan (unnest (values (columns x) (row 1) (row 2)) (array (cast null (record (a (option int4)) (b (option text))))) (columns a b)))",
         // NULL and empty arrays produce no rows; NULL elements do.
-        "(plan (unnest (get t) (case (when (= a 1) (cast null (array int4))) (when (= a 2) (cast (array) (array int4))) (else (array a (cast null int4)))) (columns v)))",
+        "(plan (unnest (get t) (case (when (= a 1) (cast null (array (option int4)))) (when (= a 2) (cast (array) (array (option int4)))) (else (array a (cast null int4)))) (columns v)))",
         // A sort below orders each list; nesting without keys over no rows gives one empty list.
         "(plan (nest (sort (get t) (desc id)) (keys) (fields id b) :as all))",
         "(plan (nest (filter (get t) (> a 100)) (keys) (fields id) :as none))",

@@ -40,7 +40,7 @@ const STREAMING_SLACK: u64 = 64 * 1024 * 1024;
 fn ir_catalog() -> Arc<dyn Catalog> {
     let catalog: InMemoryCatalog = parse_catalog(
         "(catalog (builtins)
-           (table t :id 100 (column id (not-null int8)) (column k int8) (column a int4) (column b text)
+           (table t :id 100 (column id int8) (column k (option int8)) (column a (option int4)) (column b (option text))
              (primary-key id)))",
     )
     .unwrap();

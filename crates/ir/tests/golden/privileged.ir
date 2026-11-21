@@ -4,6 +4,6 @@
     (write-check
       (policy-filter
         (get documents :as d)
-        (or (= d.owner_id (param 1 (not-null int8))) (= d.public true)))
-      (= d.owner_id (param 1 (not-null int8))))
-    (set title (param 2 text))))
+        (or (= d.owner_id (param 1 int8)) (= d.public true)))
+      (= d.owner_id (param 1 int8)))
+    (set title (param 2 (option text)))))

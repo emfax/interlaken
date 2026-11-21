@@ -46,7 +46,7 @@ async fn governed(engine: &Engine) -> Session {
     let mut root = session(engine, admin());
     root.create_table(&table(
         "users",
-        &[("id", "(not-null int8)"), ("dept", "text")],
+        &[("id", "int8"), ("dept", "(option text)")],
         &["id"],
     ))
     .await
@@ -54,10 +54,10 @@ async fn governed(engine: &Engine) -> Session {
     root.create_table(&table(
         "docs",
         &[
-            ("id", "(not-null int8)"),
-            ("owner_id", "(not-null int8)"),
-            ("title", "text"),
-            ("secret", "int8"),
+            ("id", "int8"),
+            ("owner_id", "int8"),
+            ("title", "(option text)"),
+            ("secret", "(option int8)"),
         ],
         &["id"],
     ))
@@ -145,12 +145,12 @@ async fn every_column_type_survives_restart() {
         root.create_table(&table(
             "events",
             &[
-                ("id", "(not-null uuid)"),
-                ("day", "date"),
-                ("at", "timestamptz"),
-                ("body", "jsonb"),
-                ("tags", "(array (not-null text))"),
-                ("score", "float8"),
+                ("id", "uuid"),
+                ("day", "(option date)"),
+                ("at", "(option timestamptz)"),
+                ("body", "(option jsonb)"),
+                ("tags", "(option (array text))"),
+                ("score", "(option float8)"),
             ],
             &["id"],
         ))
@@ -167,9 +167,9 @@ async fn every_column_type_survives_restart() {
         let insert = "(plan (insert events
             (values (columns id day at body tags score)
               (row (uuid \"07070707-0707-0707-0707-070707070707\") (date \"2024-01-02\")
-                   (timestamptz \"2024-01-02T03:04:05Z\") (param 1 jsonb) (array \"x\" \"y\") 1.5)
+                   (timestamptz \"2024-01-02T03:04:05Z\") (param 1 (option jsonb)) (array \"x\" \"y\") 1.5)
               (row (uuid \"01010101-0101-0101-0101-010101010101\") (date \"2023-12-31\")
-                   null null (cast (array) (array (not-null text))) null))
+                   null null (cast (array) (array text)) null))
             (columns id day at body tags score)))";
         root.query(insert, vec![Datum::Jsonb(r#"{"a": [1, 2]}"#.into())])
             .await
@@ -186,16 +186,54 @@ async fn every_column_type_survives_restart() {
     let events = catalog.table_by_name(&"events".into()).unwrap();
     assert_eq!(
         events.column_by_name("tags").unwrap().ty,
-        ty("(array (not-null text))")
+        ty("(option (array text))")
     );
-    assert_eq!(
-        events.column_by_name("id").unwrap().ty,
-        ty("(not-null uuid)")
-    );
+    assert_eq!(events.column_by_name("id").unwrap().ty, ty("uuid"));
     assert_eq!(events.indexes[0].name.as_str(), "events_day");
     assert!(events.indexes[0].columns[0].descending);
     // Two DDL statements, each bumping the version from 1.
     assert_eq!(catalog.schema_version().get(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert arrays with plain elements widen to arrays with optional ones
+/// (ADR-0034, backlog `array-element-nullability`), and not back.
+async fn array_elements_widen_to_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = session(&engine, admin());
+    root.create_table(&table(
+        "t",
+        &[
+            ("id", "int8"),
+            ("loose", "(array (option text))"),
+            ("strict", "(option (array text))"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    // A literal with no absent elements has type (array text), which widens.
+    let insert = "(plan (insert t (values (columns id loose) (row 1 (array \"a\" \"b\"))
+        (row 2 (array \"a\" null))) (columns id loose)))";
+    root.query(insert, vec![]).await.unwrap();
+    let text = |s: &str| Datum::Text(s.into());
+    assert_eq!(
+        rows(
+            &mut root,
+            "(plan (sort (project (get t) id loose) (asc id)))"
+        )
+        .await,
+        vec![
+            vec![Datum::Int8(1), Datum::Array(vec![text("a"), text("b")])],
+            vec![Datum::Int8(2), Datum::Array(vec![text("a"), Datum::Null])],
+        ]
+    );
+    // Optional elements don't narrow to plain ones.
+    let narrow = "(plan (insert t (values (columns id loose strict)
+        (row 3 (array \"a\") (array \"a\" null))) (columns id loose strict)))";
+    let err = root.query(narrow, vec![]).await.unwrap_err();
+    assert_eq!(err.sqlstate(), "42804", "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -205,7 +243,7 @@ async fn pinned_plans_go_stale_after_ddl() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = session(&engine, admin());
-    root.create_table(&table("t", &[("id", "(not-null int8)")], &["id"]))
+    root.create_table(&table("t", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     root.query(
@@ -221,7 +259,7 @@ async fn pinned_plans_go_stale_after_ddl() {
         root.query_plan(&pinned, vec![]).await.unwrap().row_count(),
         1
     );
-    root.add_column("t", &ColumnSpec::new("note", ty("text")))
+    root.add_column("t", &ColumnSpec::new("note", ty("(option text)")))
         .await
         .unwrap();
     let err = root.query_plan(&pinned, vec![]).await.unwrap_err();
@@ -246,7 +284,7 @@ async fn privileged_operations_need_admin() {
     let engine = create(dir.path()).await;
     let mut root = governed(&engine).await;
     let mut alice = session(&engine, user(1));
-    let spec = table("x", &[("id", "(not-null int8)")], &["id"]);
+    let spec = table("x", &[("id", "int8")], &["id"]);
     assert_eq!(state(alice.create_table(&spec).await), "42501");
     let text = [DataType::Scalar(ScalarType::Text)];
     assert_eq!(
@@ -284,7 +322,7 @@ async fn engine_tables_are_hidden() {
         let err = root.query(query, vec![]).await.unwrap_err();
         assert_eq!(err.sqlstate(), "42P01", "{query}: {err}");
     }
-    let spec = table("engine_mine", &[("id", "(not-null int8)")], &["id"]);
+    let spec = table("engine_mine", &[("id", "int8")], &["id"]);
     assert_eq!(state(root.create_table(&spec).await), "42P16");
     assert_eq!(state(root.drop_table("engine_privileges").await), "42P16");
 }
@@ -307,18 +345,14 @@ async fn declarations_are_checked() {
     assert_eq!(state(root.declare_entity(&duplicate).await), "42P16");
     root.create_table(&table(
         "edges",
-        &[("a", "(not-null int8)"), ("b", "(not-null int8)")],
+        &[("a", "int8"), ("b", "int8")],
         &["a", "b"],
     ))
     .await
     .unwrap();
     root.create_table(&table(
         "closure",
-        &[
-            ("a", "(not-null int8)"),
-            ("b", "(not-null int8)"),
-            ("paths", "(not-null int8)"),
-        ],
+        &[("a", "int8"), ("b", "int8"), ("paths", "int8")],
         &["a", "b"],
     ))
     .await
@@ -341,18 +375,14 @@ async fn declarations_are_checked() {
     // Column types must match the entity keys (int8 here) and paths must be int8.
     root.create_table(&table(
         "text_edges",
-        &[("a", "(not-null text)"), ("b", "(not-null int8)")],
+        &[("a", "text"), ("b", "int8")],
         &["a", "b"],
     ))
     .await
     .unwrap();
     root.create_table(&table(
         "int4_closure",
-        &[
-            ("a", "(not-null int8)"),
-            ("b", "(not-null int8)"),
-            ("paths", "(not-null int4)"),
-        ],
+        &[("a", "int8"), ("b", "int8"), ("paths", "int4")],
         &["a", "b"],
     ))
     .await
@@ -410,7 +440,7 @@ async fn statement_timeout_cancels() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = session(&engine, admin());
-    root.create_table(&table("nums", &[("n", "(not-null int8)")], &["n"]))
+    root.create_table(&table("nums", &[("n", "int8")], &["n"]))
         .await
         .unwrap();
     let values: Vec<String> = (1..=300).map(|n| format!("(row {n})")).collect();
@@ -468,11 +498,11 @@ async fn savepoints_undo_ddl_and_dml() {
     let engine = create(dir.path()).await;
     let mut root = session(&engine, admin());
     root.begin(TxnOptions::default()).await.unwrap();
-    root.create_table(&table("a", &[("id", "(not-null int8)")], &["id"]))
+    root.create_table(&table("a", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     let savepoint = root.savepoint().await.unwrap();
-    root.create_table(&table("b", &[("id", "(not-null int8)")], &["id"]))
+    root.create_table(&table("b", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     root.query(
@@ -580,7 +610,7 @@ async fn concurrent_ddl_conflicts() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = session(&engine, admin());
-    root.create_table(&table("t", &[("id", "(not-null int8)")], &["id"]))
+    root.create_table(&table("t", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     let insert = |n: i64| format!("(plan (insert t (values (columns id) (row {n})) (columns id)))");
@@ -600,7 +630,7 @@ async fn concurrent_ddl_conflicts() {
         // DDL on an unrelated table: only the catalog-wide schema version ties them.
         let mut ddl = session(&engine, admin());
         let name = format!("unrelated_{isolation:?}").to_lowercase();
-        ddl.create_table(&table(&name, &[("id", "(not-null int8)")], &["id"]))
+        ddl.create_table(&table(&name, &[("id", "int8")], &["id"]))
             .await
             .unwrap();
         let err = writer.commit().await.unwrap_err();
@@ -611,10 +641,10 @@ async fn concurrent_ddl_conflicts() {
     let mut b = session(&engine, admin());
     a.begin(TxnOptions::default()).await.unwrap();
     b.begin(TxnOptions::default()).await.unwrap();
-    a.create_table(&table("a", &[("id", "(not-null int8)")], &["id"]))
+    a.create_table(&table("a", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
-    b.create_table(&table("b", &[("id", "(not-null int8)")], &["id"]))
+    b.create_table(&table("b", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     a.commit().await.unwrap();
@@ -644,12 +674,12 @@ async fn uncommitted_catalogs_are_not_shared() {
     let engine = create(dir.path()).await;
     let mut a = session(&engine, admin());
     a.begin(TxnOptions::default()).await.unwrap();
-    a.create_table(&table("from_a", &[("id", "(not-null int8)")], &["id"]))
+    a.create_table(&table("from_a", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     assert!(rows(&mut a, "(plan (get from_a))").await.is_empty());
     let mut b = session(&engine, admin());
-    b.create_table(&table("from_b", &[("id", "(not-null int8)")], &["id"]))
+    b.create_table(&table("from_b", &[("id", "int8")], &["id"]))
         .await
         .unwrap();
     a.rollback().unwrap();
@@ -710,7 +740,7 @@ async fn transaction_limits_have_their_sqlstates() {
     let mut root = session(&engine, admin());
     root.create_table(&table(
         "t",
-        &[("id", "(not-null int8)"), ("v", "text")],
+        &[("id", "int8"), ("v", "(option text)")],
         &["id"],
     ))
     .await
@@ -752,13 +782,13 @@ async fn parameters_are_checked() {
     let mut root = session(&engine, admin());
     root.create_table(&table(
         "notes",
-        &[("id", "(not-null int8)"), ("body", "text")],
+        &[("id", "int8"), ("body", "(option text)")],
         &["id"],
     ))
     .await
     .unwrap();
     let insert = "(plan (insert notes (values (columns id body)
-        (row (param 1 (not-null int8)) (param 2 text))) (columns id body)))";
+        (row (param 1 int8) (param 2 (option text)))) (columns id body)))";
     let one = || vec![Datum::Int8(1), Datum::Text("a".into())];
 
     let count = |n: usize| one().into_iter().cycle().take(n).collect::<Vec<_>>();
@@ -777,8 +807,7 @@ async fn parameters_are_checked() {
         .unwrap_err();
     assert_eq!(err.sqlstate(), "42804");
     assert!(
-        err.to_string()
-            .contains("parameter 1 is declared (not-null int8)"),
+        err.to_string().contains("parameter 1 is declared int8"),
         "{err}"
     );
     assert_eq!(

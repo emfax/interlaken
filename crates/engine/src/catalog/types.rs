@@ -21,15 +21,16 @@ pub(crate) fn stored_type(column: &str, ty: &Type) -> Result<ColumnType, EngineE
 }
 
 /// Return the IR type of a stored column whose IR type was not recorded:
-/// the storage type's namesake, with array elements nullable as storage allows.
-pub(crate) fn derived_type(ty: ColumnType, nullable: bool) -> Type {
+/// the storage type's namesake, optional if the column is nullable, with
+/// optional array elements as storage allows.
+pub(crate) fn derived_type(ty: ColumnType, optional: bool) -> Type {
     let data = match ty {
         ColumnType::Array(element) => {
             DataType::Array(Box::new(derived_type(element.column_type(), true)))
         }
         scalar => DataType::Scalar(scalar_type(scalar)),
     };
-    Type { data, nullable }
+    Type { data, optional }
 }
 
 /// Return the IR scalar type of a scalar storage type.
@@ -59,14 +60,14 @@ mod tests {
     fn round_trip() {
         for scalar in ScalarType::ALL {
             for ty in [
-                DataType::Scalar(scalar).not_null(),
-                DataType::Array(Box::new(DataType::Scalar(scalar).nullable())).nullable(),
+                DataType::Scalar(scalar).plain(),
+                DataType::Array(Box::new(DataType::Scalar(scalar).option())).option(),
             ] {
                 let stored = stored_type("c", &ty).unwrap();
-                assert_eq!(derived_type(stored, ty.nullable), ty);
+                assert_eq!(derived_type(stored, ty.optional), ty);
             }
         }
-        let record = DataType::Record(Vec::new()).nullable();
+        let record = DataType::Record(Vec::new()).option();
         assert!(stored_type("c", &record).is_err());
     }
 }

@@ -52,7 +52,7 @@
 //!          (array E...) (try E E)
 //!          (scalar REL) (exists REL) (in E REL) (any OP E REL) (all OP E REL)
 //! FUNC     name | schema.name | (fid N)
-//! TYPE     DATATYPE | (not-null DATATYPE)
+//! TYPE     DATATYPE | (option DATATYPE)
 //! DATATYPE bool | int2 | int4 | int8 | float8 | text | bytea | date | timestamptz
 //!          | uuid | jsonb | (array TYPE) | (record (NAME TYPE)...) | (entity NAME)
 //! ```

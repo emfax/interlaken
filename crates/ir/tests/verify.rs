@@ -205,7 +205,7 @@ fn type_errors() {
         "int8",
     );
     rejects(
-        "(project (get (tid 100) :bind 1) (param 1 int8) (param 1 text) :bind 2)",
+        "(project (get (tid 100) :bind 1) (param 1 (option int8)) (param 1 (option text)) :bind 2)",
         ty,
         "two types",
     );
@@ -233,7 +233,7 @@ fn malformed_plans() {
     rejects(
         "(insert (tid 103) (values (columns a) (row 1) :bind 1) (columns (cid 0)) :target 2 :bind 3)",
         structure,
-        "omits NOT NULL column action",
+        "omits column action, whose type isn't optional",
     );
     rejects(
         "(update (tid 100) (get (tid 101) :bind 1) (set (cid 4) 1) :target 2 :bind 3)",
@@ -246,7 +246,7 @@ fn malformed_plans() {
         "more than once",
     );
     rejects(
-        "(project (get (tid 100) :bind 1) (param 0 int8) :bind 2)",
+        "(project (get (tid 100) :bind 1) (param 0 (option int8)) :bind 2)",
         structure,
         "from 1",
     );

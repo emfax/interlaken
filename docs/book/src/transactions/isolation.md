@@ -17,8 +17,8 @@ use interlaken_storage::{Isolation, TxnOptions};
 # session.create_table(&TableSpec {
 #     name: "accounts".into(),
 #     columns: vec![
-#         ColumnSpec::new("id", parse_type("(not-null int8)")?),
-#         ColumnSpec::new("balance", parse_type("(not-null int8)")?),
+#         ColumnSpec::new("id", parse_type("int8")?),
+#         ColumnSpec::new("balance", parse_type("int8")?),
 #     ],
 #     primary_key: vec!["id".into()],
 # }).await?;

@@ -51,7 +51,7 @@ pub(crate) fn typed_null(to: DataType) -> Typed {
             expr: Box::new(Expr::Literal(Value::Null)),
             to: to.clone(),
         },
-        ty: Some(to.nullable()),
+        ty: Some(to.option()),
     }
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn coerce(typed: Typed, to: &DataType, mode: Mode) -> Result<Typed, R
         if let Some(value) = literal {
             return Ok(Typed {
                 expr: Expr::Literal(value),
-                ty: Some(to.clone().not_null()),
+                ty: Some(to.clone().plain()),
             });
         }
     }
@@ -91,13 +91,13 @@ pub(crate) fn coerce(typed: Typed, to: &DataType, mode: Mode) -> Result<Typed, R
             ty.data
         )));
     }
-    let nullable = ty.nullable;
+    let nullable = ty.optional;
     Ok(Typed {
         expr: Expr::Cast {
             expr: Box::new(typed.expr),
             to: to.clone(),
         },
-        ty: Some(to.clone().nullable().with_nullable(nullable)),
+        ty: Some(to.clone().option().with_optional(nullable)),
     })
 }
 
@@ -106,7 +106,7 @@ pub(crate) fn coerce(typed: Typed, to: &DataType, mode: Mode) -> Result<Typed, R
 /// Bare integer literals count as the smallest integer type holding them
 /// when other operands have types, so they adapt rather than widen the
 /// other operands. Returns the converted expressions and the common type,
-/// nullable if any item is.
+/// optional if any item is.
 pub(crate) fn unify(
     items: Vec<Typed>,
     default: ScalarType,
@@ -130,12 +130,12 @@ pub(crate) fn unify(
     };
     let nullable = items
         .iter()
-        .any(|t| t.ty.as_ref().is_none_or(|ty| ty.nullable));
+        .any(|t| t.ty.as_ref().is_none_or(|ty| ty.optional));
     let exprs = items
         .into_iter()
         .map(|t| coerce(t, &target, Mode::Implicit).map(|t| t.expr))
         .collect::<Result<_, _>>()?;
-    Ok((exprs, target.nullable().with_nullable(nullable)))
+    Ok((exprs, target.option().with_optional(nullable)))
 }
 
 /// Return `typed` as a boolean predicate (casting an untyped NULL), naming `what` on failure.

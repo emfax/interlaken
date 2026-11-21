@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create_table(&TableSpec {
             name: "docs".into(),
             columns: vec![
-                ColumnSpec::new("id", parse_type("(not-null int8)")?),
+                ColumnSpec::new("id", parse_type("int8")?),
                 ColumnSpec::new("title", parse_type("text")?),
             ],
             primary_key: vec!["id".into()],
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let result = session
         .query(
-            "(plan (project (filter (get docs :as d) (> d.id (param 1 int8))) d.title))",
+            "(plan (project (filter (get docs :as d) (> d.id (param 1 (option int8)))) d.title))",
             vec![Datum::Int8(1)],
         )
         .await?;

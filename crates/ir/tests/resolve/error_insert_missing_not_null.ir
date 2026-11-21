@@ -1,2 +1,2 @@
 (plan (insert users (values (columns n) (row "x")) (columns name)))
-;; error: invalid plan: insert omits NOT NULL column id
+;; error: invalid plan: insert omits column id, whose type isn't optional

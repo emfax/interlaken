@@ -32,7 +32,7 @@ const COPY_FAILING: &str = "(plan (insert dst (project (get src :as s) (+ s.n (/
 async fn fixture(engine: &Engine) -> Session {
     let mut root = session(engine, admin());
     for name in ["src", "dst"] {
-        root.create_table(&table(name, &[("n", "(not-null int8)")], &["n"]))
+        root.create_table(&table(name, &[("n", "int8")], &["n"]))
             .await
             .unwrap();
     }
@@ -284,7 +284,7 @@ async fn explicit_dml_dropped_early_keeps_its_writes() {
             .await
             .unwrap(),
     );
-    root.create_table(&table("scratch", &[("n", "(not-null int8)")], &["n"]))
+    root.create_table(&table("scratch", &[("n", "int8")], &["n"]))
         .await
         .unwrap();
     root.rollback().unwrap();
@@ -388,7 +388,7 @@ async fn statement_timeout_cancels_streams_waiting_on_storage() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = session(&engine, admin());
-    root.create_table(&table("big", &[("n", "(not-null int8)")], &["n"]))
+    root.create_table(&table("big", &[("n", "int8")], &["n"]))
         .await
         .unwrap();
     let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();

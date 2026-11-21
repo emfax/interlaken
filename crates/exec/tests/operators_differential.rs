@@ -157,9 +157,9 @@ fn ir_catalog() -> InMemoryCatalog {
         write!(text, " (table {} :id {}", t.name, t.id).unwrap();
         for (i, (name, ty)) in t.columns.iter().enumerate() {
             if i == 0 {
-                write!(text, " (column {name} (not-null {}))", ty.name()).unwrap();
-            } else {
                 write!(text, " (column {name} {})", ty.name()).unwrap();
+            } else {
+                write!(text, " (column {name} (option {}))", ty.name()).unwrap();
             }
         }
         text.push_str(" (primary-key id)");

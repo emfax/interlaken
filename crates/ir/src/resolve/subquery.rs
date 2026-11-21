@@ -109,7 +109,7 @@ impl Resolver<'_> {
             ),
         ];
         let binding = self.fresh()?;
-        let count = DataType::Scalar(ScalarType::Int8).not_null();
+        let count = DataType::Scalar(ScalarType::Int8).plain();
         let agg_scope = Scope::derived(
             binding,
             None,
@@ -172,7 +172,7 @@ impl Resolver<'_> {
                 });
                 Ok(Typed {
                     expr: column_ref(&column),
-                    ty: Some(column.ty.with_nullable(true)),
+                    ty: Some(column.ty.with_optional(true)),
                 })
             }
             SubqueryKind::Exists => {

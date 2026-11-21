@@ -36,12 +36,12 @@ use proptest::test_runner::{Config, TestRunner};
 /// The IR catalog, with the same indexes as storage.
 const CATALOG: &str = "(catalog (builtins)
   (table users :id 100
-    (column id (not-null int8)) (column name text) (column age int4) (column karma (not-null int8))
+    (column id int8) (column name (option text)) (column age (option int4)) (column karma int8)
     (primary-key id)
     (index users_age age)
     (index users_name name :unique true))
   (table posts :id 101
-    (column id (not-null int8)) (column author int8) (column likes int4) (column title text)
+    (column id int8) (column author (option int8)) (column likes (option int4)) (column title (option text))
     (primary-key id)
     (index posts_author author)
     (index posts_likes (desc likes))))";

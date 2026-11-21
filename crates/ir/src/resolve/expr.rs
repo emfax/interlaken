@@ -283,15 +283,15 @@ impl Resolver<'_> {
                 let args = self.exprs(args, cx)?;
                 let any_nullable = args
                     .iter()
-                    .any(|a| a.ty.as_ref().is_none_or(|t| t.nullable));
+                    .any(|a| a.ty.as_ref().is_none_or(|t| t.optional));
                 let (def, args) = self.pick_function(func, args, FunctionKind::Scalar)?;
-                let nullable = def.returns.nullable || (def.properties.strict && any_nullable);
+                let nullable = def.returns.optional || (def.properties.strict && any_nullable);
                 Typed {
                     expr: Expr::Call {
                         func: FunctionRef::Id(def.id),
                         args,
                     },
-                    ty: Some(def.returns.clone().with_nullable(nullable)),
+                    ty: Some(def.returns.clone().with_optional(nullable)),
                 }
             }
             Expr::Unary { op, expr: operand } => {
@@ -324,7 +324,7 @@ impl Resolver<'_> {
                 let mut out = Vec::new();
                 for item in items {
                     let typed = self.expr(item, cx)?;
-                    nullable |= typed.ty.as_ref().is_none_or(|t| t.nullable);
+                    nullable |= typed.ty.as_ref().is_none_or(|t| t.optional);
                     out.push(predicate(typed, "an AND or OR operand")?.expr);
                 }
                 let expr = if matches!(expr, Expr::And(_)) {
@@ -365,7 +365,7 @@ impl Resolver<'_> {
                 }
                 let (mut results, mut result_ty) = unify(results, ScalarType::Text)?;
                 if !has_else {
-                    result_ty.nullable = true;
+                    result_ty.optional = true;
                 }
                 let otherwise = has_else.then(|| Box::new(results.pop().expect("else result")));
                 let (operand, whens) = match operand {
@@ -415,11 +415,11 @@ impl Resolver<'_> {
                 }
                 let all_nullable = typed
                     .iter()
-                    .all(|t| t.ty.as_ref().is_none_or(|t| t.nullable));
+                    .all(|t| t.ty.as_ref().is_none_or(|t| t.optional));
                 let (exprs, ty) = unify(typed, ScalarType::Text)?;
                 Typed {
                     expr: Expr::Coalesce(exprs),
-                    ty: Some(ty.with_nullable(all_nullable)),
+                    ty: Some(ty.with_optional(all_nullable)),
                 }
             }
             Expr::Try {
@@ -448,7 +448,7 @@ impl Resolver<'_> {
                 let (exprs, element) = unify(typed, ScalarType::Text)?;
                 Typed {
                     expr: Expr::Array(exprs),
-                    ty: Some(DataType::Array(Box::new(element)).not_null()),
+                    ty: Some(DataType::Array(Box::new(element)).plain()),
                 }
             }
             Expr::NullIf { left, right } => {
@@ -467,7 +467,7 @@ impl Resolver<'_> {
                         left: Box::new(left),
                         right: Box::new(right),
                     },
-                    ty: Some(ty.with_nullable(true)),
+                    ty: Some(ty.with_optional(true)),
                 }
             }
             Expr::Cast { expr: operand, to }
@@ -476,14 +476,14 @@ impl Resolver<'_> {
             {
                 Typed {
                     expr: expr.clone(),
-                    ty: Some(to.clone().not_null()),
+                    ty: Some(to.clone().plain()),
                 }
             }
             Expr::Cast { expr: operand, to } => {
                 let operand = self.expr(operand, cx)?;
                 let nullable = match &operand.ty {
                     None => true,
-                    Some(ty) if typing::explicit(&ty.data, to) => ty.nullable,
+                    Some(ty) if typing::explicit(&ty.data, to) => ty.optional,
                     Some(ty) => {
                         return Err(ResolveError::Type(format!(
                             "cannot cast {} to {to}",
@@ -496,7 +496,7 @@ impl Resolver<'_> {
                         expr: Box::new(operand.expr),
                         to: to.clone(),
                     },
-                    ty: Some(to.clone().nullable().with_nullable(nullable)),
+                    ty: Some(to.clone().option().with_optional(nullable)),
                 }
             }
             Expr::Subquery { kind, rel } => {

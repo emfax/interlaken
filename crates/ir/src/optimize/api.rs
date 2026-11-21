@@ -27,7 +27,7 @@ use crate::verify::column_types;
 /// use interlaken_ir::text::{parse_catalog, parse_plan, print_plan};
 ///
 /// let catalog = parse_catalog(
-///     "(catalog (builtins) (table t :id 100 (column x (not-null int8)) (column y int8)))",
+///     "(catalog (builtins) (table t :id 100 (column x int8) (column y (option int8))))",
 /// )?;
 /// let plan = parse_plan(
 ///     "(plan (filter (project (get (tid 100) :bind 1) (as #1.0 x) :bind 2) (and true (> #2.0 (+ 1 2))))

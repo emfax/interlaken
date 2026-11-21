@@ -83,7 +83,7 @@ pub enum Expr {
         /// The value compared against.
         right: Box<Expr>,
     },
-    /// An explicit cast; the result's nullability follows the operand's.
+    /// An explicit cast; the result is optional if the operand is.
     Cast {
         /// The operand.
         expr: Box<Expr>,

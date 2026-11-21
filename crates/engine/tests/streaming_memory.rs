@@ -54,10 +54,10 @@ async fn load(engine: &Engine, root: &mut Session, n: i64) {
     root.create_table(&table(
         "t",
         &[
-            ("id", "(not-null int8)"),
-            ("k", "int8"),
-            ("a", "int4"),
-            ("b", "text"),
+            ("id", "int8"),
+            ("k", "(option int8)"),
+            ("a", "(option int4)"),
+            ("b", "(option text)"),
         ],
         &["id"],
     ))

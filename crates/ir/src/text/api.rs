@@ -58,7 +58,7 @@ pub fn parse_expr(text: &str) -> Result<Expr, ParseError> {
     read::expr(&read_one(text)?)
 }
 
-/// Parse a type, such as `int8` or `(not-null (array text))`.
+/// Parse a type, such as `int8` or `(option (array text))`.
 ///
 /// # Errors
 ///

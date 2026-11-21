@@ -15,13 +15,13 @@ use interlaken_storage::{Durability, FjallStorage, Storage, StorageOptions, TxnO
 pub fn ir_catalog() -> InMemoryCatalog {
     parse_catalog(
         "(catalog
-           (table users :id 100 (column id (not-null int8)) (column dept text) (primary-key id))
-           (table groups :id 101 (column id (not-null int8)) (primary-key id))
-           (table memberships :id 102 (column member (not-null int8)) (column grp (not-null int8)) (primary-key member grp))
+           (table users :id 100 (column id int8) (column dept (option text)) (primary-key id))
+           (table groups :id 101 (column id int8) (primary-key id))
+           (table memberships :id 102 (column member int8) (column grp int8) (primary-key member grp))
            (table memberships_closure :id 103
-             (column member (not-null int8)) (column grp (not-null int8)) (column paths (not-null int8))
+             (column member int8) (column grp int8) (column paths int8)
              (primary-key member grp))
-           (table docs :id 104 (column id (not-null int8)) (column owner_id (not-null int8)) (column secret int8) (primary-key id))
+           (table docs :id 104 (column id int8) (column owner_id int8) (column secret (option int8)) (primary-key id))
            (entity User :table users :key id (attr dept))
            (entity Group :table groups :key id)
            (entity Doc :table docs :key id (attr owner owner_id :references User) (attr secret))

@@ -22,11 +22,11 @@ Declaring an entity type puts its table under policy control. Read [The security
 #     columns: columns.iter().map(|(n, t)| ColumnSpec::new(*n, parse_type(t).unwrap())).collect(),
 #     primary_key: key.iter().map(|k| (*k).into()).collect(),
 # };
-# session.create_table(&table("users", &[("id", "(not-null int8)"), ("name", "(not-null text)"), ("dept", "text")], &["id"])).await?;
-# session.create_table(&table("groups", &[("id", "(not-null int8)"), ("name", "(not-null text)")], &["id"])).await?;
-# session.create_table(&table("docs", &[("id", "(not-null int8)"), ("title", "text"), ("owner", "int8")], &["id"])).await?;
-# session.create_table(&table("user_groups", &[("member", "(not-null int8)"), ("grp", "(not-null int8)")], &["member", "grp"])).await?;
-# session.create_table(&table("user_group_closure", &[("descendant", "(not-null int8)"), ("ancestor", "(not-null int8)"), ("paths", "(not-null int8)")], &["descendant", "ancestor"])).await?;
+# session.create_table(&table("users", &[("id", "int8"), ("name", "text"), ("dept", "(option text)")], &["id"])).await?;
+# session.create_table(&table("groups", &[("id", "int8"), ("name", "text")], &["id"])).await?;
+# session.create_table(&table("docs", &[("id", "int8"), ("title", "(option text)"), ("owner", "(option int8)")], &["id"])).await?;
+# session.create_table(&table("user_groups", &[("member", "int8"), ("grp", "int8")], &["member", "grp"])).await?;
+# session.create_table(&table("user_group_closure", &[("descendant", "int8"), ("ancestor", "int8"), ("paths", "int8")], &["descendant", "ancestor"])).await?;
 session
     .declare_entity(&EntitySpec {
         name: "User".into(),

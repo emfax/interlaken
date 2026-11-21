@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Designed, not built. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
+Accepted. Phase 1, the option type, is built; phases 2 to 6 aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
 
 ## Summary
 
@@ -128,7 +128,14 @@ The optimizer simplifies the common shapes away. `(coalesce (lift = c (param 1 T
 
 ## Implementation Phases
 
-- [ ] **Phase 1: The option type.** `DataType::Option` replaces `Type::nullable`; text syntax, resolver, verifier, typing and the interpreter use it; widening conversions; no semantic change yet, because `nullable` and non-nested `option` are isomorphic. Resolves `array-element-nullability`.
+- [x] **Phase 1: The option type.** `DataType::Option` replaces `Type::nullable`; text syntax, resolver, verifier, typing and the interpreter use it; widening conversions; no semantic change yet, because `nullable` and non-nested `option` are isomorphic. Resolves `array-element-nullability`.
+  - *As implemented:*
+    - **Representation.** `Type` keeps a flag, renamed from `nullable` to `optional`, instead of gaining a `DataType::Option` variant. Options don't nest, so a flag represents `T` and `(option T)` exactly and makes a nested option impossible to construct, rather than something the verifier must reject. Code that matches on `ty.data` doesn't have to look through a wrapper. The constructors are `DataType::plain` and `DataType::option`, and `Type::widens_to` defines the widening.
+    - **Text.** A bare type is plain and `(option T)` is optional. `(option (option T))` and the old `(not-null T)` are parse errors, the latter with a hint. Tests, golden files and the book were converted mechanically: the old `T` became `(option T)` and the old `(not-null T)` became `T`.
+    - **Widening.** `typing::implicit`, and so `assignment` and `explicit`, accept plain to optional elements and fields inside arrays and records. The resolver inserts a cast, which is the identity in the interpreter and the executor, because Arrow list elements and struct fields are always nullable there.
+    - **Messages** say "whose type isn't optional" where they said "NOT NULL column". Storage keeps its NOT NULL constraints, derived from the types as before.
+    - **Stored catalogs.** `engine_columns` holds type text, and there is no catalog format version. A database created before this change loads with the right top-level optionality, because storage's column nullability decides it. But stored `(not-null T)` text no longer parses, and an old `(array T)` now reads as having plain elements. The project hasn't been released, so no migration was written.
+  - *Testing:* `typing::tests::composite_widening`; `array_elements_widen_to_options` in `crates/engine/tests/session.rs` writes arrays with and without NULL elements to an `(array (option text))` column through a session, and is refused when writing optional elements to an `(array text)` column.
 - [ ] **Phase 2: Two-valued expressions.** Total equality and order on options; `lift`, `coalesce`, `unwrap`, `is-some`, `is-none`; `and3`, `or3`, `not3` as catalog functions; predicates must be `bool`; implicit lifting removed from the resolver. The interpreter defines the semantics first, then the executor's kernels follow, with the differential tests rewritten to the new semantics.
 - [ ] **Phase 3: Operators and aggregates.** Outer joins and `Single` apply produce options; `sum` returns its identity; `min`, `max` and `avg` return options; inserts may omit only option columns.
 - [ ] **Phase 4: Optimizer.** Rewrites that are now valid in two-valued logic; simplification of lowered SQL patterns back to index keys; property tests that lowered and hand-written forms plan alike.

@@ -1,7 +1,8 @@
 //! The IR type system (ADR-0010).
 //!
-//! Every type carries its nullability. After resolution the IR is fully
-//! typed and contains only explicit casts.
+//! A type is a data type `T` or `(option T)`, whose values may be absent
+//! (ADR-0034). After resolution the IR is fully typed and contains only
+//! explicit casts.
 
 use crate::names::Ident;
 
@@ -82,7 +83,7 @@ impl ScalarType {
     }
 }
 
-/// A data type, without nullability.
+/// A data type, without its optionality.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DataType {
     /// A scalar.
@@ -96,21 +97,21 @@ pub enum DataType {
 }
 
 impl DataType {
-    /// Return this type as nullable.
+    /// Return `(option T)` of this type, whose values may be absent.
     #[must_use]
-    pub fn nullable(self) -> Type {
+    pub fn option(self) -> Type {
         Type {
             data: self,
-            nullable: true,
+            optional: true,
         }
     }
 
-    /// Return this type as NOT NULL.
+    /// Return this type as a plain type, whose values are never absent.
     #[must_use]
-    pub fn not_null(self) -> Type {
+    pub fn plain(self) -> Type {
         Type {
             data: self,
-            nullable: false,
+            optional: false,
         }
     }
 }
@@ -142,17 +143,21 @@ impl Field {
     }
 }
 
-/// A data type with its nullability.
+/// A type: a data type `T`, or `(option T)` (ADR-0034).
+///
+/// Values of a plain type are never absent. Values of `(option T)` are
+/// `(some v)` for every value `v` of `T`, or `none`, which clients see as
+/// NULL. Options don't nest, so a flag represents them exactly.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Type {
     /// The data type.
     pub data: DataType,
-    /// Whether values may be NULL.
-    pub nullable: bool,
+    /// Whether this is `(option T)`, whose values may be absent.
+    pub optional: bool,
 }
 
 impl Type {
-    /// Construct a nullable scalar type.
+    /// Construct a plain scalar type.
     ///
     /// # Examples
     ///
@@ -160,18 +165,75 @@ impl Type {
     /// use interlaken_ir::{ScalarType, Type};
     ///
     /// let ty = Type::scalar(ScalarType::Int8);
-    /// assert!(ty.nullable);
-    /// assert!(!ty.with_nullable(false).nullable);
+    /// assert!(!ty.optional);
+    /// assert!(ty.option().optional);
     /// ```
     #[must_use]
     pub fn scalar(scalar: ScalarType) -> Self {
-        DataType::Scalar(scalar).nullable()
+        DataType::Scalar(scalar).plain()
     }
 
-    /// Return a copy with the given nullability.
+    /// Return `(option T)` of this type's data type.
     #[must_use]
-    pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.nullable = nullable;
+    pub fn option(mut self) -> Self {
+        self.optional = true;
         self
+    }
+
+    /// Return a copy that is optional if `optional` is true, and plain otherwise.
+    #[must_use]
+    pub fn with_optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    /// Return `true` if a value of `self` is always a value of `to`.
+    ///
+    /// That is, the types are equal except that `to` may be optional
+    /// where `self` is plain, at the top level or inside arrays and
+    /// records: `T` widens to `(option T)`, and `(array T)` to
+    /// `(array (option T))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use interlaken_ir::{DataType, ScalarType, Type};
+    ///
+    /// let text = Type::scalar(ScalarType::Text);
+    /// assert!(text.widens_to(&text.clone().option()));
+    /// assert!(!text.clone().option().widens_to(&text));
+    /// let array = |t: Type| DataType::Array(Box::new(t)).plain();
+    /// assert!(array(text.clone()).widens_to(&array(text.clone().option())));
+    /// ```
+    #[must_use]
+    pub fn widens_to(&self, to: &Self) -> bool {
+        (!self.optional || to.optional) && self.data.widens_to(&to.data)
+    }
+}
+
+impl DataType {
+    /// Return `true` if a value of `self` is always a value of `to`: the
+    /// types are equal except that elements and fields of `to` may be
+    /// optional where those of `self` are plain (see [`Type::widens_to`]).
+    #[must_use]
+    pub fn widens_to(&self, to: &Self) -> bool {
+        match (self, to) {
+            (Self::Array(from), Self::Array(to)) => from.widens_to(to),
+            (Self::Record(from), Self::Record(to)) => {
+                from.len() == to.len()
+                    && from
+                        .iter()
+                        .zip(to)
+                        .all(|(f, t)| f.name == t.name && f.ty.widens_to(&t.ty))
+            }
+            _ => self == to,
+        }
+    }
+}
+
+impl From<DataType> for Type {
+    /// Wrap a data type as a plain type.
+    fn from(data: DataType) -> Self {
+        data.plain()
     }
 }

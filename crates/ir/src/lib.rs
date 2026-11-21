@@ -5,7 +5,7 @@
 //! provides milestones I1 to I4:
 //!
 //! - The type system: [`ScalarType`], [`DataType`] and [`Type`], with
-//!   explicit nullability.
+//!   explicit optionality: a type is `T` or `(option T)` (ADR-0034).
 //! - Scalar expressions ([`Expr`]) and logical relational operators
 //!   ([`Rel`]), in one tree type that carries both the unresolved form
 //!   (names) and the resolved form (catalog IDs and bindings); see

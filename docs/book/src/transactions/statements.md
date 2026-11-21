@@ -30,8 +30,8 @@ A savepoint marks a point in a transaction that can be rolled back to without ab
 # session.create_table(&TableSpec {
 #     name: "users".into(),
 #     columns: vec![
-#         ColumnSpec::new("id", parse_type("(not-null int8)")?),
-#         ColumnSpec::new("name", parse_type("(not-null text)")?),
+#         ColumnSpec::new("id", parse_type("int8")?),
+#         ColumnSpec::new("name", parse_type("text")?),
 #     ],
 #     primary_key: vec!["id".into()],
 # }).await?;

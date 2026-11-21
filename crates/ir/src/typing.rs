@@ -42,16 +42,16 @@ pub(crate) fn is_comparable(ty: &DataType) -> bool {
     scalar(ty).is_some_and(|s| s != ScalarType::Jsonb)
 }
 
-/// Return the NOT NULL type of a literal, or `None` for an untyped NULL.
+/// Return the plain type of a literal, or `None` for an untyped NULL.
 pub(crate) fn value_type(value: &Value) -> Option<Type> {
-    value.scalar_type().map(|s| DataType::Scalar(s).not_null())
+    value.scalar_type().map(|s| DataType::Scalar(s).plain())
 }
 
-/// Return the `bool` type with the given nullability.
+/// Return the `bool` type, optional if `nullable`.
 pub(crate) fn boolean(nullable: bool) -> Type {
     DataType::Scalar(ScalarType::Bool)
-        .nullable()
-        .with_nullable(nullable)
+        .option()
+        .with_optional(nullable)
 }
 
 /// Return the result type of a unary operator, or why it does not apply.
@@ -67,7 +67,7 @@ pub(crate) fn unary(op: UnaryOp, operand: &Type) -> Result<Type, String> {
 
 /// Return the result type of a binary operator, or why it does not apply.
 pub(crate) fn binary(op: BinaryOp, left: &Type, right: &Type) -> Result<Type, String> {
-    let nullable = left.nullable || right.nullable;
+    let nullable = left.optional || right.optional;
     let (l, r) = (&left.data, &right.data);
     let same = l == r;
     let mismatch = || {
@@ -112,16 +112,20 @@ pub(crate) fn binary(op: BinaryOp, left: &Type, right: &Type) -> Result<Type, St
         }
         _ => return Err(mismatch()),
     };
-    Ok(Type { data, nullable })
+    Ok(Type {
+        data,
+        optional: nullable,
+    })
 }
 
 /// Return `true` if an explicit cast from `from` to `to` is allowed.
 ///
-/// Identity casts always are. Between scalars: any numeric to any
-/// numeric, integers to and from `bool`, anything to and from `text`, and
-/// `date` to and from `timestamptz`. Non-scalar types cast only to themselves.
+/// Identity casts and widenings (see [`implicit`]) always are. Between
+/// scalars: any numeric to any numeric, integers to and from `bool`,
+/// anything to and from `text`, and `date` to and from `timestamptz`.
+/// Non-scalar types cast only to themselves and their widenings.
 pub(crate) fn explicit(from: &DataType, to: &DataType) -> bool {
-    if from == to {
+    if from.widens_to(to) {
         return true;
     }
     let (Some(f), Some(t)) = (scalar(from), scalar(to)) else {
@@ -141,10 +145,13 @@ pub(crate) fn explicit(from: &DataType, to: &DataType) -> bool {
 
 /// Return `true` if `from` converts to `to` implicitly, without loss.
 ///
-/// The integer widenings, any integer to `float8`, and `date` to `timestamptz`.
+/// The integer widenings, any integer to `float8`, `date` to
+/// `timestamptz`, and plain to optional elements and fields inside arrays
+/// and records (ADR-0034): `(array text)` to `(array (option text))`. The
+/// conversion doesn't change values, so its cast is free at run time.
 pub(crate) fn implicit(from: &DataType, to: &DataType) -> bool {
     use ScalarType as S;
-    from == to
+    from.widens_to(to)
         || matches!(
             (scalar(from), scalar(to)),
             (Some(S::Int2), Some(S::Int4 | S::Int8 | S::Float8))
@@ -202,13 +209,13 @@ pub(crate) fn negate_comparison(op: BinaryOp) -> BinaryOp {
 mod tests {
     use super::*;
 
-    /// Return a NOT NULL scalar type.
+    /// Return a plain scalar type.
     fn t(s: ScalarType) -> Type {
-        DataType::Scalar(s).not_null()
+        DataType::Scalar(s).plain()
     }
 
     #[test]
-    /// Assert operators accept exactly matching operands and compute nullability.
+    /// Assert operators accept exactly matching operands and compute optionality.
     fn operator_types() {
         use ScalarType as S;
         assert_eq!(
@@ -225,7 +232,7 @@ mod tests {
             binary(BinaryOp::Add, &t(S::Date), &t(S::Int4)),
             Ok(t(S::Date))
         );
-        let nullable = t(S::Text).with_nullable(true);
+        let nullable = t(S::Text).with_optional(true);
         assert_eq!(
             binary(BinaryOp::Eq, &nullable, &t(S::Text)),
             Ok(boolean(true))
@@ -263,5 +270,33 @@ mod tests {
             Some(d(S::Int8))
         );
         assert_eq!(common_type(&[d(S::Int8), d(S::Text)]), None);
+    }
+
+    #[test]
+    /// Assert plain elements and fields widen to optional ones, and not back.
+    fn composite_widening() {
+        use ScalarType as S;
+        let array = |t: Type| DataType::Array(Box::new(t));
+        let record = |t: Type| DataType::Record(vec![crate::types::Field::new("a", t)]);
+        let (plain, optional) = (t(S::Text), t(S::Text).option());
+        for (from, to) in [
+            (array(plain.clone()), array(optional.clone())),
+            (record(plain.clone()), record(optional.clone())),
+            (
+                array(array(plain.clone()).plain()),
+                array(array(optional.clone()).option()),
+            ),
+        ] {
+            assert!(implicit(&from, &to), "{from} -> {to}");
+            assert!(assignment(&from, &to), "{from} -> {to}");
+            assert!(explicit(&from, &to), "{from} -> {to}");
+            assert!(!implicit(&to, &from), "{to} -> {from}");
+            assert!(!explicit(&to, &from), "{to} -> {from}");
+        }
+        assert!(!implicit(&array(t(S::Int4)), &array(t(S::Int8))));
+        assert_eq!(
+            common_type(&[array(plain.clone()), array(optional.clone())]),
+            Some(array(optional))
+        );
     }
 }

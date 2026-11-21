@@ -8,6 +8,6 @@
         (get (tid 100) :as u :bind 1)
         (get (tid 101) :as o :bind 2)
         (= #2.1 #1.0))
-      (> #1.0 (param 1 (not-null int8))))
+      (> #1.0 (param 1 int8)))
     (keys (as (call (fid 7) #1.1) name))
     (aggs (as (agg (fid 2001)) n))))

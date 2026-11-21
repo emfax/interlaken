@@ -84,13 +84,6 @@ Entry format:
 - **Size:** About 2 days: sort runs a chunk at a time and merge them, yielding between chunks.
 - **Status:** open
 
-### array-element-nullability: Convert between array element nullabilities
-- **Origin:** writing the book's types chapter
-- **Why:** An array type records whether its elements may be NULL, and array types convert only to themselves. So `(array "a" "b")`, of type `(array (not-null text))`, can't be inserted into an `(array text)` column (`42804`), and an explicit cast doesn't help. Converting `(array (not-null T))` to `(array T)` is lossless and should be implicit; the reverse could be an assignment conversion checked at run time.
-- **When:** With the SQL front end, where `ARRAY['a', 'b']` into a `text[]` column is ordinary; or sooner if applications store arrays.
-- **Size:** About 1 day in `typing` (implicit and assignment rules), the cast kernels and the interpreter.
-- **Status:** open. ADR-0034 phase 1 resolves it: options widen implicitly inside arrays.
-
 ### undeclared-principal-types: Let principals of undeclared types be authorized
 - **Origin:** writing the book's security chapters
 - **Why:** Once a table backs an entity type, every principal's access to it goes through the policies. A principal whose type isn't a declared entity type, such as the `Admin::"root"` principal a database is typically created with, can't be named by Cedar policies, because the generated Cedar schema lists only declared entity types. While the default empty Cedar policy set is active, its queries on governed tables fail with `42501` "secured plan is invalid: Cedar partial request: principal type `Admin` is not valid for `Action::\"read\"`" rather than being plainly denied. So the first administrator can't load data into a newly governed table until an RLS policy set permits `(is principal Admin)`. Options:
@@ -111,6 +104,13 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### array-element-nullability: Convert between array element nullabilities
+- **Origin:** writing the book's types chapter
+- **Why:** An array type records whether its elements may be NULL, and array types convert only to themselves. So `(array "a" "b")`, of type `(array (not-null text))`, can't be inserted into an `(array text)` column (`42804`), and an explicit cast doesn't help. Converting `(array (not-null T))` to `(array T)` is lossless and should be implicit; the reverse could be an assignment conversion checked at run time.
+- **When:** With the SQL front end, where `ARRAY['a', 'b']` into a `text[]` column is ordinary; or sooner if applications store arrays.
+- **Size:** About 1 day in `typing` (implicit and assignment rules), the cast kernels and the interpreter.
+- **Status:** done (ADR-0034 phase 1: `(array T)` converts implicitly to `(array (option T))`, and records likewise; the reverse isn't allowed)
 
 ### last-admin-guard: Refuse to revoke the last administrator
 - **Origin:** writing the book's privileges chapter

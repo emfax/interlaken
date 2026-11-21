@@ -153,13 +153,13 @@ pub(crate) fn data_type(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> Op
             ..
         } => catalog.function_by_id(*id)?.returns.data.clone(),
         Expr::Unary { op, expr } => {
-            typing::unary(*op, &data_type(expr, types, catalog)?.nullable())
+            typing::unary(*op, &data_type(expr, types, catalog)?.option())
                 .ok()?
                 .data
         }
         Expr::Binary { op, left, right } => {
-            let l = data_type(left, types, catalog)?.nullable();
-            let r = data_type(right, types, catalog)?.nullable();
+            let l = data_type(left, types, catalog)?.option();
+            let r = data_type(right, types, catalog)?.option();
             typing::binary(*op, &l, &r).ok()?.data
         }
         Expr::And(_) | Expr::Or(_) => DataType::Scalar(crate::types::ScalarType::Bool),
@@ -167,7 +167,7 @@ pub(crate) fn data_type(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> Op
         Expr::NullIf { left, .. } => data_type(left, types, catalog)?,
         Expr::Case { branches, .. } => data_type(&branches.first()?.then, types, catalog)?,
         Expr::Array(items) => DataType::Array(Box::new(
-            data_type(items.first()?, types, catalog)?.nullable(),
+            data_type(items.first()?, types, catalog)?.option(),
         )),
         Expr::Try { expr, .. } => data_type(expr, types, catalog)?,
         _ => return None,

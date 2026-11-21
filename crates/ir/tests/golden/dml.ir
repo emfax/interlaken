@@ -14,12 +14,10 @@
             (get users :as u)
             (in u.id
               (insert audit
-                (values
-                  (columns user_id action)
-                  (row (param 1 (not-null int8)) "login"))
+                (values (columns user_id action) (row (param 1 int8) "login"))
                 (columns user_id action)
                 (returning user_id))))
           (set karma (+ karma 1))
-          (set seen_at (param 2 timestamptz))
+          (set seen_at (param 2 (option timestamptz)))
           (returning u.id))))
     (returning (as s.id deleted))))

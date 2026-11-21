@@ -20,9 +20,9 @@ session
     .create_table(&TableSpec {
         name: "docs".into(),
         columns: vec![
-            ColumnSpec::new("id", parse_type("(not-null int8)")?),
-            ColumnSpec::new("title", parse_type("text")?),
-            ColumnSpec::new("tags", parse_type("(array (not-null text))")?),
+            ColumnSpec::new("id", parse_type("int8")?),
+            ColumnSpec::new("title", parse_type("(option text)")?),
+            ColumnSpec::new("tags", parse_type("(option (array text))")?),
         ],
         primary_key: vec!["id".into()],
     })
@@ -37,10 +37,10 @@ A `TableSpec` has:
   - It must not be empty.
   - Names starting with `sys_` or `engine_` are reserved for the catalog.
   - Names are case-sensitive.
-- **`columns`:** between 1 and 1,600 columns, in order, each a name and an IR type (see [Types](../ir/types.md)). Column names must be distinct. A type without `(not-null ...)` allows NULLs.
+- **`columns`:** between 1 and 1,600 columns, in order, each a name and an IR type (see [Types](../ir/types.md)). Column names must be distinct. Only columns of optional type, `(option T)`, allow NULLs.
 - **`primary_key`:**
   - One or more of the columns, in key order. Every table has a primary key.
-  - Primary key columns become NOT NULL whatever their declared type.
+  - Primary key columns never hold NULL, whatever their declared type.
   - Arrays and `jsonb` can't be key columns.
 
 Types the engine can't store fail with `42P16`: records, entity references and arrays of arrays. A duplicate table name fails with `42P07`.
@@ -50,11 +50,11 @@ Rows are stored in primary key order, and primary key lookups and ranges are the
 ## Adding a column
 
 ```rust,ignore
-session.add_column("docs", &ColumnSpec::new("summary", parse_type("text")?)).await?;
+session.add_column("docs", &ColumnSpec::new("summary", parse_type("(option text)")?)).await?;
 ```
 
 The new column goes at the end, and existing rows read it as NULL:
-- An added column must be nullable, since there are no column defaults to fill existing rows; adding a NOT NULL column fails with `42P16`.
+- An added column must have an optional type, since there are no column defaults to fill existing rows; adding a column of plain type fails with `42P16`.
 - A column name that already exists fails with `42701`.
 
 There is no way yet to drop, rename or retype a column, or to rename a table.

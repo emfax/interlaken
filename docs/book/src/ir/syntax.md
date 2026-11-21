@@ -94,7 +94,7 @@ The result is *resolved* IR, in which references are by ID:
 ```text
 (plan :schema-version 2
   (project :bind 2
-    (filter (get (tid 111) :as u :bind 1) (= #1.0 (param 1 int8)))
+    (filter (get (tid 111) :as u :bind 1) (= #1.0 (param 1 (option int8))))
     (as #1.1 name)
     (as (call (fid 2) #1.1) shout)))
 ```
@@ -141,12 +141,12 @@ The full list is in [Error codes](../reference/errors.md).
 The examples in this book run against a small database. A test checks that every IR example parses and resolves against it:
 
 <!-- begin generated: example-schema -->
-- `users`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`; `dept` `text`.
-- `folders`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`; `owner` `int8`.
-- `docs`: `id` `(not-null int8)`, primary key; `folder` `int8`; `title` `text`; `owner` `int8`; `updated` `timestamptz`; `tags` `(array text)`.
-- `groups`: `id` `(not-null int8)`, primary key; `name` `(not-null text)`.
-- `user_groups`: `member` `(not-null int8)`, primary key; `grp` `(not-null int8)`, primary key.
-- `user_group_closure`: `descendant` `(not-null int8)`, primary key; `ancestor` `(not-null int8)`, primary key; `paths` `(not-null int8)`.
+- `users`: `id` `int8`, primary key; `name` `text`; `dept` `(option text)`.
+- `folders`: `id` `int8`, primary key; `name` `text`; `owner` `(option int8)`.
+- `docs`: `id` `int8`, primary key; `folder` `(option int8)`; `title` `(option text)`; `owner` `(option int8)`; `updated` `(option timestamptz)`; `tags` `(option (array (option text)))`.
+- `groups`: `id` `int8`, primary key; `name` `text`.
+- `user_groups`: `member` `int8`, primary key; `grp` `int8`, primary key.
+- `user_group_closure`: `descendant` `int8`, primary key; `ancestor` `int8`, primary key; `paths` `int8`.
 
 Entity types, for policies:
 

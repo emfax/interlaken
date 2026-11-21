@@ -5,7 +5,7 @@
 `(param N TYPE)` stands for the statement's `N`th parameter, counting from 1. The value is passed separately from the plan text, so it is never parsed as IR, and one plan text serves for every value:
 
 ```ir
-(plan (filter (get docs :as d) (and (= d.owner (param 1 int8)) (> d.updated (param 2 timestamptz)))))
+(plan (filter (get docs :as d) (and (= d.owner (param 1 (option int8))) (> d.updated (param 2 (option timestamptz))))))
 ```
 
 Values are passed as `interlaken_ir::interp::Datum`s, in order, to `Session::query`, `Session::query_stream` or their `_plan` variants. The declared type says which `Datum` variant to pass:
@@ -22,7 +22,7 @@ Values are passed as `interlaken_ir::interp::Datum`s, in order, to `Session::que
 | `uuid` | `Uuid([u8; 16])` |
 | `jsonb` | `Jsonb(String)` |
 | `(array T)` | `Array(Vec<Datum>)` |
-| any nullable type | `Null` |
+| any optional type, `(option T)` | `Null` |
 
 The declared type types the parameter where it is used, just as a column's type would. Implicit conversions apply: an `int4` parameter compared with an `int8` column is widened.
 
@@ -36,7 +36,7 @@ Before a statement runs, the engine checks the values passed against the paramet
 | --- | --- |
 | exactly one value per parameter number, up to the highest the plan declares | `08P01`: "the statement has 2 parameters, but 1 value was supplied" |
 | each value is the `Datum` variant of its declared type, and so are array elements and record fields | `42804`: "parameter 1 is declared int8, but the value supplied is Int4(1)" |
-| `Null` only for a nullable parameter | `22004`: "parameter 1 is declared (not-null int8), but NULL was supplied" |
+| `Null` only for an optional parameter | `22004`: "parameter 1 is declared int8, but NULL was supplied" |
 
 There are no conversions between variants: pass `Datum::Int8` for an `int8` parameter, not `Datum::Int4`. A number that no parameter uses still needs a value, of any variant, to keep the numbering. `EXPLAIN ANALYZE` runs a statement without parameter values, so it fails with `08P01` for a plan that declares any.
 
@@ -59,14 +59,14 @@ There are no conversions between variants: pass `Datum::Int8` for an `int8` para
 # session.create_table(&TableSpec {
 #     name: "users".into(),
 #     columns: vec![
-#         ColumnSpec::new("id", parse_type("(not-null int8)")?),
-#         ColumnSpec::new("name", parse_type("(not-null text)")?),
+#         ColumnSpec::new("id", parse_type("int8")?),
+#         ColumnSpec::new("name", parse_type("text")?),
 #     ],
 #     primary_key: vec!["id".into()],
 # }).await?;
 # session.query(r#"(plan (insert users (values (columns id name) (row 1 "ada") (row 2 "bob")) (columns id name)))"#, Vec::new()).await?;
 let by_id = session
-    .prepare("(plan (project (filter (get users :as u) (= u.id (param 1 int8))) u.name))")
+    .prepare("(plan (project (filter (get users :as u) (= u.id (param 1 (option int8)))) u.name))")
     .await?;
 for id in [1, 2] {
     let result = session.query_plan(&by_id, vec![Datum::Int8(id)]).await?;

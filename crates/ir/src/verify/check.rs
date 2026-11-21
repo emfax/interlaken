@@ -44,7 +44,7 @@ pub struct VerifyOptions {
 ///
 /// let mut catalog = InMemoryCatalog::new(SchemaVersion::new(1));
 /// catalog.add_table(
-///     TableDef::new(TableId::new(100), "t").column("x", DataType::from(ScalarType::Bool).nullable()),
+///     TableDef::new(TableId::new(100), "t").column("x", DataType::from(ScalarType::Bool).option()),
 /// )?;
 /// let plan = parse_plan("(plan (policy-filter (get (tid 100) :bind 1) #1.0) :schema-version 1)")?;
 /// assert!(matches!(
@@ -195,7 +195,7 @@ fn joined(
 ) -> Schema {
     let pad = |mut c: Col, nullable: bool| {
         if nullable {
-            c.out.ty.nullable = true;
+            c.out.ty.optional = true;
         }
         c
     };
@@ -568,8 +568,8 @@ impl Verifier<'_> {
                     if !(*all && *op == crate::rel::SetOpKind::Union) {
                         expect_comparable(&l.out.ty, "a set operation column")?;
                     }
-                    let nullable = l.out.ty.nullable || r.out.ty.nullable;
-                    types.push((l.out.name.clone(), l.out.ty.clone().with_nullable(nullable)));
+                    let nullable = l.out.ty.optional || r.out.ty.optional;
+                    types.push((l.out.name.clone(), l.out.ty.clone().with_optional(nullable)));
                 }
                 let binding = self.bind(*binding, "a set operation")?;
                 Self::outputs(binding, types)?
@@ -601,8 +601,8 @@ impl Verifier<'_> {
                         *slot = Some(match slot.take() {
                             None => ty,
                             Some(prev) if prev.data == ty.data => {
-                                let nullable = prev.nullable || ty.nullable;
-                                prev.with_nullable(nullable)
+                                let nullable = prev.optional || ty.optional;
+                                prev.with_optional(nullable)
                             }
                             Some(prev) => {
                                 return Err(type_error(format!(
@@ -647,8 +647,7 @@ impl Verifier<'_> {
                         .ok_or_else(|| structure("every nest field needs a name"))?;
                     record.push(Field::new(field_name, ty));
                 }
-                let array =
-                    DataType::Array(Box::new(DataType::Record(record).not_null())).not_null();
+                let array = DataType::Array(Box::new(DataType::Record(record).plain())).plain();
                 types.push((Some(name.clone()), array));
                 let binding = self.bind(*binding, "a nest")?;
                 Self::outputs(binding, types)?
@@ -671,8 +670,8 @@ impl Verifier<'_> {
                     DataType::Record(fields) => fields
                         .iter()
                         .map(|f| {
-                            let nullable = f.ty.nullable || element.nullable;
-                            f.ty.clone().with_nullable(nullable)
+                            let nullable = f.ty.optional || element.optional;
+                            f.ty.clone().with_optional(nullable)
                         })
                         .collect(),
                     _ => vec![(**element).clone()],
@@ -724,10 +723,10 @@ impl Verifier<'_> {
                 if let Some(missing) = table
                     .columns
                     .iter()
-                    .find(|c| !c.ty.nullable && !seen.contains(&c.id))
+                    .find(|c| !c.ty.optional && !seen.contains(&c.id))
                 {
                     return Err(structure(format!(
-                        "insert omits NOT NULL column {}",
+                        "insert omits column {}, whose type isn't optional",
                         missing.name
                     )));
                 }
@@ -841,9 +840,9 @@ impl Verifier<'_> {
                 if types.iter().map(|t| &t.data).ne(def.args.iter()) {
                     return Err(mismatch(format!("arguments do not match {}", def.name)));
                 }
-                let nullable = def.returns.nullable
-                    || (def.properties.strict && types.iter().any(|t| t.nullable));
-                def.returns.clone().with_nullable(nullable)
+                let nullable = def.returns.optional
+                    || (def.properties.strict && types.iter().any(|t| t.optional));
+                def.returns.clone().with_optional(nullable)
             }
             Expr::Unary { op, expr: operand } => {
                 let ty = self.expr(operand, env)?;
@@ -859,7 +858,7 @@ impl Verifier<'_> {
                 for item in items {
                     let ty = self.expr(item, env)?;
                     expect_bool(&ty, "an AND or OR operand")?;
-                    nullable |= ty.nullable;
+                    nullable |= ty.optional;
                 }
                 typing::boolean(nullable)
             }
@@ -897,7 +896,7 @@ impl Verifier<'_> {
                         let ty = self.expr(e, env)?;
                         result = merge(Some(result), ty).map_err(mismatch)?;
                     }
-                    None => result.nullable = true,
+                    None => result.optional = true,
                 }
                 result
             }
@@ -906,12 +905,12 @@ impl Verifier<'_> {
                 let mut all_nullable = true;
                 for item in items {
                     let ty = self.expr(item, env)?;
-                    all_nullable &= ty.nullable;
+                    all_nullable &= ty.optional;
                     result = Some(merge(result, ty).map_err(mismatch)?);
                 }
                 result
                     .ok_or_else(|| structure("COALESCE needs at least one argument"))?
-                    .with_nullable(all_nullable)
+                    .with_optional(all_nullable)
             }
             Expr::Try {
                 expr: inner,
@@ -935,7 +934,7 @@ impl Verifier<'_> {
                         "empty array; resolved IR writes (cast (array) TYPE)".into(),
                     )
                 })?;
-                DataType::Array(Box::new(element)).not_null()
+                DataType::Array(Box::new(element)).plain()
             }
             Expr::NullIf { left, right } => {
                 let l = self.expr(left, env)?;
@@ -947,25 +946,25 @@ impl Verifier<'_> {
                     )));
                 }
                 expect_comparable(&l, "a NULLIF operand")?;
-                l.with_nullable(true)
+                l.with_optional(true)
             }
             Expr::Cast { expr: operand, to }
                 if matches!(&**operand, Expr::Array(items) if items.is_empty())
                     && matches!(to, DataType::Array(_)) =>
             {
                 // A typed empty array.
-                to.clone().not_null()
+                to.clone().plain()
             }
             Expr::Cast { expr: operand, to } if matches!(**operand, Expr::Literal(Value::Null)) => {
                 // A typed NULL: the one place an untyped NULL may appear.
-                to.clone().nullable()
+                to.clone().option()
             }
             Expr::Cast { expr: operand, to } => {
                 let ty = self.expr(operand, env)?;
                 if !typing::explicit(&ty.data, to) {
                     return Err(mismatch(format!("cannot cast {} to {to}", ty.data)));
                 }
-                to.clone().nullable().with_nullable(ty.nullable)
+                to.clone().option().with_optional(ty.optional)
             }
             Expr::Subquery { kind, .. } => {
                 let name = match kind {
@@ -990,13 +989,13 @@ fn scope<'a>(local: &'a Schema, outer: &[&'a Schema]) -> Vec<&'a Schema> {
         .collect()
 }
 
-/// Combine a result type with another branch's: data types must match; nullable if either is.
+/// Combine a result type with another branch's: data types must match; optional if either is.
 fn merge(acc: Option<Type>, next: Type) -> std::result::Result<Type, String> {
     match acc {
         None => Ok(next),
         Some(prev) if prev.data == next.data => {
-            let nullable = prev.nullable || next.nullable;
-            Ok(prev.with_nullable(nullable))
+            let nullable = prev.optional || next.optional;
+            Ok(prev.with_optional(nullable))
         }
         Some(prev) => Err(format!(
             "branches have types {} and {}",

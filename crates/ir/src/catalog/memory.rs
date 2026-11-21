@@ -57,7 +57,7 @@ pub enum CatalogError {
 /// let mut catalog = InMemoryCatalog::new(SchemaVersion::new(1));
 /// catalog.add_table(
 ///     TableDef::new(TableId::new(100), "users")
-///         .column("id", DataType::from(ScalarType::Int8).not_null())
+///         .column("id", DataType::from(ScalarType::Int8).plain())
 ///         .primary_key(["id"]),
 /// )?;
 /// let users = catalog.table_by_name(&QualifiedName::from("users")).unwrap();
@@ -108,7 +108,7 @@ impl InMemoryCatalog {
     ///
     /// Returns a [`CatalogError`] if the ID or name is taken, column IDs
     /// are not `0..n` in order, column names repeat, or the primary key
-    /// names a missing or nullable column.
+    /// names a missing column or one with an optional type.
     pub fn add_table(&mut self, table: TableDef) -> Result<(), CatalogError> {
         if self.tables.contains_key(&table.id) {
             return Err(CatalogError::DuplicateTableId(table.id));
@@ -165,9 +165,9 @@ impl InMemoryCatalog {
                         id.get()
                     )));
                 }
-                Some(column) if column.ty.nullable => {
+                Some(column) if column.ty.optional => {
                     return Err(invalid(format!(
-                        "primary key column {} is nullable",
+                        "primary key column {} has an optional type",
                         column.name
                     )));
                 }
@@ -431,9 +431,9 @@ mod tests {
     use crate::catalog::{FunctionKind, FunctionProperties};
     use crate::types::{DataType, ScalarType};
 
-    /// Construct a nullable or NOT NULL scalar type.
+    /// Construct an optional or plain scalar type.
     fn scalar(s: ScalarType, nullable: bool) -> crate::types::Type {
-        DataType::from(s).nullable().with_nullable(nullable)
+        DataType::from(s).option().with_optional(nullable)
     }
 
     /// Construct a scalar function overload.
@@ -443,7 +443,7 @@ mod tests {
             name: name.into(),
             kind: FunctionKind::Scalar,
             args: args.iter().map(|a| DataType::from(*a)).collect(),
-            returns: DataType::from(ScalarType::Text).nullable(),
+            returns: DataType::from(ScalarType::Text).option(),
             properties: FunctionProperties::default(),
         }
     }

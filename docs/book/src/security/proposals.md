@@ -21,8 +21,8 @@ Policies decide who can see what, so a careless change can expose data or lock e
 #     columns: columns.iter().map(|(n, t)| ColumnSpec::new(*n, parse_type(t).unwrap())).collect(),
 #     primary_key: vec!["id".into()],
 # };
-# session.create_table(&table("users", &[("id", "(not-null int8)"), ("dept", "text")])).await?;
-# session.create_table(&table("docs", &[("id", "(not-null int8)"), ("owner", "int8")])).await?;
+# session.create_table(&table("users", &[("id", "int8"), ("dept", "(option text)")])).await?;
+# session.create_table(&table("docs", &[("id", "int8"), ("owner", "(option int8)")])).await?;
 # session.declare_entity(&EntitySpec { name: "User".into(), table: "users".into(), key: "id".into(), attributes: vec![AttributeSpec::new("dept")] }).await?;
 # session.declare_entity(&EntitySpec { name: "Doc".into(), table: "docs".into(), key: "id".into(), attributes: vec![AttributeSpec::reference("owner", "owner", "User")] }).await?;
 let document = PolicyDocument {

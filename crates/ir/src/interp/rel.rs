@@ -358,7 +358,7 @@ impl<'a> Interp<'a> {
     fn check_constraints(&self, table: &TableDef, rows: &[Vec<Datum>]) -> Result<(), EvalError> {
         for row in rows {
             for column in &table.columns {
-                if !column.ty.nullable
+                if !column.ty.optional
                     && row[usize::try_from(column.id.get()).expect("column id")].is_null()
                 {
                     return Err(EvalError::NotNull {

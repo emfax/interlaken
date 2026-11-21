@@ -81,13 +81,19 @@ pub fn ty() -> impl Strategy<Value = Type> {
         ident().prop_map(DataType::Entity),
     ];
     let data = leaf.prop_recursive(3, 12, 3, |inner| {
-        let ty = (inner, any::<bool>()).prop_map(|(data, nullable)| Type { data, nullable });
+        let ty = (inner, any::<bool>()).prop_map(|(data, nullable)| Type {
+            data,
+            optional: nullable,
+        });
         prop_oneof![
             ty.clone().prop_map(|t| DataType::Array(Box::new(t))),
             vec((ident(), ty).prop_map(|(n, t)| Field::new(n, t)), 0..3).prop_map(DataType::Record),
         ]
     });
-    (data, any::<bool>()).prop_map(|(data, nullable)| Type { data, nullable })
+    (data, any::<bool>()).prop_map(|(data, nullable)| Type {
+        data,
+        optional: nullable,
+    })
 }
 
 /// Generate literals of every kind, with special floats.

@@ -35,8 +35,8 @@ fn ir_catalog() -> InMemoryCatalog {
     parse_catalog(
         "(catalog (builtins)
            (table t :id 100
-             (column id (not-null int8)) (column a int4) (column b text) (column c float8)
-             (column d bool) (column e int2)
+             (column id int8) (column a (option int4)) (column b (option text)) (column c (option float8))
+             (column d (option bool)) (column e (option int2))
              (primary-key id)))",
     )
     .unwrap()
