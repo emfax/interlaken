@@ -87,7 +87,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "23503",
         "foreign_key_violation",
-        "Creating a foreign key found a row that refers to a row that doesn't exist.",
+        "A row refers through a foreign key to a row that doesn't exist, or a deleted or changed row is still referred to.",
     ),
     state(
         "23505",

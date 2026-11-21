@@ -16,9 +16,9 @@ pub(crate) use keys::{
 };
 pub(crate) use read::read_range_latest;
 pub use read::{
-    IndexBatch, RowBatch, RowScan, ValueRange, check_indexes, get, get_many,
-    register_row_dependency, register_scan_dependency, scan, scan_filtered, scan_index,
-    scan_index_many, scan_many,
+    IndexBatch, RowBatch, RowScan, ValueRange, check_indexes, get, get_many, probe_keys,
+    probe_prefixes, register_row_dependency, register_scan_dependency, scan, scan_filtered,
+    scan_index, scan_index_many, scan_many,
 };
 pub(crate) use write::read_latest;
 pub use write::{Row, delete, insert, update};

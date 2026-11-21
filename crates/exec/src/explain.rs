@@ -533,11 +533,16 @@ fn is_mask(e: &Expr) -> bool {
     }
 }
 
-/// Render the closure tables a DML operator maintains, if any (ADR-0017).
+/// Render the closure tables a DML operator maintains (ADR-0017) and the
+/// foreign keys it checks (ADR-0035), if any.
 fn maintains(dml: &crate::physical::Dml) -> String {
-    dml.closure.as_ref().map_or_else(String::new, |plan| {
+    let closures = dml.closure.as_ref().map_or_else(String::new, |plan| {
         format!(" maintaining closures: {}", plan.table_names().join(", "))
-    })
+    });
+    let references = dml.references.as_ref().map_or_else(String::new, |plan| {
+        format!(" checking foreign keys: {}", plan.names().join(", "))
+    });
+    closures + &references
 }
 
 /// Where in the plan an operator sits, for hiding policy logic.

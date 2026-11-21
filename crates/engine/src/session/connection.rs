@@ -808,8 +808,9 @@ impl Session {
 
     /// Create a foreign key, after checking every existing row satisfies it (ADR-0035).
     ///
-    /// Declared foreign keys are not yet enforced on later writes: that is
-    /// phase 2 of ADR-0035.
+    /// Later writes are checked against it when each statement ends.
+    /// `on delete cascade` and `set-null` aren't carried out yet (phase 3
+    /// of ADR-0035); until then they act as `no-action`.
     ///
     /// # Errors
     ///

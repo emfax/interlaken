@@ -56,6 +56,10 @@ pub enum ExecError {
         /// The group entity.
         group: String,
     },
+    /// A statement's writes leave a row referring to a row that doesn't
+    /// exist through a foreign key (SQLSTATE `23503`, ADR-0035).
+    #[error("foreign key violation: {0}")]
+    ForeignKey(String),
 }
 
 impl ExecError {
@@ -80,6 +84,7 @@ impl ExecError {
             Self::MemoryExceeded { .. } => "53200",
             Self::QueryCanceled => "57014",
             Self::MembershipCycle { .. } => "23514",
+            Self::ForeignKey(_) => "23503",
         }
     }
 }

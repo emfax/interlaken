@@ -279,6 +279,8 @@ pub struct Dml {
     pub target: Layout,
     /// For an edges table, the closure tables kept up to date (ADR-0017).
     pub closure: Option<Arc<crate::closure::ClosurePlan>>,
+    /// The foreign keys the writes must satisfy (ADR-0035).
+    pub references: Option<Arc<crate::references::ReferencePlan>>,
 }
 
 impl Op {
@@ -876,6 +878,8 @@ impl Planner<'_> {
             }
         };
         let closure = crate::closure::guard_dml(self.catalog, &table)?;
+        let references =
+            crate::references::ReferencePlan::for_table(self.catalog, &table)?.map(Arc::new);
         let mut input = self.build(input)?;
         name_write_checks(&mut input, table.name.last().as_str());
         Ok(Dml {
@@ -884,6 +888,7 @@ impl Planner<'_> {
             target: target_layout,
             table,
             closure,
+            references,
         })
     }
 

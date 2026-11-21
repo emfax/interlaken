@@ -22,6 +22,7 @@ mod eval;
 mod functions;
 mod like;
 mod params;
+mod references;
 mod rel;
 mod run;
 

@@ -10,7 +10,7 @@ use super::eval::{Frame, Layout, truth};
 use super::run::{Database, ExecOptions};
 use crate::catalog::{Catalog, FunctionDef, TableDef};
 use crate::expr::{Expr, NamedExpr};
-use crate::names::{BindingId, ColumnId, FunctionId, FunctionRef, TableRef, TargetColumn};
+use crate::names::{BindingId, ColumnId, FunctionId, FunctionRef, TableId, TableRef, TargetColumn};
 use crate::rel::{ApplyKind, DmlTarget, JoinKind, Rel, SetOpKind, SortKey};
 
 /// A relation's rows, with the layout of each row.
@@ -396,6 +396,17 @@ impl<'a> Interp<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Replace the rows of `table`, restoring them if a foreign key from or to it fails.
+    fn replace_rows(&mut self, table: TableId, rows: Vec<Vec<Datum>>) -> Result<(), EvalError> {
+        let before = self.db.rows(table).to_vec();
+        self.db.set_rows(table, rows);
+        let checked = super::references::check(self.catalog, self.db, table);
+        if checked.is_err() {
+            self.db.set_rows(table, before);
+        }
+        checked
     }
 
     /// Evaluate `RETURNING` over changed rows of `table`, as rows of the target binding.
@@ -825,7 +836,7 @@ impl<'a> Interp<'a> {
                 let mut all: Vec<Vec<Datum>> = self.db.rows(table.id).to_vec();
                 all.extend(new_rows.iter().cloned());
                 self.check_constraints(&table, &all)?;
-                self.db.set_rows(table.id, all);
+                self.replace_rows(table.id, all)?;
                 self.returning(target, &table, &new_rows, returning, *binding)?
             }
             Rel::Update {
@@ -854,7 +865,7 @@ impl<'a> Interp<'a> {
                     changed.push(new);
                 }
                 self.check_constraints(&table, &all)?;
-                self.db.set_rows(table.id, all);
+                self.replace_rows(table.id, all)?;
                 self.returning(target, &table, &changed, returning, *binding)?
             }
             Rel::Delete {
@@ -875,8 +886,7 @@ impl<'a> Interp<'a> {
                     .into_iter()
                     .enumerate()
                     .partition(|(i, _)| matched.contains(i));
-                self.db
-                    .set_rows(table.id, kept.into_iter().map(|(_, r)| r).collect());
+                self.replace_rows(table.id, kept.into_iter().map(|(_, r)| r).collect())?;
                 let deleted: Vec<Vec<Datum>> = deleted.into_iter().map(|(_, r)| r).collect();
                 self.returning(target, &table, &deleted, returning, *binding)?
             }

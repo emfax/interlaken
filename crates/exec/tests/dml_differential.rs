@@ -227,6 +227,23 @@ fn bag(rows: &[Vec<Datum>]) -> HashMap<RowKey, usize> {
 #[test]
 /// Assert statement sequences have the same effects and results in the executor and the interpreter.
 fn statements_agree_with_interpreter() {
+    agree(CATALOG);
+}
+
+#[test]
+/// Assert the same with a foreign key from posts to their authors (ADR-0035):
+/// posts by missing authors and deletes of users with posts fail with
+/// `23503` in both, and statements that satisfy it agree.
+fn statements_agree_with_interpreter_under_a_foreign_key() {
+    let catalog = CATALOG.strip_suffix(')').unwrap().to_owned()
+        + "\n  (foreign-key posts_author_fk :table posts (columns author) (references users id)))";
+    let violations = agree(&catalog);
+    assert!(violations > 0, "no statement violated the foreign key");
+}
+
+/// Run random statement sequences against `catalog_text` through both, and
+/// return how many failed in both with a foreign key violation.
+fn agree(catalog_text: &str) -> u32 {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -303,11 +320,11 @@ fn statements_agree_with_interpreter() {
         txn.commit().await.unwrap();
         storage
     });
-    let catalog = Arc::new(parse_catalog(CATALOG).unwrap());
+    let catalog = Arc::new(parse_catalog(catalog_text).unwrap());
     let shared: Arc<dyn Catalog> = catalog.clone();
     let cases = 600;
-    let counters: [AtomicU32; 3] = Default::default();
-    let [statements, failures, index_scans] = &counters;
+    let counters: [AtomicU32; 4] = Default::default();
+    let [statements, failures, index_scans, violations] = &counters;
     let parse = |text: &str, catalog: &InMemoryCatalog| {
         resolve(&parse_plan(&format!("(plan {text})")).unwrap(), catalog)
             .unwrap_or_else(|e| panic!("{e}: {text}"))
@@ -371,8 +388,17 @@ fn statements_agree_with_interpreter() {
                         describe()
                     );
                 }
-                (Err(_), Err(_)) => {
+                (Err(e), Err(a)) => {
                     failures.fetch_add(1, Ordering::Relaxed);
+                    let foreign = [e.sqlstate(), a.sqlstate()].map(|s| s == "23503");
+                    prop_assert!(
+                        foreign[0] == foreign[1],
+                        "interpreter {e}, executor {a}\n{}",
+                        describe()
+                    );
+                    if foreign[0] {
+                        violations.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 (e, a) => {
                     return Err(TestCaseError::fail(format!(
@@ -413,8 +439,11 @@ fn statements_agree_with_interpreter() {
         Ok(())
     })
     .unwrap();
-    let [statements, failures, index_scans] = counters.map(|c| c.into_inner());
-    eprintln!("{statements} statements, {failures} failed in both, {index_scans} used an index");
+    let [statements, failures, index_scans, violations] = counters.map(|c| c.into_inner());
+    eprintln!(
+        "{statements} statements, {failures} failed in both ({violations} on a foreign key), \
+         {index_scans} used an index"
+    );
     assert!(
         failures * 20 >= statements,
         "too few failing statements: {failures}"
@@ -423,4 +452,5 @@ fn statements_agree_with_interpreter() {
         index_scans * 10 >= statements,
         "too few index scans: {index_scans}"
     );
+    violations
 }

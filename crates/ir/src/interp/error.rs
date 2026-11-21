@@ -40,6 +40,9 @@ pub enum EvalError {
         /// The column.
         column: String,
     },
+    /// A row refers to a row that doesn't exist through a foreign key (23503).
+    #[error("foreign key violation: {0}")]
+    ForeignKey(String),
     /// A duplicate primary key or unique index key (23505).
     #[error("duplicate key value violates a unique constraint of \"{0}\"")]
     UniqueViolation(String),
@@ -79,6 +82,7 @@ impl EvalError {
             Self::NegativeLimit(_) => "2201X",
             Self::NotNull { .. } => "23502",
             Self::UniqueViolation(_) => "23505",
+            Self::ForeignKey(_) => "23503",
             Self::Absent => "22004",
             Self::PermissionDenied => "42501",
             Self::Unsupported(_) => "0A000",

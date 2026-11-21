@@ -10,7 +10,7 @@ use interlaken_engine::catalog::{
 use interlaken_engine::{Engine, EngineError, Session};
 use interlaken_ir::catalog::{Catalog, ForeignKeyDef};
 use interlaken_ir::security::EntityUid;
-use interlaken_storage::{Storage, TxnOptions};
+use interlaken_storage::{Isolation, Storage, TxnOptions};
 
 use support::session::{admin, create, options, session, table};
 
@@ -474,4 +474,347 @@ async fn tables_and_indexes_are_guarded() {
     root.drop_table("docs").await.unwrap();
     assert!(foreign_keys(&engine).await.is_empty());
     root.drop_table("users").await.unwrap();
+}
+
+/// Return the rows of `text`.
+async fn rows(session: &mut Session, text: &str) -> Vec<Vec<interlaken_ir::interp::Datum>> {
+    session
+        .query(text, Vec::new())
+        .await
+        .unwrap_or_else(|e| panic!("{e}: {text}"))
+        .rows()
+}
+
+/// Return the SQLSTATE and message of running `text`, which must fail.
+async fn fails(session: &mut Session, text: &str) -> (&'static str, String) {
+    failure(session.query(text, Vec::new()).await)
+}
+
+/// Create [`schema`] with users 1 and 2, the three foreign keys of
+/// `declarations_are_recorded` (all `NoAction`), and documents 10 (owner
+/// 1) and 11 (child of 10, owner 2).
+async fn populated(engine: &Engine) -> Session {
+    let mut root = schema(engine).await;
+    run(
+        &mut root,
+        &[
+            "(plan (insert users (values (columns id email) (row 1 \"a@x\") (row 2 \"b@x\")) \
+             (columns id email)))",
+            "(plan (insert docs (values (columns id owner editor_email parent) \
+             (row 10 1 \"a@x\" null) (row 11 2 null 10)) (columns id owner editor_email parent)))",
+        ],
+    )
+    .await;
+    for spec in [
+        ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"]),
+        ForeignKeySpec::new(
+            "docs_editor_fk",
+            "docs",
+            ["editor_email"],
+            "users",
+            ["email"],
+        ),
+        ForeignKeySpec::new("docs_parent_fk", "docs", ["parent"], "docs", ["id"]),
+    ] {
+        root.create_foreign_key(&spec).await.unwrap();
+    }
+    root
+}
+
+/// Return the ids of every document, in order.
+async fn doc_ids(session: &mut Session) -> Vec<i64> {
+    rows(session, "(plan (sort (project (get docs) id) (asc id)))")
+        .await
+        .into_iter()
+        .map(|r| match r[0] {
+            interlaken_ir::interp::Datum::Int8(v) => v,
+            ref other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert inserts, updates and deletes are checked against foreign keys in
+/// both directions, through primary keys and unique indexes, and a
+/// violating statement fails with 23503 and leaves nothing behind.
+async fn writes_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = populated(&engine).await;
+    let cases = [
+        (
+            "(plan (insert docs (values (columns id owner) (row 20 1) (row 21 7)) (columns id owner)))",
+            "foreign key docs_owner_fk: a row of docs refers to a row of users with id = Int8(7), \
+             which doesn't exist",
+        ),
+        (
+            "(plan (insert docs (values (columns id editor_email) (row 20 \"c@x\")) \
+             (columns id editor_email)))",
+            "foreign key docs_editor_fk: a row of docs refers to a row of users with email = \
+             Text(\"c@x\")",
+        ),
+        (
+            "(plan (update docs (filter (get docs) (= id 11)) (set owner 9)))",
+            "a row of docs refers to a row of users with id = Int8(9)",
+        ),
+        (
+            "(plan (delete users (filter (get users) (= id 2))))",
+            "foreign key docs_owner_fk: rows of docs still refer to the row of users with id = \
+             Int8(2)",
+        ),
+        (
+            "(plan (update users (filter (get users) (= id 1)) (set email \"z@x\")))",
+            "foreign key docs_editor_fk: rows of docs still refer to the row of users with email \
+             = Text(\"a@x\")",
+        ),
+        (
+            "(plan (delete docs (filter (get docs) (= id 10))))",
+            "foreign key docs_parent_fk: rows of docs still refer to the row of docs with id = \
+             Int8(10)",
+        ),
+    ];
+    for (text, expected) in cases {
+        let (state, message) = fails(&mut root, text).await;
+        assert_eq!(state, "23503", "{text}: {message}");
+        assert!(message.contains(expected), "{text}: {message}");
+    }
+    // Nothing was written: the first insert's valid row 20 is gone too.
+    assert_eq!(doc_ids(&mut root).await, [10, 11]);
+
+    // Statements that keep every reference valid succeed.
+    run(
+        &mut root,
+        &[
+            "(plan (insert docs (values (columns id owner editor_email parent) \
+             (row 20 null null null) (row 21 2 \"b@x\" 11)) (columns id owner editor_email parent)))",
+            "(plan (update users (filter (get users) (= id 2)) (set email \"b@x\")))",
+            "(plan (update users (filter (get users) (= id 1)) (set email (concat email \"\"))))",
+            "(plan (update docs (filter (get docs) (= id 21)) (set owner 1) (set editor_email null)))",
+            "(plan (delete docs (filter (get docs) (= id 21))))",
+            "(plan (update users (filter (get users) (= id 2)) (set email \"c@x\")))",
+        ],
+    )
+    .await;
+    // Inside a transaction, the failed statement's writes are undone
+    // before the transaction is rolled back.
+    root.begin(TxnOptions::default()).await.unwrap();
+    run(
+        &mut root,
+        &["(plan (delete docs (filter (get docs) (= id 20))))"],
+    )
+    .await;
+    let (state, _) = fails(
+        &mut root,
+        "(plan (delete users (filter (get users) (= id 1))))",
+    )
+    .await;
+    assert_eq!(state, "23503");
+    root.rollback().unwrap();
+    assert_eq!(doc_ids(&mut root).await, [10, 11, 20]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert foreign keys must hold when each statement ends, not after each
+/// row: one statement may insert a self-referencing tree children first,
+/// or delete a whole subtree.
+async fn checks_hold_at_statement_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = populated(&engine).await;
+    // Children before their parents, spread over several batches.
+    let rows_text: String = (0..3000)
+        .rev()
+        .map(|i| {
+            let parent = if i == 0 {
+                "null".to_owned()
+            } else {
+                (100 + (i - 1) / 2).to_string()
+            };
+            format!(" (row {} 1 {parent})", 100 + i)
+        })
+        .collect();
+    run(
+        &mut root,
+        &[&format!(
+            "(plan (insert docs (values (columns id owner parent){rows_text}) \
+             (columns id owner parent)))"
+        )],
+    )
+    .await;
+    assert_eq!(doc_ids(&mut root).await.len(), 3002);
+    // Deleting the tree's root alone fails; deleting the whole tree works.
+    let (state, _) = fails(
+        &mut root,
+        "(plan (delete docs (filter (get docs) (= id 100))))",
+    )
+    .await;
+    assert_eq!(state, "23503");
+    run(
+        &mut root,
+        &["(plan (delete docs (filter (get docs) (>= id 100))))"],
+    )
+    .await;
+    assert_eq!(doc_ids(&mut root).await, [10, 11]);
+    // A row may refer to itself.
+    run(
+        &mut root,
+        &[
+            "(plan (insert docs (values (columns id owner parent) (row 30 1 30)) \
+           (columns id owner parent)))",
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert MATCH FULL rejects partly NULL keys on write, and that
+/// `on delete cascade` acts as `no-action` until cascades are built.
+async fn match_full_and_pending_cascades() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = schema(&engine).await;
+    root.create_table(&table(
+        "pairs",
+        &[("a", "int8"), ("b", "int8")],
+        &["a", "b"],
+    ))
+    .await
+    .unwrap();
+    root.create_table(&table(
+        "refs",
+        &[
+            ("id", "int8"),
+            ("a", "(option int8)"),
+            ("b", "(option int8)"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_index(&index("refs_ab", "refs", &["a", "b"], false))
+        .await
+        .unwrap();
+    root.create_foreign_key(
+        &ForeignKeySpec::new("refs_fk", "refs", ["a", "b"], "pairs", ["a", "b"])
+            .match_full()
+            .on_delete(ReferentialAction::Cascade),
+    )
+    .await
+    .unwrap();
+    run(
+        &mut root,
+        &[
+            "(plan (insert pairs (values (columns a b) (row 1 2)) (columns a b)))",
+            "(plan (insert refs (values (columns id a b) (row 1 1 2) (row 2 null null)) \
+             (columns id a b)))",
+        ],
+    )
+    .await;
+    let (state, message) = fails(
+        &mut root,
+        "(plan (insert refs (values (columns id a b) (row 3 1 (cast null int8))) (columns id a b)))",
+    )
+    .await;
+    assert_eq!(state, "23503", "{message}");
+    assert!(message.contains("matches FULL"), "{message}");
+    let (state, message) = fails(&mut root, "(plan (delete pairs (get pairs)))").await;
+    assert_eq!(state, "23503", "{message}");
+    assert!(
+        message.contains("with a = Int8(1), b = Int8(2) (on delete cascade isn't carried out yet)"),
+        "{message}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert EXPLAIN names the foreign keys a write checks.
+async fn explain_shows_checked_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = populated(&engine).await;
+    let plan = root
+        .explain("(plan (delete users (filter (get users) (= id 9))))", false)
+        .await
+        .unwrap();
+    assert!(
+        plan.contains("checking foreign keys: docs_editor_fk, docs_owner_fk"),
+        "{plan}"
+    );
+    let plan = root
+        .explain(
+            "(plan (insert docs (values (columns id) (row 50)) (columns id)))",
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(
+        plan.contains("checking foreign keys: docs_editor_fk, docs_owner_fk, docs_parent_fk"),
+        "{plan}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a concurrent "insert a child" and "delete its parent" can't both
+/// commit, in either commit order, at every isolation level.
+async fn concurrent_writes_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = populated(&engine).await;
+    let mut other = session(&engine, admin());
+    let mut id = 1000;
+    for isolation in [
+        Isolation::ReadCommitted,
+        Isolation::RepeatableRead,
+        Isolation::Serializable,
+    ] {
+        for child_commits_first in [false, true] {
+            id += 1;
+            run(
+                &mut root,
+                &[&format!(
+                    "(plan (insert users (values (columns id) (row {id})) (columns id)))"
+                )],
+            )
+            .await;
+            root.begin(TxnOptions::new(isolation)).await.unwrap();
+            other.begin(TxnOptions::new(isolation)).await.unwrap();
+            run(
+                &mut root,
+                &[&format!(
+                    "(plan (insert docs (values (columns id owner) (row {id} {id})) \
+                     (columns id owner)))"
+                )],
+            )
+            .await;
+            run(
+                &mut other,
+                &[&format!(
+                    "(plan (delete users (filter (get users) (= id {id}))))"
+                )],
+            )
+            .await;
+            let (first, second) = if child_commits_first {
+                (&mut root, &mut other)
+            } else {
+                (&mut other, &mut root)
+            };
+            first.commit().await.unwrap();
+            let (state, message) = failure(second.commit().await);
+            assert_eq!(
+                state, "40001",
+                "{isolation:?}, child first: {child_commits_first}: {message}"
+            );
+        }
+    }
+    // No document refers to a missing user.
+    let dangling = rows(
+        &mut root,
+        "(plan (join anti (get docs :as d) (get users :as u) (= d.owner u.id)))",
+    )
+    .await;
+    assert!(
+        dangling
+            .iter()
+            .all(|r| r[1] == interlaken_ir::interp::Datum::Null),
+        "{dangling:?}"
+    );
 }

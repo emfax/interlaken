@@ -32,6 +32,7 @@ use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
 use crate::memory::{Reservation, key_bytes};
 use crate::physical::{Dml, Physical};
+use crate::references::Checker;
 
 /// What a DML operator does to each target row.
 enum Write {
@@ -67,6 +68,8 @@ struct DmlState {
     schema: SchemaRef,
     /// For an edges table, keeps its closure tables up to date.
     closure: Option<Maintainer>,
+    /// Checks the writes against the foreign keys involving the table.
+    references: Option<Checker>,
 }
 
 /// Convert a row to its stored form.
@@ -196,6 +199,11 @@ impl DmlState {
                         c.record(None, Some(row))?;
                     }
                 }
+                if let Some(r) = &mut self.references {
+                    for row in &rows {
+                        r.record(None, Some(row))?;
+                    }
+                }
                 written = rows;
             }
             Write::Delete(key) => {
@@ -209,6 +217,9 @@ impl DmlState {
                     if deleted {
                         if let Some(c) = &mut self.closure {
                             c.record(Some(&targets[i]), None)?;
+                        }
+                        if let Some(r) = &mut self.references {
+                            r.record(Some(&targets[i]), None)?;
                         }
                         written.push(targets[i].clone());
                     }
@@ -248,6 +259,9 @@ impl DmlState {
                         if let Some(c) = &mut self.closure {
                             c.record(Some(&targets[i]), Some(&new))?;
                         }
+                        if let Some(r) = &mut self.references {
+                            r.record(Some(&targets[i]), Some(&new))?;
+                        }
                         written.push(new);
                     }
                 }
@@ -255,6 +269,9 @@ impl DmlState {
         }
         if let Some(c) = &mut self.closure {
             c.apply(txn).await?;
+        }
+        if let Some(r) = &mut self.references {
+            r.check_batch(txn).await?;
         }
         Ok(written)
     }
@@ -296,6 +313,10 @@ impl Pull for DmlState {
             );
         }
         let Some(b) = self.input.next().await else {
+            // The statement's rows are all written: recheck what failed on the way.
+            if let Some(mut r) = self.references.take() {
+                r.finish(&self.ctx.txn).await?;
+            }
             return Ok(None);
         };
         let written = self.apply(&b?).await?;
@@ -357,5 +378,9 @@ pub(crate) fn dml(
             .closure
             .clone()
             .map(|plan| Maintainer::new(plan, ctx.reserve(node, "ClosureMaintenance"))),
+        references: dml
+            .references
+            .clone()
+            .map(|plan| Checker::new(plan, ctx.reserve(node, "ForeignKeyChecks"))),
     }))
 }

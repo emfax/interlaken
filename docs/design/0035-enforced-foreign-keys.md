@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phase 1, declarations, is built; enforcement on writes (phases 2 and 3) and the optimizer (phase 4) aren't.
+Accepted. Phases 1 and 2, declarations and checks on writes, are built; cascades (phase 3) and the optimizer (phase 4) aren't.
 
 ## Summary
 
@@ -201,9 +201,20 @@ These facts allow:
     - **Existing databases.** The two catalog tables are created with a new database. Databases created before this change lack them and won't load, as with ADR-0034 phase 1; there is no migration.
     - Declared foreign keys aren't enforced on writes until phase 2. The book's chapter and limits page say so.
   - *Testing:* `crates/ir/tests/catalog_foreign_keys.rs` covers the text form, lookups and every validation rule. `crates/engine/tests/foreign_keys.rs` covers recording and restart, the existing-row check under `MATCH SIMPLE` and `MATCH FULL` with primary key, unique index and composite keys, every `42P16` case, agreement with entity attributes in both orders, and the `drop_table` and `drop_index` guards.
-- [ ] **Phase 2: Checks.** `rows::probe_keys` and `probe_prefixes` with dependency registration; `ReferencePlan`; per-batch checks and the statement-end recheck of pending keys; `EXPLAIN`.
+- [x] **Phase 2: Checks.** `rows::probe_keys` and `probe_prefixes` with dependency registration; `ReferencePlan`; per-batch checks and the statement-end recheck of pending keys; `EXPLAIN`.
     - **Oracle test:** random DML statements on a parent, a child and a self-referencing table, through `Session`. After every statement, the outcome must match a model that applies the statement and then checks integrity from scratch: rejected if and only if the model finds a violation, and with no dangling references in any case.
     - **Concurrency test:** sessions race to insert children and delete parents at each isolation level. After all commits, no reference dangles, and every failure is `40001` or `23503`.
+  - *As implemented:*
+    - **Storage.** `rows::probe_keys` probes primary keys or a unique index's exclusive entries, and `rows::probe_prefixes` scans primary key or index prefixes, returning up to `limit` primary keys each. Both read the latest state and register each probed key or range as a dependency before reading.
+    - **Executor.** `ReferencePlan` (in `crates/exec/src/references.rs`) holds the outgoing and incoming foreign keys of the DML target. Each is resolved at plan time into a `Probe`: the table, the index or primary key, and the target row positions of the key's values, in key column order. A `Checker` on the DML operator records written rows, probes once per batch, keeps keys that fail, and rechecks them when the operator's input is exhausted.
+    - **Removed keys written again.** An incoming key that rows still refer to at the end passes if the statement wrote the referenced key again: SQL's `NO ACTION`.
+    - **Statement end** is the end of each DML operator's input. A nested DML operator is checked when it finishes, before the operator containing it writes. The interpreter does the same.
+    - **Until phase 3**, `Cascade` and `SetNull` act as `NoAction`, and the violation's message says the action isn't carried out yet.
+    - **Interpreter.** The reference interpreter checks, after each DML operator, every foreign key from or to the written table over the whole database, restoring the table if one fails.
+  - *Testing:*
+    - The oracle is the existing DML differential test run with a foreign key from `posts.author` to `users.id` (`statements_agree_with_interpreter_under_a_foreign_key` in `crates/exec/tests/dml_differential.rs`). Random inserts, updates and deletes, some with subqueries, joins and `RETURNING`, must give the same results, the same table contents and the same failures, with `23503` exactly when the interpreter raises it. One run had 4,800 statements, 413 of them violations. The model is the interpreter, not a separate integrity model, and the test runs through the executor's statement runner rather than `Session`.
+    - `crates/engine/tests/foreign_keys.rs` covers every direction and key kind, statement atomicity, a 3,000-row self-referencing tree inserted children first and deleted in one statement, `MATCH FULL`, pending cascades and `EXPLAIN`.
+    - The concurrency test races "insert a child" against "delete its parent" in both commit orders at all three isolation levels; the second committer always fails with `40001`. With dependency registration removed, the test fails.
 - [ ] **Phase 3: Cascades.** `Cascade` and `SetNull`: prepared cascade plans, the work list, write checks, closure maintenance through cascades, `42501` for denied cascaded rows. The oracle gains cascading foreign keys and an entity whose deletion cascades to its membership edges.
 - [ ] **Phase 4: Optimizer.** Join elimination for ungoverned parents, and foreign-key cardinality estimates, with property tests that eliminated and original plans agree.
 

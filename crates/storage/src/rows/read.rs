@@ -6,7 +6,8 @@ use std::ops::Bound;
 use bytes::Bytes;
 
 use super::keys::{
-    index_entry, index_range, index_values_prefix, pk_from_index_entry, pk_key, row_key,
+    index_entry, index_range, index_values_prefix, pk_from_index_entry, pk_key, pk_of, row_key,
+    unique_key,
 };
 use super::write::Row;
 use crate::catalog::{IndexDef, IndexId, TableDef};
@@ -409,6 +410,99 @@ fn request(range: KeyRange, scan: &RowScan) -> ScanRequest {
     request.limit_rows = scan.limit_rows;
     request.resume.clone_from(&scan.resume);
     request
+}
+
+/// Return whether a row exists with each of `keys`, seeing the current
+/// statement's writes, and register each probed key as a dependency.
+///
+/// Without `index`, each key is a primary key. With `index`, which must be
+/// unique, each key is its indexed values, in index column order, all
+/// non-NULL. The transaction's commit then fails at every isolation level
+/// if a transaction that committed after its snapshot wrote any probed row
+/// or entry, as with [`register_row_dependency`]. Foreign key checks use
+/// this for the referenced rows they find (ADR-0035).
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`](crate::Error::Encode) if a key doesn't encode,
+/// [`CatalogError::InvalidDefinition`] if `index` isn't unique, or a
+/// storage error.
+pub async fn probe_keys(
+    txn: &Txn,
+    table: &TableDef,
+    index: Option<&IndexDef>,
+    keys: &[Vec<Datum>],
+) -> Result<Vec<bool>> {
+    if let Some(index) = index
+        && !index.is_unique()
+    {
+        return Err(CatalogError::InvalidDefinition(format!(
+            "probing keys of index \"{}\", which isn't unique",
+            index.name()
+        ))
+        .into());
+    }
+    let encoded = keys
+        .iter()
+        .map(|key| match index {
+            None => pk_key(table, key),
+            Some(index) => unique_key(table, index, key),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for key in &encoded {
+        txn.register_dependency(key.clone());
+    }
+    let found = txn.get_many_latest(encoded).await?;
+    Ok(found.iter().map(Option::is_some).collect())
+}
+
+/// Return the primary keys of up to `limit` rows whose leading key values
+/// are each of `prefixes`, seeing the current statement's writes, and
+/// register each prefix's whole range as a dependency.
+///
+/// Without `index`, the prefixes are leading primary key values; with it,
+/// leading indexed values. Like [`register_scan_dependency`], the commit
+/// then fails at every isolation level if a transaction that committed
+/// after the snapshot wrote in a range, including a row inserted into it.
+/// Foreign key checks use this to find the rows that refer to a removed
+/// row (ADR-0035).
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`](crate::Error::Encode) if a prefix doesn't
+/// encode, a catalog error if it is longer than the key, or a storage
+/// error.
+pub async fn probe_prefixes(
+    txn: &Txn,
+    table: &TableDef,
+    index: Option<&IndexDef>,
+    prefixes: &[Vec<Datum>],
+    limit: usize,
+) -> Result<Vec<Vec<Vec<Datum>>>> {
+    let types = table.types();
+    let mut out = Vec::with_capacity(prefixes.len());
+    for prefix in prefixes {
+        let key = match index {
+            Some(index) => index_values_prefix(table, index, prefix)?,
+            None => pk_key(table, prefix)?,
+        };
+        let range = KeyRange::prefix(&key);
+        txn.register_dependency_range(range.clone());
+        let mut request = ScanRequest::new(range);
+        request.limit_rows = limit.max(1);
+        let batch = txn.scan_latest(request).await?;
+        let keys = batch
+            .rows
+            .iter()
+            .take(limit)
+            .map(|(key, value)| match index {
+                Some(index) => pk_from_index_entry(table, index, key, value),
+                None => Ok(pk_of(table, &decode_row(value, &types)?.1)),
+            })
+            .collect::<Result<_>>()?;
+        out.push(keys);
+    }
+    Ok(out)
 }
 
 /// Read every `(key, value)` in `range`, seeing the current statement's writes.

@@ -90,6 +90,7 @@ Every row written is checked against the table's constraints:
 | unique index | `23505` |
 | column of plain type | `23502` |
 | membership hierarchy without cycles | `23514` |
+| [foreign key](../ddl/foreign-keys.md) | `23503`, checked when the statement ends |
 
 The checks see the statement's earlier writes. Shifting every key of a table by one, as in `(set id (+ u.id 1))`, can therefore collide with a row the statement hasn't moved yet, and fail with `23505`, as it can in Postgres.
 
