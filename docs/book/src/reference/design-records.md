@@ -7,7 +7,7 @@ ADRs differ from this book:
 - **This book describes current behaviour,** and is kept true to the code: its examples are checked and its reference sections are generated.
 - **ADRs record decisions and their history:** the context, the options considered, the decision and its consequences. As each part is built, an ADR gains *As implemented* notes where the implementation differs from the plan, and they are kept rather than rewritten. Where an ADR and this book disagree, this book is right about the current behaviour.
 
-An ADR's status is *accepted* when its decision is made but not fully built, *implemented* once it is built, and *superseded* when a later ADR replaces it.
+An ADR's status is *proposal* while it is under discussion, *accepted* when its decision is made but not fully built, *implemented* once it is built, and *superseded* when a later ADR replaces it.
 
 ## Storage
 
@@ -33,6 +33,7 @@ An ADR's status is *accepted* when its decision is made but not fully built, *im
 | 0013 | IR forms, formats, resolver and verifier | implemented |
 | 0014 | Rule-based optimizer for the MVP | implemented |
 | 0021 | IR correctness and security testing strategy | implemented |
+| 0034 | Two-valued logic with an explicit option type | accepted: designed, not built |
 
 ## Security
 
@@ -66,6 +67,7 @@ An ADR's status is *accepted* when its decision is made but not fully built, *im
 | ADR | Title | Status |
 | --- | --- | --- |
 | 0031 | Engine sessions and the storage-backed catalog | implemented |
+| 0035 | Enforced foreign keys | accepted: designed, not built |
 
 ## Design documents
 
