@@ -18,7 +18,7 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 
 - **Columns:** a column can be added, but not dropped, renamed or retyped, and a table can't be renamed (see [Tables and column types](../ddl/tables.md)).
 - **Defaults:** columns have no default values; an omitted column is NULL.
-- **Constraints:** primary keys, unique indexes and NOT NULL only. There are no foreign keys, check constraints or sequences.
+- **Constraints:** primary keys, unique indexes, NOT NULL and foreign keys. Foreign keys are checked when created but not yet on writes ([ADR-0035](design-records.md) phase 2). There are no check constraints or sequences.
 - **Views:** none.
 - **Types tables can't hold:** records, entity references and arrays of arrays (`42P16`). Arrays and `jsonb` can't be key columns, and float columns are never used as index keys.
 

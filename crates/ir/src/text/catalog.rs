@@ -13,16 +13,22 @@
 //!   (entity TYPE :table TABLE :key COLUMN
 //!     (attr NAME [COLUMN] [:references TYPE])...)
 //!   (membership MEMBER GROUP :edges TABLE (MEMBER-COLUMN GROUP-COLUMN)
-//!     :closure TABLE (DESCENDANT-COLUMN ANCESTOR-COLUMN PATHS-COLUMN)))
+//!     :closure TABLE (DESCENDANT-COLUMN ANCESTOR-COLUMN PATHS-COLUMN))
+//!   (foreign-key NAME :table TABLE (columns COLUMN...) (references TABLE COLUMN...)
+//!     [:index NAME] [:on-delete no-action|cascade|set-null] [:match simple|full]))
 //! ```
+//!
+//! A foreign key without `:index` refers to the referenced table's primary
+//! key; with it, to that unique index.
 
 use super::error::ParseError;
 use super::read;
 use super::read::{Form, boolean, ident, list_of, qualified, uint};
 use super::sexp::{Sexp, SexpKind, read_one};
 use crate::catalog::{
-    AttributeDef, EntityDef, FunctionDef, FunctionKind, FunctionProperties, InMemoryCatalog,
-    IndexColumn, IndexDef, MembershipDef, TableDef, Volatility, install_builtins,
+    AttributeDef, EntityDef, ForeignKeyDef, FunctionDef, FunctionKind, FunctionProperties,
+    InMemoryCatalog, IndexColumn, IndexDef, MembershipDef, ReferentialAction, TableDef, Volatility,
+    install_builtins,
 };
 use crate::names::{ColumnId, FunctionId, Ident, SchemaVersion, TableId};
 
@@ -300,6 +306,57 @@ fn membership(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<MembershipDef> {
     })
 }
 
+/// Read `(foreign-key ...)`, resolving table and column names against `catalog`.
+fn foreign_key(catalog: &InMemoryCatalog, sexp: &Sexp) -> Result<ForeignKeyDef> {
+    let mut form = Form::expect(sexp, "foreign-key")?;
+    let name = ident(form.next("the foreign key name")?)?;
+    let table = table_named(
+        catalog,
+        form.keyword("table")
+            .ok_or_else(|| ParseError::at(sexp.pos, "needs :table"))?,
+    )?;
+    let index = form.keyword("index").map(ident).transpose()?;
+    let on_delete = match form.keyword("on-delete") {
+        None => ReferentialAction::NoAction,
+        Some(v) => v
+            .as_word()
+            .and_then(ReferentialAction::from_name)
+            .ok_or_else(|| ParseError::at(v.pos, "expected no-action, cascade or set-null"))?,
+    };
+    let match_full = match form.keyword("match") {
+        None => false,
+        Some(v) => match v.as_word() {
+            Some("simple") => false,
+            Some("full") => true,
+            _ => return Err(ParseError::at(v.pos, "expected simple or full")),
+        },
+    };
+    let mut columns = Form::expect(form.next("the referencing columns")?, "columns")?;
+    let columns = columns
+        .rest()
+        .into_iter()
+        .map(|c| column_named(&table, c))
+        .collect::<Result<_>>()?;
+    let mut references = Form::expect(form.next("the referenced columns")?, "references")?;
+    let referenced = table_named(catalog, references.next("the referenced table")?)?;
+    let referenced_columns = references
+        .rest()
+        .into_iter()
+        .map(|c| column_named(&referenced, c))
+        .collect::<Result<_>>()?;
+    form.finish()?;
+    Ok(ForeignKeyDef {
+        name,
+        table: table.id,
+        columns,
+        referenced: referenced.id,
+        referenced_columns,
+        referenced_index: index,
+        on_delete,
+        match_full,
+    })
+}
+
 /// Parse a catalog in the text form above.
 ///
 /// # Errors
@@ -348,6 +405,10 @@ pub fn parse_catalog(text: &str) -> Result<InMemoryCatalog> {
             "membership" => {
                 let def = membership(&catalog, item)?;
                 catalog.add_membership(def).map_err(conflict)?;
+            }
+            "foreign-key" => {
+                let def = foreign_key(&catalog, item)?;
+                catalog.add_foreign_key(def).map_err(conflict)?;
             }
             other => {
                 return Err(ParseError::at(

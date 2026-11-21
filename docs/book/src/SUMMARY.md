@@ -29,6 +29,7 @@
 - [Tables and column types](ddl/tables.md)
 - [Indexes](ddl/indexes.md)
 - [Entities and memberships](ddl/entities.md)
+- [Foreign keys](ddl/foreign-keys.md)
 
 # Security
 

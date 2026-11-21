@@ -19,7 +19,9 @@ use super::engine::Engine;
 use super::pipeline::{Step, exec_context, parse, pin, prepare};
 use super::result::QueryResult;
 use super::stream::{Execution, QueryStream};
-use crate::catalog::{self, ColumnSpec, EntitySpec, IndexSpec, MembershipSpec, TableSpec};
+use crate::catalog::{
+    self, ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec,
+};
 use crate::error::EngineError;
 use crate::policy::{
     GateResult, PolicyDocument, PolicySettings, activate, set_policy_settings, submit_proposal,
@@ -800,6 +802,34 @@ impl Session {
     pub async fn drop_membership(&mut self, member: &str, group: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
             catalog::drop_membership(step.txn, member, group).await
+        })
+        .await
+    }
+
+    /// Create a foreign key, after checking every existing row satisfies it (ADR-0035).
+    ///
+    /// Declared foreign keys are not yet enforced on later writes: that is
+    /// phase 2 of ADR-0035.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::create_foreign_key`]),
+    /// and [`EngineError::ForeignKey`] if an existing row violates it.
+    pub async fn create_foreign_key(&mut self, spec: &ForeignKeySpec) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::create_foreign_key(step.txn, spec).await
+        })
+        .await
+    }
+
+    /// Drop a foreign key.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_foreign_key`]).
+    pub async fn drop_foreign_key(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            catalog::drop_foreign_key(step.txn, name).await
         })
         .await
     }

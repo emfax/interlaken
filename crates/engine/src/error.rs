@@ -80,6 +80,9 @@ pub enum EngineError {
     /// Revoking `admin` would leave no administrator.
     #[error("{0} is the last administrator; grant admin to another principal before revoking it")]
     LastAdmin(String),
+    /// A row refers to a row that doesn't exist, through a foreign key (ADR-0035).
+    #[error("foreign key violation: {0}")]
+    ForeignKey(String),
     /// A DDL request is invalid.
     #[error("invalid definition: {0}")]
     InvalidDefinition(String),
@@ -140,6 +143,7 @@ impl EngineError {
             Self::Security(S::ColumnDenied { .. }) | Self::PermissionDenied(_) => "42501",
             Self::Security(_) => "42501",
             Self::InvalidDefinition(_) => "42P16",
+            Self::ForeignKey(_) => "23503",
             Self::Parameter(e) => match e {
                 P::Count { .. } => "08P01",
                 P::Type { .. } => "42804",

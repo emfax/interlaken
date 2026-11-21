@@ -75,6 +75,7 @@ An `EntitySpec` names:
 - **`attributes`:** the columns policies can read, each under an attribute name.
   - `AttributeSpec::new("dept")` exposes the column of the same name.
   - `AttributeSpec::reference("owner", "owner", "User")` declares that the column holds the key of a `User`, so policies can follow it: `resource.owner.dept` is the department of the document's owner.
+    A reference isn't checked: a key with no `User` row makes that entity missing, and policies that read its attributes fail. A [foreign key](foreign-keys.md) on the same column makes the key exist, and must refer to the same entity type's key.
   - A NULL column means the attribute is absent, which policies must allow for (see [Writing policies in Cedar](../security/cedar.md)).
 
 Attributes that policies don't need can be left out; policies can't read undeclared columns. Entity declarations change only the catalog: the table and its rows stay as they are. `drop_entity(name)` removes a declaration, unless a membership uses it.

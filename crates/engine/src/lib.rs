@@ -65,6 +65,10 @@ mod book {
     #[doc = include_str!("../../../docs/book/src/ddl/entities.md")]
     struct Entities;
 
+    /// Data definition: foreign keys.
+    #[doc = include_str!("../../../docs/book/src/ddl/foreign-keys.md")]
+    struct ForeignKeys;
+
     /// Security: privileges.
     #[doc = include_str!("../../../docs/book/src/security/privileges.md")]
     struct Privileges;

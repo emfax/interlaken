@@ -105,6 +105,30 @@ Entity type declarations: the table holding each type and its key column.
 | `table_id` | `int4` | no |  |
 | `key_column` | `int4` | no |  |
 
+### `engine_foreign_key_columns`
+
+The column pairs of each foreign key, in order: each referencing column and the referenced column it holds a value of.
+
+| Column | Type | Nullable | Primary key |
+| --- | --- | --- | --- |
+| `name` | `text` | no | 1 |
+| `position` | `int4` | no | 2 |
+| `column_id` | `int4` | no |  |
+| `referenced_column` | `int4` | no |  |
+
+### `engine_foreign_keys`
+
+Foreign key declarations: the referencing and referenced tables, the unique index whose columns are the referenced columns (NULL for the primary key), the action on delete (`no-action`, `cascade` or `set-null`), and whether it matches `MATCH FULL`.
+
+| Column | Type | Nullable | Primary key |
+| --- | --- | --- | --- |
+| `name` | `text` | no | 1 |
+| `table_id` | `int4` | no |  |
+| `referenced_table` | `int4` | no |  |
+| `referenced_index` | `text` | yes |  |
+| `on_delete` | `text` | no |  |
+| `match_full` | `bool` | no |  |
+
 ### `engine_functions`
 
 Function properties set by administrators: whether each function is leakproof.

@@ -8,6 +8,7 @@
 mod builtins;
 mod defs;
 mod entities;
+mod foreign_keys;
 mod lookup;
 mod memory;
 
@@ -20,5 +21,6 @@ pub use defs::{
     Volatility,
 };
 pub use entities::{AttributeDef, EntityDef, MembershipDef};
+pub use foreign_keys::{ForeignKeyDef, ReferentialAction, referencing_index};
 pub use lookup::Catalog;
 pub use memory::{CatalogError, InMemoryCatalog};

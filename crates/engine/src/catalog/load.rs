@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use interlaken_ir::catalog::{
-    AttributeDef, EntityDef, InMemoryCatalog, IndexColumn, IndexDef, MembershipDef, TableDef,
-    install_builtins,
+    AttributeDef, EntityDef, ForeignKeyDef, InMemoryCatalog, IndexColumn, IndexDef, MembershipDef,
+    ReferentialAction, TableDef, install_builtins,
 };
 use interlaken_ir::{ColumnId, FunctionId, Ident, SchemaVersion, TableId, Type};
 use interlaken_storage::Txn;
@@ -12,8 +12,8 @@ use interlaken_storage::catalog;
 use interlaken_storage::encoding::{Datum, Direction, NullOrder};
 
 use super::tables::{
-    ATTRIBUTES, COLUMNS, ENTITIES, FUNCTIONS, MEMBERSHIPS, id_at, is_engine_table, read_all,
-    schema_version, text_at,
+    ATTRIBUTES, COLUMNS, ENTITIES, FOREIGN_KEY_COLUMNS, FOREIGN_KEYS, FUNCTIONS, MEMBERSHIPS,
+    id_at, is_engine_table, read_all, schema_version, text_at,
 };
 use super::types::derived_type;
 use crate::error::EngineError;
@@ -22,7 +22,7 @@ use crate::error::EngineError;
 ///
 /// The catalog holds the built-in functions (with administrators'
 /// property changes), every user table with its recorded IR column types,
-/// and the entity and membership declarations, at the catalog-wide schema
+/// and the entity, membership and foreign key declarations, at the catalog-wide schema
 /// version. Engine tables are left out. Every read goes through `txn`, and
 /// the schema version row becomes a dependency.
 ///
@@ -141,7 +141,47 @@ pub async fn load_catalog(txn: &Txn) -> Result<InMemoryCatalog, EngineError> {
         })
         .map_err(invalid)?;
     }
+    load_foreign_keys(txn, &mut ir).await?;
     Ok(ir)
+}
+
+/// Add the foreign key declarations to `ir`, which holds every table and entity type.
+async fn load_foreign_keys(txn: &Txn, ir: &mut InMemoryCatalog) -> Result<(), EngineError> {
+    let mut pairs: HashMap<String, (Vec<ColumnId>, Vec<ColumnId>)> = HashMap::new();
+    for row in read_all(txn, FOREIGN_KEY_COLUMNS, Vec::new()).await? {
+        let (columns, referenced) = pairs.entry(text_at(&row, 0)?.to_owned()).or_default();
+        columns.push(ColumnId::new(id_at(&row, 2)?));
+        referenced.push(ColumnId::new(id_at(&row, 3)?));
+    }
+    for row in read_all(txn, FOREIGN_KEYS, Vec::new()).await? {
+        let name = text_at(&row, 0)?;
+        let (columns, referenced_columns) = pairs.remove(name).unwrap_or_default();
+        let on_delete = ReferentialAction::from_name(text_at(&row, 4)?).ok_or_else(|| {
+            EngineError::Catalog(format!(
+                "foreign key {name} has an unknown action on delete"
+            ))
+        })?;
+        ir.add_foreign_key(ForeignKeyDef {
+            name: name.into(),
+            table: TableId::new(id_at(&row, 1)?),
+            columns,
+            referenced: TableId::new(id_at(&row, 2)?),
+            referenced_columns,
+            referenced_index: match row.get(3) {
+                Some(Datum::Text(index)) => Some(index.as_str().into()),
+                _ => None,
+            },
+            on_delete,
+            match_full: matches!(row.get(5), Some(Datum::Bool(true))),
+        })
+        .map_err(|e| EngineError::Catalog(e.to_string()))?;
+    }
+    if let Some(name) = pairs.keys().next() {
+        return Err(EngineError::Catalog(format!(
+            "columns of undeclared foreign key {name}"
+        )));
+    }
+    Ok(())
 }
 
 /// Return the IR column ID of the column at `position`.

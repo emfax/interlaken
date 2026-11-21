@@ -734,7 +734,7 @@ async fn uncommitted_policies_are_not_shared() {
 async fn transaction_limits_have_their_sqlstates() {
     let dir = tempfile::tempdir().unwrap();
     let mut opts = options();
-    opts.storage.max_write_set_bytes = 4096;
+    opts.storage.max_write_set_bytes = 8192;
     opts.storage.max_transaction_age = Duration::from_millis(200);
     let engine = Engine::create(dir.path(), opts, &admin()).await.unwrap();
     let mut root = session(&engine, admin());
@@ -774,7 +774,7 @@ async fn transaction_limits_have_their_sqlstates() {
 #[tokio::test(flavor = "multi_thread")]
 /// Assert parameter values are checked against their declarations before
 /// the statement runs: the count (08P01), each value's type (42804) and
-/// NULL for a NOT NULL parameter (22004), for text and prepared plans, and
+/// NULL for a parameter whose type isn't optional (22004), for text and prepared plans, and
 /// a rejected statement writes nothing.
 async fn parameters_are_checked() {
     let dir = tempfile::tempdir().unwrap();

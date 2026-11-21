@@ -1,6 +1,7 @@
 //! What engine DDL creates, by name.
 
 use interlaken_ir::Type;
+pub use interlaken_ir::catalog::ReferentialAction;
 
 /// A column of a new table.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,4 +146,75 @@ pub struct MembershipSpec {
     pub closure: String,
     /// The columns of `closure`: descendant key, ancestor key, number of paths.
     pub closure_columns: (String, String, String),
+}
+
+/// A new foreign key (ADR-0035).
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_engine::catalog::{ForeignKeySpec, ReferentialAction};
+///
+/// let fk = ForeignKeySpec::new("docs_owner", "docs", ["owner"], "users", ["id"])
+///     .on_delete(ReferentialAction::Cascade);
+/// assert_eq!(fk.referenced_columns, ["id"]);
+/// assert!(!fk.match_full);
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignKeySpec {
+    /// The foreign key's name, unique among foreign keys.
+    pub name: String,
+    /// The referencing table.
+    pub table: String,
+    /// The referencing columns, in order.
+    pub columns: Vec<String>,
+    /// The referenced table, which may be `table` itself.
+    pub references: String,
+    /// The referenced columns, paired with `columns` by position: the
+    /// referenced table's primary key or the columns of one of its unique
+    /// indexes, in any order.
+    pub referenced_columns: Vec<String>,
+    /// What deleting a referenced row does to the rows that refer to it.
+    pub on_delete: ReferentialAction,
+    /// `MATCH FULL`: referencing columns must be all NULL or all present.
+    /// Otherwise `MATCH SIMPLE`, where a row with any NULL referencing
+    /// column isn't checked.
+    pub match_full: bool,
+}
+
+impl ForeignKeySpec {
+    /// Construct a `NO ACTION`, `MATCH SIMPLE` foreign key from `columns`
+    /// of `table` to `referenced_columns` of `references`.
+    #[must_use]
+    pub fn new<'a>(
+        name: impl Into<String>,
+        table: impl Into<String>,
+        columns: impl IntoIterator<Item = &'a str>,
+        references: impl Into<String>,
+        referenced_columns: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            table: table.into(),
+            columns: columns.into_iter().map(Into::into).collect(),
+            references: references.into(),
+            referenced_columns: referenced_columns.into_iter().map(Into::into).collect(),
+            on_delete: ReferentialAction::NoAction,
+            match_full: false,
+        }
+    }
+
+    /// Return a copy with the action `on_delete`.
+    #[must_use]
+    pub fn on_delete(mut self, on_delete: ReferentialAction) -> Self {
+        self.on_delete = on_delete;
+        self
+    }
+
+    /// Return a copy that matches `MATCH FULL`.
+    #[must_use]
+    pub fn match_full(mut self) -> Self {
+        self.match_full = true;
+        self
+    }
 }

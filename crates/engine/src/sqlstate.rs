@@ -85,6 +85,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "A NULL was written to a NOT NULL column: one whose type isn't optional.",
     ),
     state(
+        "23503",
+        "foreign_key_violation",
+        "Creating a foreign key found a row that refers to a row that doesn't exist.",
+    ),
+    state(
         "23505",
         "unique_violation",
         "A row duplicates another's primary key or unique index key.",

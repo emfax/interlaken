@@ -19,6 +19,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `22025` | `invalid_escape_sequence` | A `LIKE` pattern ends with an escape character. |
 | `22P02` | `invalid_text_representation` | Text cast to another type is not a valid value of it. |
 | `23502` | `not_null_violation` | A NULL was written to a NOT NULL column: one whose type isn't optional. |
+| `23503` | `foreign_key_violation` | Creating a foreign key found a row that refers to a row that doesn't exist. |
 | `23505` | `unique_violation` | A row duplicates another's primary key or unique index key. |
 | `23514` | `check_violation` | A membership edge written by DML would make its hierarchy cyclic. |
 | `25001` | `active_sql_transaction` | `begin` was called with a transaction already open. |

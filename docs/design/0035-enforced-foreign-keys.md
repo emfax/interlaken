@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Designed, not built.
+Accepted. Phase 1, declarations, is built; enforcement on writes (phases 2 and 3) and the optimizer (phase 4) aren't.
 
 ## Summary
 
@@ -190,7 +190,17 @@ These facts allow:
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Declarations.** `ForeignKeySpec`; `create_foreign_key` and `drop_foreign_key`, including the existing-row check; the two engine catalog tables; `drop_table` and `drop_index` guards; `ForeignKeyDef` in the IR catalog and catalog text; agreement with `references`; SQLSTATE `23503`; the book's DDL chapter and catalog table reference.
+- [x] **Phase 1: Declarations.** `ForeignKeySpec`; `create_foreign_key` and `drop_foreign_key`, including the existing-row check; the two engine catalog tables; `drop_table` and `drop_index` guards; `ForeignKeyDef` in the IR catalog and catalog text; agreement with `references`; SQLSTATE `23503`; the book's DDL chapter and catalog table reference.
+  - *As implemented:*
+    - **Catalog-level definitions.** Foreign keys are declarations of the catalog, like memberships, not a field of `TableDef`: `InMemoryCatalog::add_foreign_key`, with `Catalog::foreign_keys`, `foreign_keys_of` and `foreign_keys_referencing`. A foreign key names two tables, and each can be checked once both exist, whatever order they were added in. The validation is in `crates/ir/src/catalog/foreign_keys.rs`.
+    - **Referencing index.** A prefix of the referencing table's primary key serves as well as a secondary index, so a table keyed by the entity it describes, such as `users_phone(user_id, ...)`, needs no extra index. `referencing_index` picks the primary key first.
+    - **Catalog text** gives the referencing table with `:table`: `(foreign-key NAME :table TABLE (columns ...) (references TABLE ...) [:index NAME] [:on-delete ...] [:match ...])`, a top-level item like `membership`.
+    - **Creation order.** `create_foreign_key` records the declaration, moves to the next statement and reloads the catalog, which validates it, before checking existing rows. So a declaration that doesn't fit its tables fails with `42P16`, never with a misleading `23503`. The row check reads referenced keys in batches: `get_many` for a primary key, `scan_index_many` for a unique index.
+    - **The `drop_index` guard** refuses the referenced unique index directly. Dropping the last index that leads with the referencing columns is refused by the catalog reload that follows all DDL, with the same message as creation.
+    - **Agreement with `references`** is checked in both `add_foreign_key` and `add_entity`, so declaration order doesn't matter.
+    - **Existing databases.** The two catalog tables are created with a new database. Databases created before this change lack them and won't load, as with ADR-0034 phase 1; there is no migration.
+    - Declared foreign keys aren't enforced on writes until phase 2. The book's chapter and limits page say so.
+  - *Testing:* `crates/ir/tests/catalog_foreign_keys.rs` covers the text form, lookups and every validation rule. `crates/engine/tests/foreign_keys.rs` covers recording and restart, the existing-row check under `MATCH SIMPLE` and `MATCH FULL` with primary key, unique index and composite keys, every `42P16` case, agreement with entity attributes in both orders, and the `drop_table` and `drop_index` guards.
 - [ ] **Phase 2: Checks.** `rows::probe_keys` and `probe_prefixes` with dependency registration; `ReferencePlan`; per-batch checks and the statement-end recheck of pending keys; `EXPLAIN`.
     - **Oracle test:** random DML statements on a parent, a child and a self-referencing table, through `Session`. After every statement, the outcome must match a model that applies the statement and then checks integrity from scratch: rejected if and only if the model finds a violation, and with no dangling references in any case.
     - **Concurrency test:** sessions race to insert children and delete parents at each isolation level. After all commits, no reference dangles, and every failure is `40001` or `23503`.

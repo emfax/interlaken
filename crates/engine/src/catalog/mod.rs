@@ -9,12 +9,13 @@ mod types;
 
 pub(crate) use cache::CatalogCache;
 pub use ddl::{
-    add_column, create_index, create_table, declare_entity, declare_membership, drop_entity,
-    drop_index, drop_membership, drop_table, set_function_leakproof,
+    add_column, create_foreign_key, create_index, create_table, declare_entity, declare_membership,
+    drop_entity, drop_foreign_key, drop_index, drop_membership, drop_table, set_function_leakproof,
 };
 pub use load::load_catalog;
 pub use specs::{
-    AttributeSpec, ColumnSpec, EntitySpec, IndexKey, IndexSpec, MembershipSpec, TableSpec,
+    AttributeSpec, ColumnSpec, EntitySpec, ForeignKeySpec, IndexKey, IndexSpec, MembershipSpec,
+    ReferentialAction, TableSpec,
 };
 pub use tables::{ENGINE_PREFIX, catalog_table_description, is_engine_table};
 pub(crate) use tables::{

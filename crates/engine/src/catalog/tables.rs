@@ -11,6 +11,8 @@
 //! | `engine_entities` | name | table_id, key_column |
 //! | `engine_attributes` | entity, position | name, column_id, refs (nullable) |
 //! | `engine_memberships` | member, grp | edges, edge_member, edge_group, closure, closure_descendant, closure_ancestor, closure_paths |
+//! | `engine_foreign_keys` | name | table_id, referenced_table, referenced_index (nullable), on_delete, match_full |
+//! | `engine_foreign_key_columns` | name, position | column_id, referenced_column |
 //! | `engine_functions` | function_id | leakproof |
 //! | `engine_privileges` | principal_type, principal_key, privilege | |
 //!
@@ -39,6 +41,10 @@ pub(crate) const ENTITIES: &str = "engine_entities";
 pub(crate) const ATTRIBUTES: &str = "engine_attributes";
 /// Membership declarations.
 pub(crate) const MEMBERSHIPS: &str = "engine_memberships";
+/// Foreign key declarations (ADR-0035).
+pub(crate) const FOREIGN_KEYS: &str = "engine_foreign_keys";
+/// The column pairs of each foreign key.
+pub(crate) const FOREIGN_KEY_COLUMNS: &str = "engine_foreign_key_columns";
 /// Function property overrides set by administrators.
 pub(crate) const FUNCTIONS: &str = "engine_functions";
 /// Privileges granted to principals.
@@ -105,6 +111,16 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
             "Membership declarations between entity types: the edges table and its member and \
              group columns, and the closure table and its descendant, ancestor and path-count \
              columns."
+        }
+        "engine_foreign_keys" => {
+            "Foreign key declarations: the referencing and referenced tables, the unique index \
+             whose columns are the referenced columns (NULL for the primary key), the action \
+             on delete (`no-action`, `cascade` or `set-null`), and whether it matches \
+             `MATCH FULL`."
+        }
+        "engine_foreign_key_columns" => {
+            "The column pairs of each foreign key, in order: each referencing column and the \
+             referenced column it holds a value of."
         }
         "engine_functions" => {
             "Function properties set by administrators: whether each function is leakproof."
@@ -183,6 +199,28 @@ pub(crate) async fn create_catalog_tables(txn: &Txn) -> Result<(), EngineError> 
                 int4("closure_paths"),
             ],
             vec!["member", "grp"],
+        ),
+        (
+            FOREIGN_KEYS,
+            vec![
+                text("name"),
+                int4("table_id"),
+                int4("referenced_table"),
+                ColumnDef::new("referenced_index", ColumnType::Text),
+                text("on_delete"),
+                ColumnDef::new("match_full", ColumnType::Bool).not_null(),
+            ],
+            vec!["name"],
+        ),
+        (
+            FOREIGN_KEY_COLUMNS,
+            vec![
+                text("name"),
+                int4("position"),
+                int4("column_id"),
+                int4("referenced_column"),
+            ],
+            vec!["name", "position"],
         ),
         (
             FUNCTIONS,

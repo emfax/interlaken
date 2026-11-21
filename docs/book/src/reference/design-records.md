@@ -67,7 +67,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | ADR | Title | Status |
 | --- | --- | --- |
 | 0031 | Engine sessions and the storage-backed catalog | implemented |
-| 0035 | Enforced foreign keys | accepted: designed, not built |
+| 0035 | Enforced foreign keys | accepted: declarations are built; enforcement on writes is not |
 
 ## Design documents
 

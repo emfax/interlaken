@@ -1,0 +1,477 @@
+//! Foreign key declarations (ADR-0035 phase 1): creating and dropping them
+//! through the engine, checking existing rows, rejecting declarations that
+//! don't fit their tables, and guarding the tables and indexes they use.
+
+mod support;
+
+use interlaken_engine::catalog::{
+    AttributeSpec, EntitySpec, ForeignKeySpec, IndexKey, IndexSpec, ReferentialAction, load_catalog,
+};
+use interlaken_engine::{Engine, EngineError, Session};
+use interlaken_ir::catalog::{Catalog, ForeignKeyDef};
+use interlaken_ir::security::EntityUid;
+use interlaken_storage::{Storage, TxnOptions};
+
+use support::session::{admin, create, options, session, table};
+
+/// Return the SQLSTATE and message of a failed result.
+fn failure<T: std::fmt::Debug>(result: Result<T, EngineError>) -> (&'static str, String) {
+    let err = result.unwrap_err();
+    (err.sqlstate(), err.to_string())
+}
+
+/// Run each statement, panicking on failure.
+async fn run(session: &mut Session, statements: &[&str]) {
+    for text in statements {
+        session
+            .query(text, Vec::new())
+            .await
+            .unwrap_or_else(|e| panic!("{e}: {text}"));
+    }
+}
+
+/// Return the foreign keys of the engine's committed catalog.
+async fn foreign_keys(engine: &Engine) -> Vec<ForeignKeyDef> {
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let catalog = load_catalog(&txn).await.unwrap();
+    txn.abort();
+    catalog
+        .foreign_keys()
+        .iter()
+        .map(|fk| (**fk).clone())
+        .collect()
+}
+
+/// Return an index spec on `columns` of `table`.
+fn index(name: &str, table: &str, columns: &[&str], unique: bool) -> IndexSpec {
+    IndexSpec {
+        name: name.into(),
+        table: table.into(),
+        columns: columns.iter().map(|c| IndexKey::asc(*c)).collect(),
+        unique,
+    }
+}
+
+/// Create `users(id, email)` with a unique index on `email`, and
+/// `docs(id, owner, editor_email, folder)` with an index on `owner`.
+async fn schema(engine: &Engine) -> Session {
+    let mut root = session(engine, admin());
+    root.create_table(&table(
+        "users",
+        &[("id", "int8"), ("email", "(option text)")],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_index(&index("users_email", "users", &["email"], true))
+        .await
+        .unwrap();
+    root.create_table(&table(
+        "docs",
+        &[
+            ("id", "int8"),
+            ("owner", "(option int8)"),
+            ("editor_email", "(option text)"),
+            ("parent", "(option int8)"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    for (name, column) in [
+        ("docs_owner", "owner"),
+        ("docs_editor", "editor_email"),
+        ("docs_parent", "parent"),
+    ] {
+        root.create_index(&index(name, "docs", &[column], false))
+            .await
+            .unwrap();
+    }
+    root
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a foreign key is recorded with its columns, index and options,
+/// survives a restart, and can be dropped.
+async fn declarations_are_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let engine = create(dir.path()).await;
+        let mut root = schema(&engine).await;
+        root.create_foreign_key(
+            &ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"])
+                .on_delete(ReferentialAction::Cascade),
+        )
+        .await
+        .unwrap();
+        root.create_foreign_key(
+            &ForeignKeySpec::new(
+                "docs_editor_fk",
+                "docs",
+                ["editor_email"],
+                "users",
+                ["email"],
+            )
+            .on_delete(ReferentialAction::SetNull)
+            .match_full(),
+        )
+        .await
+        .unwrap();
+        root.create_foreign_key(&ForeignKeySpec::new(
+            "docs_parent_fk",
+            "docs",
+            ["parent"],
+            "docs",
+            ["id"],
+        ))
+        .await
+        .unwrap();
+    }
+    let engine = Engine::open(dir.path(), options()).await.unwrap();
+    let fks = foreign_keys(&engine).await;
+    let names: Vec<&str> = fks.iter().map(|fk| fk.name.as_str()).collect();
+    assert_eq!(names, ["docs_editor_fk", "docs_owner_fk", "docs_parent_fk"]);
+    let editor = &fks[0];
+    assert_eq!(
+        editor.referenced_index.as_ref().map(|i| i.as_str()),
+        Some("users_email")
+    );
+    assert_eq!(editor.on_delete, ReferentialAction::SetNull);
+    assert!(editor.match_full);
+    let owner = &fks[1];
+    assert_eq!(owner.referenced_index, None);
+    assert_eq!(owner.on_delete, ReferentialAction::Cascade);
+    assert!(!owner.match_full);
+    assert_eq!(
+        (owner.columns[0].get(), owner.referenced_columns[0].get()),
+        (1, 0)
+    );
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let catalog = load_catalog(&txn).await.unwrap();
+    let docs = catalog.table_by_name(&"docs".into()).unwrap().id;
+    let users = catalog.table_by_name(&"users".into()).unwrap().id;
+    let named = |fks: Vec<std::sync::Arc<ForeignKeyDef>>| -> Vec<String> {
+        fks.iter().map(|fk| fk.name.to_string()).collect()
+    };
+    assert_eq!(named(catalog.foreign_keys_of(users)), Vec::<String>::new());
+    assert_eq!(
+        named(catalog.foreign_keys_referencing(users)),
+        ["docs_editor_fk", "docs_owner_fk"]
+    );
+    assert_eq!(
+        named(catalog.foreign_keys_referencing(docs)),
+        ["docs_parent_fk"]
+    );
+    txn.abort();
+
+    let mut root = session(&engine, admin());
+    let before = schema_version(&engine).await;
+    root.drop_foreign_key("docs_owner_fk").await.unwrap();
+    assert_eq!(foreign_keys(&engine).await.len(), 2);
+    assert_eq!(schema_version(&engine).await, before + 1);
+    let (state, message) = failure(root.drop_foreign_key("docs_owner_fk").await);
+    assert_eq!(state, "42P16", "{message}");
+}
+
+/// Return the engine's committed schema version.
+async fn schema_version(engine: &Engine) -> u64 {
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let version = load_catalog(&txn).await.unwrap().schema_version().get();
+    txn.abort();
+    version
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert creating a foreign key checks existing rows: dangling references
+/// fail with 23503 and record nothing; NULLs are skipped under MATCH
+/// SIMPLE, and partly NULL keys fail under MATCH FULL.
+async fn existing_rows_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = schema(&engine).await;
+    run(
+        &mut root,
+        &[
+            "(plan (insert users (values (columns id email) (row 1 \"a@x\") (row 2 null)) \
+             (columns id email)))",
+            "(plan (insert docs (values (columns id owner editor_email parent) \
+             (row 10 1 \"a@x\" null) (row 11 null null 10) (row 12 7 \"b@x\" 99)) \
+             (columns id owner editor_email parent)))",
+        ],
+    )
+    .await;
+    let owner = ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"]);
+    let (state, message) = failure(root.create_foreign_key(&owner).await);
+    assert_eq!(state, "23503", "{message}");
+    assert!(
+        message.contains("a row of docs refers to a row of users with id = Int8(7)"),
+        "{message}"
+    );
+    assert!(foreign_keys(&engine).await.is_empty());
+    let editor = ForeignKeySpec::new(
+        "docs_editor_fk",
+        "docs",
+        ["editor_email"],
+        "users",
+        ["email"],
+    );
+    let (state, message) = failure(root.create_foreign_key(&editor).await);
+    assert_eq!(state, "23503", "{message}");
+    assert!(message.contains("email = Text(\"b@x\")"), "{message}");
+
+    run(
+        &mut root,
+        &[
+            "(plan (update docs (filter (get docs) (= id 12)) (set owner 2) \
+           (set editor_email null) (set parent 11)))",
+        ],
+    )
+    .await;
+    // Row 11's NULL owner isn't checked under MATCH SIMPLE.
+    root.create_foreign_key(&owner).await.unwrap();
+    root.create_foreign_key(&editor).await.unwrap();
+    root.create_foreign_key(&ForeignKeySpec::new(
+        "docs_parent_fk",
+        "docs",
+        ["parent"],
+        "docs",
+        ["id"],
+    ))
+    .await
+    .unwrap();
+    assert_eq!(foreign_keys(&engine).await.len(), 3);
+
+    // MATCH FULL: a composite key may be all NULL, but not partly NULL.
+    root.create_table(&table(
+        "pairs",
+        &[("a", "int8"), ("b", "int8")],
+        &["a", "b"],
+    ))
+    .await
+    .unwrap();
+    root.create_table(&table(
+        "refs",
+        &[
+            ("id", "int8"),
+            ("a", "(option int8)"),
+            ("b", "(option int8)"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_index(&index("refs_ab", "refs", &["b", "a"], false))
+        .await
+        .unwrap();
+    run(
+        &mut root,
+        &[
+            "(plan (insert pairs (values (columns a b) (row 1 2)) (columns a b)))",
+            "(plan (insert refs (values (columns id a b) (row 1 1 2) (row 2 null null) \
+             (row 3 5 null)) (columns id a b)))",
+        ],
+    )
+    .await;
+    let full =
+        ForeignKeySpec::new("refs_full", "refs", ["b", "a"], "pairs", ["b", "a"]).match_full();
+    let (state, message) = failure(root.create_foreign_key(&full).await);
+    assert_eq!(state, "23503", "{message}");
+    assert!(message.contains("matches FULL"), "{message}");
+    let simple = ForeignKeySpec::new("refs_simple", "refs", ["b", "a"], "pairs", ["b", "a"]);
+    root.create_foreign_key(&simple).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert declarations that don't fit their tables fail with 42P16 and record nothing.
+async fn invalid_declarations_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = schema(&engine).await;
+    root.create_table(&table(
+        "notes",
+        &[("id", "int8"), ("owner", "int4"), ("doc", "int8")],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_index(&index("notes_owner", "notes", &["owner"], false))
+        .await
+        .unwrap();
+    let cases = [
+        (
+            ForeignKeySpec::new("bad", "notes", ["owner"], "users", ["id"]),
+            "notes.owner has type int4, but the column it refers to, users.id, has type int8",
+        ),
+        (
+            ForeignKeySpec::new("bad", "docs", ["editor_email"], "docs", ["editor_email"]),
+            "the referenced columns must be the primary key of docs or the columns of one of \
+             its unique indexes",
+        ),
+        (
+            ForeignKeySpec::new("bad", "notes", ["doc"], "docs", ["id"]),
+            "notes needs an index whose leading columns are doc",
+        ),
+        (
+            ForeignKeySpec::new("bad", "notes", ["id"], "docs", ["id"])
+                .on_delete(ReferentialAction::SetNull),
+            "on delete set-null needs notes.id to have an optional type",
+        ),
+        (
+            ForeignKeySpec::new("bad", "docs", ["owner", "parent"], "users", ["id"]),
+            "needs as many referenced columns as referencing columns",
+        ),
+        (
+            ForeignKeySpec::new("bad", "docs", ["owner"], "engine_entities", ["name"]),
+            "reserved",
+        ),
+    ];
+    for (spec, expected) in cases {
+        let (state, message) = failure(root.create_foreign_key(&spec).await);
+        assert_eq!(state, "42P16", "{message}");
+        assert!(message.contains(expected), "{message}");
+    }
+    let (state, message) = failure(
+        root.create_foreign_key(&ForeignKeySpec::new(
+            "bad",
+            "docs",
+            ["missing"],
+            "users",
+            ["id"],
+        ))
+        .await,
+    );
+    assert_eq!(state, "42703", "{message}");
+    assert!(foreign_keys(&engine).await.is_empty());
+
+    let owner = ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"]);
+    root.create_foreign_key(&owner).await.unwrap();
+    let (state, message) = failure(root.create_foreign_key(&owner).await);
+    assert_eq!(state, "42P16", "{message}");
+    assert!(message.contains("already exists"), "{message}");
+
+    let mut user = session(&engine, EntityUid::long("User", 1));
+    let (state, _) = failure(user.drop_foreign_key("docs_owner_fk").await);
+    assert_eq!(state, "42501");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a foreign key and an entity attribute on the same column must
+/// refer to the same entity type's key, in either declaration order, and
+/// that a primary key prefix serves as the referencing index.
+async fn references_must_agree() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = schema(&engine).await;
+    root.create_table(&table("groups", &[("id", "int8")], &["id"]))
+        .await
+        .unwrap();
+    for (name, table) in [("User", "users"), ("Group", "groups")] {
+        root.declare_entity(&EntitySpec {
+            name: name.into(),
+            table: table.into(),
+            key: "id".into(),
+            attributes: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    root.declare_entity(&EntitySpec {
+        name: "Doc".into(),
+        table: "docs".into(),
+        key: "id".into(),
+        attributes: vec![AttributeSpec::reference("owner", "owner", "Group")],
+    })
+    .await
+    .unwrap();
+    let owner = ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"]);
+    let (state, message) = failure(root.create_foreign_key(&owner).await);
+    assert_eq!(state, "42P16", "{message}");
+    assert!(
+        message.contains("attribute owner of entity type Doc refers to entity type Group"),
+        "{message}"
+    );
+    root.drop_entity("Doc").await.unwrap();
+    root.create_foreign_key(&owner).await.unwrap();
+    let (state, message) = failure(
+        root.declare_entity(&EntitySpec {
+            name: "Doc".into(),
+            table: "docs".into(),
+            key: "id".into(),
+            attributes: vec![AttributeSpec::reference("owner", "owner", "Group")],
+        })
+        .await,
+    );
+    assert_eq!(state, "42P16", "{message}");
+    root.declare_entity(&EntitySpec {
+        name: "Doc".into(),
+        table: "docs".into(),
+        key: "id".into(),
+        attributes: vec![AttributeSpec::reference("owner", "owner", "User")],
+    })
+    .await
+    .unwrap();
+
+    // An attribute table keyed by its entity: the primary key leads with
+    // the referencing column, so no other index is needed.
+    root.create_table(&table(
+        "users_phone",
+        &[("user_id", "int8"), ("phone", "text")],
+        &["user_id"],
+    ))
+    .await
+    .unwrap();
+    root.create_foreign_key(&ForeignKeySpec::new(
+        "users_phone_user",
+        "users_phone",
+        ["user_id"],
+        "users",
+        ["id"],
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert the tables and indexes a foreign key uses can't be dropped from
+/// under it, and dropping the referencing table drops its foreign keys.
+async fn tables_and_indexes_are_guarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = schema(&engine).await;
+    for spec in [
+        ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"]),
+        ForeignKeySpec::new(
+            "docs_editor_fk",
+            "docs",
+            ["editor_email"],
+            "users",
+            ["email"],
+        ),
+        ForeignKeySpec::new("docs_parent_fk", "docs", ["parent"], "docs", ["id"]),
+    ] {
+        root.create_foreign_key(&spec).await.unwrap();
+    }
+    let (state, message) = failure(root.drop_table("users").await);
+    assert_eq!(state, "42P16", "{message}");
+    assert!(message.contains("referred to by foreign key"), "{message}");
+    let (state, message) = failure(root.drop_index("users_email").await);
+    assert_eq!(state, "42P16", "{message}");
+    assert!(message.contains("docs_editor_fk"), "{message}");
+    let (state, message) = failure(root.drop_index("docs_owner").await);
+    assert_eq!(state, "42P16", "{message}");
+    assert!(
+        message.contains("docs needs an index whose leading columns are owner"),
+        "{message}"
+    );
+    // Another index leading with the column takes over.
+    root.create_index(&index("docs_owner_id", "docs", &["owner", "id"], false))
+        .await
+        .unwrap();
+    root.drop_index("docs_owner").await.unwrap();
+    assert_eq!(foreign_keys(&engine).await.len(), 3);
+
+    // Dropping docs drops its own foreign keys, the self-reference included.
+    root.drop_table("docs").await.unwrap();
+    assert!(foreign_keys(&engine).await.is_empty());
+    root.drop_table("users").await.unwrap();
+}

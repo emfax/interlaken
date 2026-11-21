@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use super::defs::{FunctionDef, FunctionProperties, TableDef};
 use super::entities::{EntityDef, MembershipDef};
+use super::foreign_keys::{self, ForeignKeyDef};
 use super::lookup::Catalog;
 use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
 use crate::{DataType, ScalarType};
@@ -32,6 +33,14 @@ pub enum CatalogError {
     #[error("invalid entity declaration {name}: {reason}")]
     InvalidEntity {
         /// The entity type or membership.
+        name: String,
+        /// What is wrong.
+        reason: String,
+    },
+    /// The foreign key conflicts with another or doesn't fit its tables (ADR-0035).
+    #[error("invalid foreign key {name}: {reason}")]
+    InvalidForeignKey {
+        /// The foreign key.
         name: String,
         /// What is wrong.
         reason: String,
@@ -80,6 +89,8 @@ pub struct InMemoryCatalog {
     entities: HashMap<Ident, Arc<EntityDef>>,
     /// Memberships by (member, group).
     memberships: HashMap<(Ident, Ident), Arc<MembershipDef>>,
+    /// Foreign keys by name.
+    foreign_keys: BTreeMap<Ident, Arc<ForeignKeyDef>>,
 }
 
 impl InMemoryCatalog {
@@ -94,6 +105,7 @@ impl InMemoryCatalog {
             function_names: HashMap::new(),
             entities: HashMap::new(),
             memberships: HashMap::new(),
+            foreign_keys: BTreeMap::new(),
         }
     }
 
@@ -283,6 +295,13 @@ impl InMemoryCatalog {
             .chain(entity.attributes.iter().map(|a| a.column))
             .collect();
         self.check_columns(&name, entity.table, &columns)?;
+        for fk in self.foreign_keys.values() {
+            foreign_keys::check_agreement(fk, &entity, |n| self.entities.get(n).map(AsRef::as_ref))
+                .map_err(|reason| CatalogError::InvalidEntity {
+                    name: name.clone(),
+                    reason,
+                })?;
+        }
         self.entities.insert(entity.name.clone(), Arc::new(entity));
         Ok(())
     }
@@ -340,6 +359,43 @@ impl InMemoryCatalog {
         Ok(())
     }
 
+    /// Declare a foreign key (ADR-0035).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::InvalidForeignKey`] if the name is taken,
+    /// a table is missing, the declaration doesn't fit its tables (see
+    /// [`ForeignKeyDef`]: matching column types, a referenced primary key
+    /// or unique index, an index on the referencing columns, optional
+    /// columns for `SetNull`), either table is a system table, or an
+    /// entity attribute in the referencing column refers to a different
+    /// entity type.
+    pub fn add_foreign_key(&mut self, fk: ForeignKeyDef) -> Result<(), CatalogError> {
+        let invalid = |reason: String| CatalogError::InvalidForeignKey {
+            name: fk.name.to_string(),
+            reason,
+        };
+        if self.foreign_keys.contains_key(&fk.name) {
+            return Err(invalid("already declared".into()));
+        }
+        let table_of = |id: TableId| {
+            self.tables
+                .get(&id)
+                .ok_or_else(|| invalid(format!("table {} does not exist", id.get())))
+        };
+        let (table, referenced) = (table_of(fk.table)?, table_of(fk.referenced)?);
+        if table.system || referenced.system {
+            return Err(invalid("system tables can't have foreign keys".into()));
+        }
+        foreign_keys::check(&fk, table, referenced).map_err(invalid)?;
+        for entity in self.entities.values() {
+            foreign_keys::check_agreement(&fk, entity, |n| self.entities.get(n).map(AsRef::as_ref))
+                .map_err(invalid)?;
+        }
+        self.foreign_keys.insert(fk.name.clone(), Arc::new(fk));
+        Ok(())
+    }
+
     /// Return the data type of the key column of declared entity type `name`.
     ///
     /// # Panics
@@ -385,6 +441,11 @@ impl Catalog for InMemoryCatalog {
             .collect();
         out.sort_by(|a, b| a.group.cmp(&b.group));
         out
+    }
+
+    /// Return every foreign key, ordered by name.
+    fn foreign_keys(&self) -> Vec<Arc<ForeignKeyDef>> {
+        self.foreign_keys.values().cloned().collect()
     }
 
     /// Look up a membership.

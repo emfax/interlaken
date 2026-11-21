@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use super::defs::{FunctionDef, TableDef};
 use super::entities::{EntityDef, MembershipDef};
+use super::foreign_keys::ForeignKeyDef;
 use crate::names::{FunctionId, Ident, QualifiedName, SchemaVersion, TableId};
 use crate::types::DataType;
 
@@ -54,6 +55,25 @@ pub trait Catalog: Send + Sync {
     fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
         let _ = member;
         Vec::new()
+    }
+
+    /// Return every foreign key, ordered by name (ADR-0035). None by default.
+    fn foreign_keys(&self) -> Vec<Arc<ForeignKeyDef>> {
+        Vec::new()
+    }
+
+    /// Return the foreign keys whose referencing table is `table`, ordered by name.
+    fn foreign_keys_of(&self, table: TableId) -> Vec<Arc<ForeignKeyDef>> {
+        let mut out = self.foreign_keys();
+        out.retain(|fk| fk.table == table);
+        out
+    }
+
+    /// Return the foreign keys that refer to `table`, ordered by name.
+    fn foreign_keys_referencing(&self, table: TableId) -> Vec<Arc<ForeignKeyDef>> {
+        let mut out = self.foreign_keys();
+        out.retain(|fk| fk.referenced == table);
+        out
     }
 
     /// Look up the overload of `name` whose argument types are exactly `args`.
