@@ -22,6 +22,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0007 | Minimal catalog and row layer | implemented |
 | 0008 | Version garbage collection | implemented |
 | 0009 | Storage correctness testing strategy | implemented |
+| 0037 | Replication with Raft | proposal |
 
 ## IR and optimizer
 
