@@ -319,6 +319,9 @@ impl Resolver<'_> {
                 let right = self.expr(right, cx)?;
                 self.binary(*op, left, right)?
             }
+            // Resolving lifts strict operators on optional values anyway
+            // (see `logic::normalize`); an explicit `lift` adds nothing.
+            Expr::Lift(inner) => self.expr(inner, cx)?,
             Expr::And(items) | Expr::Or(items) => {
                 let mut nullable = false;
                 let mut out = Vec::new();

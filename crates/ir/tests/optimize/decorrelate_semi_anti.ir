@@ -15,7 +15,9 @@
     (join semi
       (join anti
         (join semi
-          (filter (get (tid 100) :as u :bind 1) (> #1.3 (int4 21)))
+          (filter
+            (get (tid 100) :as u :bind 1)
+            (coalesce (lift (> #1.3 (int4 21))) false))
           (get (tid 101) :as p :bind 2)
           (= #2.1 #1.0))
         (get (tid 102) :as f :bind 3)

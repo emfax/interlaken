@@ -492,6 +492,7 @@ pub(crate) fn expr(e: &Expr) -> Sexp {
             default,
         } => form("try", [expr(inner), expr(default)]),
         Expr::NullIf { left, right } => form("nullif", [expr(left), expr(right)]),
+        Expr::Lift(inner) => form("lift", [expr(inner)]),
         Expr::Cast { expr: operand, to } => form("cast", [expr(operand), data_type(to)]),
         Expr::Subquery { kind, rel: r } => match kind {
             SubqueryKind::Scalar => form("scalar", [rel(r)]),

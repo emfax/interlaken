@@ -136,9 +136,9 @@ pub fn choose(
     let constraints: Vec<Constraint> = conjuncts
         .iter()
         .filter_map(|conjunct| {
-            let Expr::Binary { op, left, right } = conjunct else {
-                return None;
-            };
+            // `(op a b)`, or on optional values `(coalesce (lift (op a b)) false)`:
+            // either way true only when both are present (ADR-0034).
+            let (op, left, right) = interlaken_ir::logic::comparison(conjunct)?;
             if !matches!(
                 op,
                 BinaryOp::Eq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
@@ -146,8 +146,8 @@ pub fn choose(
                 return None;
             }
             let (column, op, value) = match (own_column(left), own_column(right)) {
-                (Some(c), _) => (c, *op, right.as_ref()),
-                (None, Some(c)) => (c, flip(*op), left.as_ref()),
+                (Some(c), _) => (c, op, right),
+                (None, Some(c)) => (c, flip(op), left),
                 (None, None) => return None,
             };
             (usable(value) && type_of(value).as_ref() == Some(&column.ty.data)).then(|| {

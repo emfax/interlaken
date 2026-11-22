@@ -24,4 +24,4 @@
       (filter
         (project (get (tid 101) :as q :bind 6) (as #6.3 likes) :bind 7)
         (> #1.4 (cast #7.0 int8))))
-    (> #1.3 (int4 21))))
+    (coalesce (lift (> #1.3 (int4 21))) false)))

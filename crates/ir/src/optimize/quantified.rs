@@ -86,7 +86,8 @@ fn split_comparison(
     comparison: &Expr,
     outer: &HashSet<BindingId>,
 ) -> Option<(Expr, BinaryOp, Expr)> {
-    let Expr::Binary { op, left, right } = comparison else {
+    // Over optional values the resolver lifts the comparison (ADR-0034).
+    let Expr::Binary { op, left, right } = crate::logic::unlifted(comparison) else {
         return None;
     };
     if !matches!(

@@ -16,11 +16,11 @@
 (plan :schema-version 7
   (project :bind 2
     (get (tid 100) :as u :bind 1)
-    (as (+ (cast #1.3 int8) #1.4) widened)
-    (as (> (cast #1.3 int8) 3000000000) big_literal)
-    (as (= (cast #1.5 timestamptz) #1.6) date_to_timestamptz)
-    (as (+ #1.5 (int4 7)) next_week)
-    (as (- #1.5 (date "2026-01-01")) days)
+    (as (lift (+ (cast #1.3 int8) #1.4)) widened)
+    (as (lift (> (cast #1.3 int8) 3000000000)) big_literal)
+    (as (lift (= (cast #1.5 timestamptz) #1.6)) date_to_timestamptz)
+    (as (lift (+ #1.5 (int4 7))) next_week)
+    (as (lift (- #1.5 (date "2026-01-01"))) days)
     (as (coalesce #1.2 (cast null text) "none") contact)
     (as (case (when (> #1.4 10) 1.5) (else (cast #1.3 float8))) mixed_case)
     (as (cast null text) nothing)

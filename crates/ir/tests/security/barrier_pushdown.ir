@@ -7,14 +7,16 @@
   (project :bind 2
     (filter
       (policy-filter (get (tid 203) :as d :bind 1) (try (= #1.1 1) false))
-      (and (> #1.4 3) (like #1.3 "a%")))
+      (and (coalesce (lift (> #1.4 3)) false) (like #1.3 "a%")))
     (as #1.0 id)))
 ;; optimized
 (plan :schema-version 3
   (project :bind 2
     (filter
       (policy-filter
-        (filter (get (tid 203) :as d :bind 1) (> #1.4 3))
+        (filter
+          (get (tid 203) :as d :bind 1)
+          (coalesce (lift (> #1.4 3)) false))
         (try (= #1.1 1) false))
       (like #1.3 "a%"))
     (as #1.0 id)))

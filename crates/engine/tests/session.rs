@@ -557,13 +557,19 @@ async fn leakproof_marking_moves_predicates_below_barriers() {
     let mut alice = session(&engine, user(1));
     let query = "(plan (project (filter (get docs :as d) (= (call upper d.title) \"PLAN\")) d.id))";
     let before = alice.explain(query, false).await.unwrap();
-    assert!(!before.contains("pushed: (= (call"), "{before}");
+    assert!(
+        !before.contains("pushed: (coalesce (lift (= (lift (call"),
+        "{before}"
+    );
     let text = [DataType::Scalar(ScalarType::Text)];
     root.set_function_leakproof("upper", &text, true)
         .await
         .unwrap();
     let after = alice.explain(query, false).await.unwrap();
-    assert!(after.contains("pushed: (= (call"), "{after}");
+    assert!(
+        after.contains("pushed: (coalesce (lift (= (lift (call"),
+        "{after}"
+    );
     assert_eq!(rows(&mut alice, query).await, [vec![Datum::Int8(10)]]);
     let int = [DataType::Scalar(ScalarType::Int8)];
     assert_eq!(

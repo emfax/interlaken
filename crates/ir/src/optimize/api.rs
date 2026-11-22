@@ -52,6 +52,8 @@ pub fn optimize(plan: &Plan, catalog: &dyn Catalog) -> Plan {
     simplify(&mut plan.root, &pushdown.types, catalog);
     prune(&mut plan.root);
     order(&mut plan.root, catalog);
+    // Rewrites may write SQL-style shorthand; make it explicit again (ADR-0034).
+    crate::logic::normalize(&mut plan, catalog);
     plan
 }
 

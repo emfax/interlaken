@@ -426,7 +426,9 @@ fn bindings_read(expr: &Expr, out: &mut HashSet<BindingId>) {
         | Expr::Or(items)
         | Expr::Coalesce(items)
         | Expr::Array(items) => items.iter().for_each(|e| bindings_read(e, out)),
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => bindings_read(expr, out),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Lift(expr) => {
+            bindings_read(expr, out);
+        }
         Expr::Binary { left, right, .. }
         | Expr::NullIf { left, right }
         | Expr::Try {
@@ -796,12 +798,9 @@ impl Planner<'_> {
         let mut keys = Vec::new();
         let mut residual = Vec::new();
         for conjunct in conjuncts(on) {
-            if let Expr::Binary {
-                op: BinaryOp::Eq,
-                left: a,
-                right: b,
-            } = &conjunct
-            {
+            // `a = b`, or on optional values `(coalesce (lift (= a b)) false)`:
+            // either way NULL keys never match (ADR-0034).
+            if let Some((BinaryOp::Eq, a, b)) = interlaken_ir::logic::comparison(&conjunct) {
                 // Keys must not raise: the build side is evaluated for every row up front.
                 let leakproof = is_leakproof(a, self.plan, self.catalog)
                     && is_leakproof(b, self.plan, self.catalog);
@@ -809,9 +808,9 @@ impl Planner<'_> {
                     !bindings.is_empty() && reads_only(e, bindings)
                 };
                 let pair = if side(a, &left_bindings) && side(b, &right_bindings) {
-                    Some(((**a).clone(), (**b).clone()))
+                    Some((a.clone(), b.clone()))
                 } else if side(b, &left_bindings) && side(a, &right_bindings) {
-                    Some(((**b).clone(), (**a).clone()))
+                    Some((b.clone(), a.clone()))
                 } else {
                     None
                 };

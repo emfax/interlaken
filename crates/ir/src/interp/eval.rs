@@ -221,6 +221,13 @@ impl Interp<'_> {
                     return Err(EvalError::Unsupported("function called by name".into()));
                 };
                 let def = self.function(*id)?;
+                // SQL's three-valued AND and OR stop at the first operand
+                // that decides them, as `and` and `or` do (ADR-0034).
+                match (def.name.to_string().as_str(), args.as_slice()) {
+                    ("and3", _) => return self.eval(&Expr::And(args.clone()), frames),
+                    ("or3", _) => return self.eval(&Expr::Or(args.clone()), frames),
+                    _ => {}
+                }
                 let args = args
                     .iter()
                     .map(|a| self.eval(a, frames))
@@ -252,6 +259,8 @@ impl Interp<'_> {
                 let b = self.eval(right, frames)?;
                 binary(*op, &a, &b)?
             }
+            // The inner operator propagates NULL itself, as SQL's strict operators do.
+            Expr::Lift(inner) => self.eval(inner, frames)?,
             Expr::And(items) => {
                 let mut saw_null = false;
                 for item in items {

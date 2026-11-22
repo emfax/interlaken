@@ -38,7 +38,7 @@ The resolver works out which expressions are optional:
 
 Columns of plain type reject NULLs when written, with `23502`. A table's primary key columns never hold NULL, whatever their declared type.
 
-NULL itself still behaves as in SQL: comparisons with NULL are NULL, and `and`, `or` and `not` use three-valued logic (see [Expressions](expressions.md)). [ADR-0034](../reference/design-records.md) plans to replace this with two-valued logic and explicit operations on options; the types above are its first step.
+Resolved plans use two-valued logic: every predicate is a plain `bool`, and where a value may be absent the plan says so explicitly, with `lift`. You can still write SQL-style text, where NULL behaves as in SQL; the resolver rewrites it into the explicit form. See [NULL and three-valued logic](expressions.md#null-and-three-valued-logic).
 
 ## Composite types
 

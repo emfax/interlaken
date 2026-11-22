@@ -47,9 +47,17 @@ pub enum Expr {
         /// The right operand.
         right: Box<Expr>,
     },
-    /// Conjunction with three-valued logic; `true` when empty.
+    /// A strict operator or function applied to optional operands
+    /// (ADR-0034): `none` if any operand of the inner `Binary`, `Unary` or
+    /// `Call` is `none`, else the inner expression's value. Resolved IR
+    /// applies a strict operator or function to an optional value only
+    /// inside a `Lift`, so where absence propagates is visible in the plan.
+    Lift(Box<Expr>),
+    /// Conjunction of `bool` operands; `true` when empty. Three-valued
+    /// conjunction of optional booleans is the function `and3`.
     And(Vec<Expr>),
-    /// Disjunction with three-valued logic; `false` when empty.
+    /// Disjunction of `bool` operands; `false` when empty. Three-valued
+    /// disjunction is the function `or3`.
     Or(Vec<Expr>),
     /// `CASE`. Branches not taken are not evaluated and must not raise errors.
     Case {
@@ -102,7 +110,7 @@ pub enum Expr {
 /// A unary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
-    /// Boolean `NOT`, with three-valued logic.
+    /// Boolean `NOT` of a `bool`; of an optional boolean, it is the function `not3`.
     Not,
     /// Arithmetic negation; overflow is an error.
     Neg,
@@ -229,7 +237,7 @@ impl Expr {
         match self {
             Self::Column(_) | Self::Literal(_) | Self::Param { .. } => Vec::new(),
             Self::Call { args, .. } => args.iter().collect(),
-            Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
+            Self::Unary { expr, .. } | Self::Cast { expr, .. } | Self::Lift(expr) => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
             Self::Try { expr, default } => vec![expr, default],
             Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {
@@ -259,7 +267,7 @@ impl Expr {
         match self {
             Self::Column(_) | Self::Literal(_) | Self::Param { .. } => Vec::new(),
             Self::Call { args, .. } => args.iter_mut().collect(),
-            Self::Unary { expr, .. } | Self::Cast { expr, .. } => vec![expr],
+            Self::Unary { expr, .. } | Self::Cast { expr, .. } | Self::Lift(expr) => vec![expr],
             Self::Binary { left, right, .. } | Self::NullIf { left, right } => vec![left, right],
             Self::Try { expr, default } => vec![expr, default],
             Self::And(items) | Self::Or(items) | Self::Coalesce(items) | Self::Array(items) => {

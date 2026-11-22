@@ -771,6 +771,7 @@ pub(crate) fn expr(sexp: &Sexp) -> Result<Expr> {
         "and" => Expr::And(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "or" => Expr::Or(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "coalesce" => Expr::Coalesce(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
+        "lift" => Expr::Lift(boxed(&mut form, "the lifted operator")?),
         "array" => Expr::Array(form.rest().into_iter().map(expr).collect::<Result<_>>()?),
         "try" => Expr::Try {
             expr: boxed(&mut form, "the expression")?,

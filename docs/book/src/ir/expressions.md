@@ -39,7 +39,7 @@ Operators are written prefix, with the operator name first: `(+ a b)`, `(= a b)`
 
 ## NULL and three-valued logic
 
-A comparison or arithmetic operator with a NULL operand returns NULL, and so do most functions (those marked *strict* in [Built-in functions](functions.md)). `and` and `or` use three-valued logic:
+You can write expressions as in SQL. A comparison or arithmetic operator with a NULL operand returns NULL, and so do most functions (those marked *strict* in [Built-in functions](functions.md)). `and` and `or` use three-valued logic:
 
 | `a` | `b` | `(and a b)` | `(or a b)` |
 | --- | --- | --- | --- |
@@ -57,6 +57,21 @@ To compare values that may be NULL, use `is-null`, or `is-distinct-from`, which 
 ```
 
 The second keeps users whose department is anything but `"eng"`, NULL included. `(<> u.dept "eng")` would drop the NULLs.
+
+### What resolved plans look like
+
+Resolved plans, as `EXPLAIN` prints them, use two-valued logic instead ([ADR-0034](../reference/design-records.md)). The resolver rewrites SQL-style text into explicit forms that mean the same thing:
+
+- **`(lift E)`** applies the operator or function call `E` to values that may be absent: the result is NULL if any operand is NULL, as above. A strict operator or function never takes an optional operand except inside `lift`, so the plan shows every place where NULL propagates. `(= u.dept "eng")` on an optional `dept` becomes `(lift (= u.dept "eng"))`, of type `(option bool)`.
+- **`and3`, `or3` and `not3`** are the three-valued `and`, `or` and `not` of optional booleans. `and`, `or` and `not` themselves take only plain `bool`s.
+- **Predicates are plain `bool`s.** A filter, join condition, `case` condition or aggregate filter that may be NULL is rewritten to say that NULL counts as false: `(coalesce (lift (= u.dept "eng")) false)`. The rewrite goes through `and3`, `or3` and `not3`, so a filter on `(and (= u.dept "eng") (> u.id 5))` becomes `(and (coalesce (lift (= u.dept "eng")) false) (> u.id 5))`, and indexes and pushdown work on each part as before.
+- **Total equality**, where NULL equals NULL, is `is-not-distinct-from`. `=` on optional values is always lifted.
+
+```ir
+(plan (filter (get users :as u) (and (= u.dept "eng") (> u.id 5))))
+```
+
+You can write the explicit forms yourself; the resolver leaves them as they are, and `EXPLAIN` output can be pasted back in.
 
 ## Conditionals
 

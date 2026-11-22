@@ -30,12 +30,17 @@
           (as (agg (fid 45) (cast #6.0 int8)) max)))
       (= #10.0 #1.0))
     (as #1.1 name)
-    (not
+    (call
+      (fid 80)
       (case
         (when
-          (case
-            (when (or (is-null #1.4) (= (coalesce #9.2 0) 0)) (cast null bool))
-            (else (<= #1.4 #9.3)))
+          (coalesce
+            (case
+              (when
+                (or (is-null #1.4) (= (coalesce #9.2 0) 0))
+                (cast null bool))
+              (else (lift (<= #1.4 #9.3))))
+            false)
           true)
         (when
           (>
@@ -45,9 +50,11 @@
         (else false)))
     (case
       (when
-        (case
-          (when (or (is-null #1.4) (= (coalesce #10.2 0) 0)) (cast null bool))
-          (else (or (<> #1.4 #10.3) (<> #1.4 #10.4))))
+        (coalesce
+          (case
+            (when (or (is-null #1.4) (= (coalesce #10.2 0) 0)) (cast null bool))
+            (else (call (fid 79) (lift (<> #1.4 #10.3)) (lift (<> #1.4 #10.4)))))
+          false)
         true)
       (when
         (>

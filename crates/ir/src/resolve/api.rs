@@ -46,11 +46,13 @@ pub struct Resolved {
 ///     TableDef::new(TableId::new(100), "users")
 ///         .column("age", DataType::from(ScalarType::Int4).option()),
 /// )?;
+/// // `age` may be absent, so `>` is lifted, and the filter keeps rows where it's true.
 /// let plan = parse_plan("(plan (filter (get users :as u) (> u.age 18)))")?;
 /// let resolved = resolve(&plan, &catalog)?;
 /// assert_eq!(
 ///     print_plan(&resolved.plan),
-///     "(plan :schema-version 3\n  (filter (get (tid 100) :as u :bind 1) (> #1.0 (int4 18))))"
+///     "(plan :schema-version 3\n  (filter\n    (get (tid 100) :as u :bind 1)\n    \
+///      (coalesce (lift (> #1.0 (int4 18))) false)))"
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -62,11 +64,14 @@ pub fn resolve(plan: &Plan, catalog: &dyn Catalog) -> Result<Resolved, ResolveEr
     };
     let (root, scope) = resolver.rel(&plan.root, &[])?;
     let (root, scope) = resolver.visible_only(root, scope)?;
+    let mut plan = Plan {
+        schema_version: Some(catalog.schema_version()),
+        root,
+    };
+    // Resolved IR is two-valued: SQL-style shorthand becomes explicit (ADR-0034).
+    crate::logic::normalize(&mut plan, catalog);
     Ok(Resolved {
-        plan: Plan {
-            schema_version: Some(catalog.schema_version()),
-            root,
-        },
+        plan,
         schema: scope.schema(),
     })
 }

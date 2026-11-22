@@ -39,8 +39,10 @@ fn s(scalar: ScalarType) -> DataType {
 /// volatile so the optimizer never moves a mask's condition, and `EXPLAIN`
 /// hides it. Aggregates: `count` (with no argument
 /// for `count(*)`, or one argument of any scalar type), `sum`, `avg`,
-/// `min`, `max`, `bool_and` and `bool_or`. No built-in function is
-/// leakproof yet: each needs an audit first (ADR-0011).
+/// `min`, `max`, `bool_and` and `bool_or`. Three-valued logic (ADR-0034):
+/// `and3`, `or3` and `not3`, which are leakproof since they can't fail.
+/// No other built-in function is leakproof yet: each needs an audit first
+/// (ADR-0011).
 ///
 /// # Examples
 ///
@@ -218,6 +220,23 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             mask.clone(),
         );
     }
+    // Added with ADR-0034 phase 2: SQL's three-valued logic on optional booleans.
+    let bool3 = || s(S::Bool).option();
+    add(
+        "and3",
+        scalar,
+        vec![s(S::Bool), s(S::Bool)],
+        bool3(),
+        pure(false, true),
+    );
+    add(
+        "or3",
+        scalar,
+        vec![s(S::Bool), s(S::Bool)],
+        bool3(),
+        pure(false, true),
+    );
+    add("not3", scalar, vec![s(S::Bool)], bool3(), pure(false, true));
     out
 }
 
@@ -279,6 +298,18 @@ pub fn builtin_description(name: &str) -> Option<&'static str> {
              `masked`. Security lowering uses it for \
              masked columns; it is volatile so the optimizer never moves the condition, and \
              `EXPLAIN` hides it."
+        }
+        "and3" => {
+            "SQL's three-valued AND of optional booleans: false if either is false, else NULL \
+             if either is NULL, else true. The resolver uses it for `and` over optional values."
+        }
+        "or3" => {
+            "SQL's three-valued OR of optional booleans: true if either is true, else NULL if \
+             either is NULL, else false. The resolver uses it for `or` over optional values."
+        }
+        "not3" => {
+            "SQL's three-valued NOT of an optional boolean: NULL for NULL. The resolver uses it \
+             for `not` of an optional value."
         }
         _ => return None,
     })

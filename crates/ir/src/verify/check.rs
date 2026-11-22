@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::error::VerifyError;
 use crate::catalog::{Catalog, FunctionKind, TableDef};
-use crate::expr::{Expr, NamedExpr, SubqueryKind};
+use crate::expr::{BinaryOp, Expr, NamedExpr, SubqueryKind, UnaryOp};
 use crate::names::{BindingId, ColumnId, ColumnRef, FunctionRef, TableRef, TargetColumn};
 use crate::rel::{ApplyKind, DmlTarget, JoinKind, Plan, Rel};
 use crate::schema::{OutputColumn, RelSchema};
@@ -44,7 +44,7 @@ pub struct VerifyOptions {
 ///
 /// let mut catalog = InMemoryCatalog::new(SchemaVersion::new(1));
 /// catalog.add_table(
-///     TableDef::new(TableId::new(100), "t").column("x", DataType::from(ScalarType::Bool).option()),
+///     TableDef::new(TableId::new(100), "t").column("x", DataType::from(ScalarType::Bool).plain()),
 /// )?;
 /// let plan = parse_plan("(plan (policy-filter (get (tid 100) :bind 1) #1.0) :schema-version 1)")?;
 /// assert!(matches!(
@@ -68,6 +68,8 @@ pub fn verify(plan: &Plan, catalog: &dyn Catalog, options: &VerifyOptions) -> Re
         bindings: HashSet::new(),
         params: HashMap::new(),
         types: HashMap::new(),
+        two_valued: true,
+        lifted: false,
     };
     let schema = verifier.rel(&plan.root, &[])?;
     Ok(RelSchema {
@@ -88,6 +90,8 @@ pub fn column_types(plan: &Plan, catalog: &dyn Catalog) -> HashMap<(BindingId, C
         bindings: HashSet::new(),
         params: HashMap::new(),
         types: HashMap::new(),
+        two_valued: false,
+        lifted: false,
     };
     let _ = verifier.rel(&plan.root, &[]);
     verifier.types
@@ -112,6 +116,8 @@ pub fn expr_type(
         bindings: HashSet::new(),
         params: HashMap::new(),
         types: HashMap::new(),
+        two_valued: false,
+        lifted: false,
     };
     let schema: Schema = columns
         .iter()
@@ -152,6 +158,13 @@ struct Verifier<'a> {
     params: HashMap<u32, Type>,
     /// The type of every column introduced so far.
     types: HashMap<(BindingId, ColumnId), Type>,
+    /// Enforce two-valued logic (ADR-0034): predicates and the operands of
+    /// `and`, `or` and `not` are plain `bool`, and strict operators and
+    /// functions take optional operands only inside `lift`. Off when only
+    /// computing types, for plans that may still hold shorthand.
+    two_valued: bool,
+    /// Set by `lift` for the operator or call directly inside it.
+    lifted: bool,
 }
 
 /// Construct a type error.
@@ -376,10 +389,8 @@ impl Verifier<'_> {
             }
             Rel::Filter { input, predicate } => {
                 let schema = self.rel(input, outer)?;
-                expect_bool(
-                    &self.expr(predicate, &scope(&schema, outer))?,
-                    "a filter predicate",
-                )?;
+                let ty = self.expr(predicate, &scope(&schema, outer))?;
+                self.expect_predicate(&ty, "a filter predicate")?;
                 schema
             }
             Rel::PolicyFilter { input, residual }
@@ -396,10 +407,8 @@ impl Verifier<'_> {
                     return Err(VerifyError::Privileged(name.into()));
                 }
                 let schema = self.rel(input, outer)?;
-                expect_bool(
-                    &self.expr(residual, &scope(&schema, outer))?,
-                    "a policy residual",
-                )?;
+                let ty = self.expr(residual, &scope(&schema, outer))?;
+                self.expect_predicate(&ty, "a policy residual")?;
                 schema
             }
             Rel::Project {
@@ -429,7 +438,8 @@ impl Verifier<'_> {
                 let left = self.rel(left, outer)?;
                 let right = self.rel(right, outer)?;
                 let both: Schema = left.iter().chain(right.iter()).cloned().collect();
-                expect_bool(&self.expr(on, &scope(&both, outer))?, "a join condition")?;
+                let ty = self.expr(on, &scope(&both, outer))?;
+                self.expect_predicate(&ty, "a join condition")?;
                 match kind {
                     JoinKind::Inner => joined(left, right, false, false, false),
                     JoinKind::Left => joined(left, right, false, false, true),
@@ -494,7 +504,8 @@ impl Verifier<'_> {
                         )));
                     }
                     if let Some(filter) = &agg.filter {
-                        expect_bool(&self.expr(filter, &local)?, "an aggregate filter")?;
+                        let ty = self.expr(filter, &local)?;
+                        self.expect_predicate(&ty, "an aggregate filter")?;
                     }
                     if agg.distinct {
                         for ty in &args {
@@ -775,11 +786,48 @@ impl Verifier<'_> {
         })
     }
 
+    /// Fail unless `ty` is `bool`, and, under two-valued logic, plain.
+    fn expect_predicate(&self, ty: &Type, what: &str) -> Result<()> {
+        expect_bool(ty, what)?;
+        if self.two_valued && ty.optional {
+            return Err(type_error(format!(
+                "{what} must be a plain bool, not (option bool): write (coalesce E false), or \
+                 and3, or3 and not3 for three-valued logic"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Fail, under two-valued logic, unless the strict operator or function
+    /// `what` with an optional operand is directly inside `lift`.
+    fn expect_lifted(&self, lifted: bool, what: &str) -> Result<()> {
+        if self.two_valued && !lifted {
+            return Err(type_error(format!(
+                "{what} applied to an optional value must be inside lift"
+            )));
+        }
+        Ok(())
+    }
+
     /// Return the type of `expr`, with `env` the visible columns innermost first.
     #[allow(clippy::too_many_lines)]
     fn expr(&mut self, expr: &Expr, env: &[&Schema]) -> Result<Type> {
         let mismatch = |message: String| type_error(format!("{message} in {}", print_expr(expr)));
+        let lifted = std::mem::take(&mut self.lifted);
         Ok(match expr {
+            Expr::Lift(inner) => {
+                if !matches!(
+                    **inner,
+                    Expr::Binary { .. } | Expr::Unary { .. } | Expr::Call { .. }
+                ) {
+                    return Err(structure(format!(
+                        "lift applies to an operator or a function call, not {}",
+                        print_expr(inner)
+                    )));
+                }
+                self.lifted = true;
+                self.expr(inner, env)?
+            }
             Expr::Column(ColumnRef::Named { .. }) => {
                 return Err(VerifyError::Unresolved(format!(
                     "column {} is a name",
@@ -840,24 +888,38 @@ impl Verifier<'_> {
                 if types.iter().map(|t| &t.data).ne(def.args.iter()) {
                     return Err(mismatch(format!("arguments do not match {}", def.name)));
                 }
-                let nullable = def.returns.optional
-                    || (def.properties.strict && types.iter().any(|t| t.optional));
+                let optional_args = types.iter().any(|t| t.optional);
+                if def.properties.strict && optional_args {
+                    self.expect_lifted(lifted, &def.name.to_string())?;
+                }
+                let nullable = def.returns.optional || (def.properties.strict && optional_args);
                 def.returns.clone().with_optional(nullable)
             }
             Expr::Unary { op, expr: operand } => {
                 let ty = self.expr(operand, env)?;
-                typing::unary(*op, &ty).map_err(mismatch)?
+                let result = typing::unary(*op, &ty).map_err(mismatch)?;
+                match op {
+                    UnaryOp::Not => self.expect_predicate(&ty, "the operand of NOT")?,
+                    UnaryOp::Neg if ty.optional => self.expect_lifted(lifted, "negation")?,
+                    _ => {}
+                }
+                result
             }
             Expr::Binary { op, left, right } => {
                 let l = self.expr(left, env)?;
                 let r = self.expr(right, env)?;
-                typing::binary(*op, &l, &r).map_err(mismatch)?
+                let result = typing::binary(*op, &l, &r).map_err(mismatch)?;
+                let total = matches!(op, BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom);
+                if !total && (l.optional || r.optional) {
+                    self.expect_lifted(lifted, crate::text::binary_op_name(*op))?;
+                }
+                result
             }
             Expr::And(items) | Expr::Or(items) => {
                 let mut nullable = false;
                 for item in items {
                     let ty = self.expr(item, env)?;
-                    expect_bool(&ty, "an AND or OR operand")?;
+                    self.expect_predicate(&ty, "an AND or OR operand")?;
                     nullable |= ty.optional;
                 }
                 typing::boolean(nullable)
@@ -885,7 +947,7 @@ impl Verifier<'_> {
                             )));
                         }
                         Some(_) => {}
-                        None => expect_bool(&when, "a CASE condition")?,
+                        None => self.expect_predicate(&when, "a CASE condition")?,
                     }
                     let then = self.expr(&branch.then, env)?;
                     result = Some(merge(result, then).map_err(mismatch)?);

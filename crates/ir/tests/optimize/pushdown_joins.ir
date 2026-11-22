@@ -20,7 +20,7 @@
           (filter (get (tid 101) :as p :bind 2) (> #2.3 (int4 2)))
           (= #2.1 #1.0))
         (get (tid 103) :as a :bind 3)
-        (= #3.1 #1.0))
+        (coalesce (lift (= #3.1 #1.0)) false))
       (is-null #3.0))
     (as #1.1 name)
     (as #2.2 title)))

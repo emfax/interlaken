@@ -317,7 +317,7 @@ async fn explain_analyze_reports_per_operator_metrics() {
     );
     assert_eq!(
         explain(&node, ExplainOptions::default()),
-        "Limit count: 5\n  TopN #1.0 asc\n    Filter (like #1.2 \"%1%\")\n      TableScan t pushed: (> #1.1 (int4 3))\n"
+        "Limit count: 5\n  TopN #1.0 asc\n    Filter (coalesce (lift (like #1.2 \"%1%\")) false)\n      TableScan t pushed: (coalesce (lift (> #1.1 (int4 3))) false)\n"
     );
     let analyzed = explain_analyze(&node, &ctx, ExplainOptions::default())
         .await

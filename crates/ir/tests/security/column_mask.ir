@@ -27,7 +27,7 @@
           title)
         (as #1.4 secret)
         (as #1.5 tags))
-      (like #4.3 "a%"))
+      (coalesce (lift (like #4.3 "a%")) false))
     (as #4.0 id)
     (as #4.3 title)))
 ;; optimized
@@ -50,6 +50,6 @@
             #1.3
             (call (fid 66) #1.3))
           title))
-      (like #4.1 "a%"))
+      (coalesce (lift (like #4.1 "a%")) false))
     (as #4.0 id)
     (as #4.1 title)))

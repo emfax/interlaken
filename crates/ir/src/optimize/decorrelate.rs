@@ -212,14 +212,11 @@ fn equalities(
     pulled
         .into_iter()
         .map(|conjunct| {
-            let Expr::Binary {
-                op: BinaryOp::Eq,
-                left,
-                right,
-            } = conjunct
-            else {
+            // `a = b`, or on optional values `(coalesce (lift (= a b)) false)` (ADR-0034).
+            let (BinaryOp::Eq, left, right) = crate::logic::comparison(&conjunct)? else {
                 return None;
             };
+            let (left, right) = (Box::new(left.clone()), Box::new(right.clone()));
             let side = |e: &Expr| -> Option<bool> {
                 let refs = bindings_of(e);
                 let in_count = refs.iter().filter(|b| inner.contains(b)).count();

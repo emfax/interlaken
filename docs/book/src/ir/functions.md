@@ -27,6 +27,14 @@ immutable · strict · not leakproof
 
 The absolute value; the minimum integer of its type overflows (`22003`).
 
+### `and3`
+
+immutable · leakproof
+
+- `and3((option bool), (option bool)) → (option bool)`
+
+SQL's three-valued AND of optional booleans: false if either is false, else NULL if either is NULL, else true. The resolver uses it for `and` over optional values.
+
 ### `assert_present`
 
 immutable · not leakproof
@@ -67,6 +75,14 @@ immutable · strict · not leakproof
 
 A column mask: every character but the last four replaced by `*`; text of four characters or fewer is unchanged.
 
+### `not3`
+
+immutable · leakproof
+
+- `not3((option bool)) → (option bool)`
+
+SQL's three-valued NOT of an optional boolean: NULL for NULL. The resolver uses it for `not` of an optional value.
+
 ### `now`
 
 stable · not leakproof
@@ -74,6 +90,14 @@ stable · not leakproof
 - `now() → timestamptz`
 
 The time the current transaction started; the same for every call in it.
+
+### `or3`
+
+immutable · leakproof
+
+- `or3((option bool), (option bool)) → (option bool)`
+
+SQL's three-valued OR of optional booleans: true if either is true, else NULL if either is NULL, else false. The resolver uses it for `or` over optional values.
 
 ### `policy_mask`
 

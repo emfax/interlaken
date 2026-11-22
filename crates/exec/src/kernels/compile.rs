@@ -292,12 +292,24 @@ impl Compiler<'_> {
                     };
                     return Ok(Node::new(kind, ty));
                 }
+                // SQL's three-valued logic (ADR-0034) is what the connective
+                // kernels compute over booleans that may be NULL.
+                match (name.as_str(), args.as_slice()) {
+                    ("and3", _) => return Ok(Node::new(Kind::And(self.all(args)?), ty)),
+                    ("or3", _) => return Ok(Node::new(Kind::Or(self.all(args)?), ty)),
+                    ("not3", [arg]) => {
+                        return Ok(Node::new(Kind::Unary(UnaryOp::Not, self.boxed(arg)?), ty));
+                    }
+                    _ => {}
+                }
                 match Builtin::named(&name) {
                     Some(Builtin::Now) => Kind::Constant(Datum::Timestamptz(self.options.now)),
                     Some(builtin) => Kind::Call(builtin, self.all(args)?),
                     None => Kind::Unknown(name),
                 }
             }
+            // The inner kernels propagate NULL as SQL's strict operators do.
+            Expr::Lift(inner) => return self.compile(inner),
             Expr::Unary { op, expr } => Kind::Unary(*op, self.boxed(expr)?),
             Expr::Binary {
                 op: BinaryOp::Like,

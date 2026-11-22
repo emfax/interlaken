@@ -9,6 +9,8 @@
 ;; resolved
 (plan :schema-version 7
   (project :bind 2
-    (filter (get (tid 100) :bind 1) (and (> #1.3 (int4 18)) (is-not-null #1.2)))
+    (filter
+      (get (tid 100) :bind 1)
+      (and (coalesce (lift (> #1.3 (int4 18))) false) (is-not-null #1.2)))
     (as #1.1 name)
-    (as (+ #1.3 (int4 1)) next_age)))
+    (as (lift (+ #1.3 (int4 1))) next_age)))

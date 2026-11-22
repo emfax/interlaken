@@ -17,6 +17,8 @@
 //!   built-in functions with their properties (ADR-0011).
 //! - [`resolve`]: the shared resolver, from names to resolved, fully typed
 //!   IR, lowering subqueries to `Apply`.
+//! - [`logic`]: two-valued logic over optional values: turning SQL-style
+//!   shorthand into explicit `lift`, `and3` and plain predicates (ADR-0034).
 //! - [`verify`]: the verifier every plan passes, which rejects privileged
 //!   operators and system-table writes from clients.
 //! - [`optimize`]: the rule-based optimizer: simplification, decorrelation,
@@ -31,6 +33,7 @@ pub mod builder;
 pub mod catalog;
 mod expr;
 pub mod interp;
+pub mod logic;
 mod names;
 pub mod optimize;
 mod rel;

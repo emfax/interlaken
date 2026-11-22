@@ -169,7 +169,7 @@ pub(crate) fn data_type(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> Op
         Expr::Array(items) => DataType::Array(Box::new(
             data_type(items.first()?, types, catalog)?.option(),
         )),
-        Expr::Try { expr, .. } => data_type(expr, types, catalog)?,
+        Expr::Try { expr, .. } | Expr::Lift(expr) => data_type(expr, types, catalog)?,
         _ => return None,
     })
 }
@@ -189,7 +189,12 @@ pub(crate) fn leakproof(expr: &Expr, types: &Types, catalog: &dyn Catalog) -> bo
     }
     let this = match expr {
         Expr::Column(_) | Expr::Literal(_) | Expr::Param { .. } => true,
-        Expr::And(_) | Expr::Or(_) | Expr::Case { .. } | Expr::Coalesce(_) | Expr::Array(_) => true,
+        Expr::And(_)
+        | Expr::Or(_)
+        | Expr::Case { .. }
+        | Expr::Coalesce(_)
+        | Expr::Array(_)
+        | Expr::Lift(_) => true,
         Expr::Call {
             func: FunctionRef::Id(id),
             ..

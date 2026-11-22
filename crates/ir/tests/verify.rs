@@ -35,12 +35,13 @@ fn rejects(rel: &str, matches: fn(&VerifyError) -> bool, text: &str) {
 /// Assert well-formed plans pass.
 fn accepts_valid_plans() {
     check(
-        "(project (get (tid 100) :bind 1) (as (+ #1.3 (int4 1)) x) :bind 2)",
+        "(project (get (tid 100) :bind 1) (as (lift (+ #1.3 (int4 1))) x) :bind 2)",
         false,
     )
     .unwrap();
     check(
-        "(apply left (get (tid 100) :bind 1) (filter (get (tid 101) :bind 2) (= #2.1 #1.0)))",
+        "(apply left (get (tid 100) :bind 1) (filter (get (tid 101) :bind 2) \
+         (coalesce (lift (= #2.1 #1.0)) false)))",
         false,
     )
     .unwrap();
@@ -265,4 +266,63 @@ fn malformed_plans() {
         structure,
         "at least one branch",
     );
+}
+
+#[test]
+/// Assert two-valued logic (ADR-0034): strict operators and functions take
+/// optional operands only inside `lift`, and predicates and the operands of
+/// `and`, `or` and `not` are plain `bool`.
+fn two_valued_logic() {
+    let ty = |e: &VerifyError| matches!(e, VerifyError::Type(_));
+    let structure = |e: &VerifyError| matches!(e, VerifyError::Structure(_));
+    let filter = |p: &str| format!("(filter (get (tid 100) :bind 1) {p})");
+    let project = |e: &str| format!("(project (get (tid 100) :bind 1) (as {e} x) :bind 2)");
+    let age_is_1 = "(lift (= #1.3 (int4 1)))";
+    rejects(
+        &filter("(= #1.3 (int4 1))"),
+        ty,
+        "= applied to an optional value must be inside lift",
+    );
+    rejects(
+        &filter(age_is_1),
+        ty,
+        "a filter predicate must be a plain bool",
+    );
+    rejects(
+        &filter(&format!("(and (> #1.4 0) {age_is_1})")),
+        ty,
+        "an AND or OR operand must be a plain bool",
+    );
+    rejects(
+        &filter(&format!("(not {age_is_1})")),
+        ty,
+        "the operand of NOT must be a plain bool",
+    );
+    rejects(
+        &project("(neg #1.3)"),
+        ty,
+        "negation applied to an optional value",
+    );
+    rejects(
+        &project("(call (fid 1) #1.2)"),
+        ty,
+        "lower applied to an optional value",
+    );
+    rejects(
+        &project("(lift #1.3)"),
+        structure,
+        "lift applies to an operator",
+    );
+    for accepted in [
+        filter(&format!("(coalesce {age_is_1} false)")),
+        filter(&format!("(and (> #1.4 0) (coalesce {age_is_1} false))")),
+        project(age_is_1),
+        project("(lift (neg #1.3))"),
+        project("(lift (call (fid 1) #1.2))"),
+        project("(is-not-distinct-from #1.3 (int4 1))"),
+        project("(call (fid 1) #1.1)"),
+        project("(lift (+ #1.4 1))"),
+    ] {
+        check(&accepted, false).unwrap_or_else(|e| panic!("{accepted}: {e}"));
+    }
 }

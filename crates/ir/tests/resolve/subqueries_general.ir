@@ -26,15 +26,19 @@
                   (as #2.1 user_id))
                 (keys)
                 (aggs
-                  (as (agg (fid 53) (= #1.0 #3.0)) any_true)
+                  (as (agg (fid 53) (lift (= #1.0 #3.0))) any_true)
                   (as (agg (fid 12)) rows)
-                  (as (agg (fid 13) (= #1.0 #3.0)) known))))
+                  (as (agg (fid 13) (lift (= #1.0 #3.0))) known))))
             (or
               (not
-                (case
-                  (when #4.0 true)
-                  (when (> #4.1 #4.2) (cast null bool))
-                  (else false)))
+                (coalesce
+                  (case
+                    (when (coalesce #4.0 false) true)
+                    (when
+                      (coalesce (lift (> #4.1 #4.2)) false)
+                      (cast null bool))
+                    (else false))
+                  true))
               (> #1.4 100)))
           (aggregate :bind 6
             (filter (get (tid 101) :as p :bind 5) (= #5.1 #1.0))
@@ -54,9 +58,10 @@
     (as #6.0 last_post)
     (as (is-not-null #8.0) followed)
     (as
-      (not
+      (call
+        (fid 80)
         (case
-          (when #11.0 true)
-          (when (> #11.1 #11.2) (cast null bool))
+          (when (coalesce #11.0 false) true)
+          (when (coalesce (lift (> #11.1 #11.2)) false) (cast null bool))
           (else false)))
       top)))
