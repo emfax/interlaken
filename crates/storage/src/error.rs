@@ -68,6 +68,12 @@ pub enum Error {
     #[error("commit outcome unknown: {0}")]
     CommitOutcomeUnknown(#[source] Arc<Error>),
 
+    /// A replicated database can't commit now: it has no leader, or the
+    /// leader can't be reached (SQLSTATE `57P03`). The transaction didn't
+    /// commit; retry it (ADR-0037).
+    #[error("the cluster can't commit now: {0}")]
+    ReplicationUnavailable(String),
+
     /// The commit sequencer has stopped after a failed write or a panic.
     #[error("the commit sequencer has stopped")]
     SequencerStopped,
@@ -213,6 +219,8 @@ impl Error {
             Self::ReadOnlyTransaction => "25006",
             Self::TransactionTooOld { .. } => "25P04",
             Self::WriteSetTooLarge { .. } => "54000",
+            Self::CommitOutcomeUnknown(_) => "08007",
+            Self::ReplicationUnavailable(_) => "57P03",
             _ => "XX000",
         }
     }

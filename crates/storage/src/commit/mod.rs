@@ -8,10 +8,10 @@ mod sequencer;
 mod stats;
 
 pub(crate) use clock::{CommitClock, SnapshotPin};
-pub(crate) use log::LogEntry;
-#[cfg(test)]
-pub(crate) use log::LogWrite;
-pub(crate) use request::{CommitRequest, WriteIntent};
+pub(crate) use history::CommitHistory;
+pub(crate) use log::{LogEntry, LogWrite};
+pub use request::CommitRequest;
+pub(crate) use request::WriteIntent;
 pub(crate) use sequencer::{Sequencer, SequencerConfig};
 pub use stats::CommitStats;
 pub(crate) use stats::SequencerStats;

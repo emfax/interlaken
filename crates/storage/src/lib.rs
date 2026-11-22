@@ -30,13 +30,14 @@ mod engine;
 mod error;
 mod gc;
 mod pool;
+pub mod replica;
 pub mod rows;
 mod scan;
 mod storage;
 mod timestamp;
 mod txn;
 
-pub use commit::CommitStats;
+pub use commit::{CommitRequest, CommitStats};
 pub use engine::{Engine, FORMAT_VERSION};
 pub use error::{CatalogError, Conflict, ConstraintViolation, Error, Result};
 pub use gc::{GcReport, GcStats};

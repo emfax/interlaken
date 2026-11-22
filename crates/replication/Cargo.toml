@@ -1,0 +1,25 @@
+[package]
+name = "interlaken-replication"
+description = "Replication of Interlaken's storage with Raft (ADR-0037)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+interlaken-storage.workspace = true
+bytes.workspace = true
+futures.workspace = true
+openraft = { version = "=0.10.1", features = ["serde", "type-alias"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+turmoil = "=0.7.2"
+
+[lints]
+workspace = true

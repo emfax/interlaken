@@ -29,6 +29,8 @@ const DATA_KEYSPACE: &str = "data";
 const META_KEYSPACE: &str = "meta";
 /// Name of the keyspace holding commit log entries by index (ADR-0037).
 const LOG_KEYSPACE: &str = "raftlog";
+/// Name of the keyspace holding a replica's Raft log entries by index (ADR-0037).
+const REPLICA_LOG_KEYSPACE: &str = "replica_log";
 
 /// The fjall database with its `data`, `meta` and `raftlog` keyspaces.
 ///
@@ -44,6 +46,7 @@ pub struct Engine {
     data: Keyspace,
     meta: Keyspace,
     log: Keyspace,
+    replica_log: Keyspace,
 }
 
 impl Engine {
@@ -98,11 +101,13 @@ impl Engine {
         let data = db.keyspace(DATA_KEYSPACE, create)?;
         let meta = db.keyspace(META_KEYSPACE, create)?;
         let log = db.keyspace(LOG_KEYSPACE, create)?;
+        let replica_log = db.keyspace(REPLICA_LOG_KEYSPACE, create)?;
         let engine = Self {
             db,
             data,
             meta,
             log,
+            replica_log,
         };
 
         match engine.meta.get(FORMAT_VERSION_KEY)? {
@@ -291,6 +296,120 @@ impl Engine {
         Ok(())
     }
 
+    /// Write versions to `data`, with `last_commit_ts` set to `last` and the
+    /// `meta` entries given, in one unsynced batch: a replica applying a
+    /// committed Raft entry, whose log is the durable record (ADR-0037).
+    pub(crate) fn apply_versions<'a>(
+        &self,
+        writes: impl IntoIterator<Item = (Timestamp, &'a [u8], Option<&'a [u8]>)>,
+        last: Option<Timestamp>,
+        meta: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let mut batch = self.db.batch();
+        for (ts, key, value) in writes {
+            batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
+        }
+        if let Some(last) = last {
+            batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
+        }
+        for (key, value) in meta {
+            batch.insert(&self.meta, key.as_slice(), value.as_slice());
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Return the `meta` entry at `key`, if any.
+    pub(crate) fn get_meta(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.meta.get(key)?.map(|v| v.to_vec()))
+    }
+
+    /// Set `meta` entries in one batch, synced if `sync`.
+    pub(crate) fn set_meta(&self, entries: &[(Vec<u8>, Vec<u8>)], sync: bool) -> Result<()> {
+        let mut batch = self
+            .db
+            .batch()
+            .durability(sync.then_some(PersistMode::SyncAll));
+        for (key, value) in entries {
+            batch.insert(&self.meta, key.as_slice(), value.as_slice());
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Append entries to the replica log in one batch, synced if `sync`.
+    pub(crate) fn replica_log_append(&self, entries: &[(u64, Vec<u8>)], sync: bool) -> Result<()> {
+        let mut batch = self.db.batch().durability(Some(if sync {
+            PersistMode::SyncAll
+        } else {
+            PersistMode::Buffer
+        }));
+        for (index, value) in entries {
+            batch.insert(&self.replica_log, index.to_be_bytes(), value.as_slice());
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Return the replica log entries with indexes in `start..end`, in order.
+    pub(crate) fn replica_log_range(&self, start: u64, end: u64) -> Result<Vec<(u64, Vec<u8>)>> {
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        self.replica_log
+            .range(start.to_be_bytes()..end.to_be_bytes())
+            .map(|item| {
+                let (key, value) = item.into_inner()?;
+                Ok((log_index(&key)?, value.to_vec()))
+            })
+            .collect()
+    }
+
+    /// Return the last replica log entry, if any.
+    pub(crate) fn replica_log_last(&self) -> Result<Option<(u64, Vec<u8>)>> {
+        self.replica_log
+            .last_key_value()
+            .map(|item| {
+                let (key, value) = item.into_inner()?;
+                Ok((log_index(&key)?, value.to_vec()))
+            })
+            .transpose()
+    }
+
+    /// Return the first replica log entry, if any.
+    pub(crate) fn replica_log_first(&self) -> Result<Option<(u64, Vec<u8>)>> {
+        self.replica_log
+            .first_key_value()
+            .map(|item| {
+                let (key, value) = item.into_inner()?;
+                Ok((log_index(&key)?, value.to_vec()))
+            })
+            .transpose()
+    }
+
+    /// Remove the replica log entries with indexes in `start..end`, synced
+    /// if `sync`.
+    pub(crate) fn replica_log_remove(&self, start: u64, end: u64, sync: bool) -> Result<()> {
+        let mut batch = self
+            .db
+            .batch()
+            .durability(sync.then_some(PersistMode::SyncAll));
+        for item in self
+            .replica_log
+            .range(start.to_be_bytes()..end.to_be_bytes())
+        {
+            batch.remove(&self.replica_log, item.key()?);
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Sync everything written so far.
+    pub(crate) fn persist(&self) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
+
     /// Physically remove versioned keys from `data` in one unsynced batch (ADR-0008).
     pub(crate) fn remove_versions(&self, keys: Vec<Vec<u8>>) -> Result<()> {
         if keys.is_empty() {
@@ -335,7 +454,11 @@ impl Engine {
     /// Refuses to initialise if either keyspace already holds data, since that
     /// means `meta` was lost rather than never written.
     fn initialise_meta(&self) -> Result<()> {
-        if !self.meta.is_empty()? || !self.data.is_empty()? || !self.log.is_empty()? {
+        if !self.meta.is_empty()?
+            || !self.data.is_empty()?
+            || !self.log.is_empty()?
+            || !self.replica_log.is_empty()?
+        {
             return Err(Error::CorruptMeta(
                 "format_version missing from a populated database",
             ));
@@ -369,6 +492,14 @@ impl Engine {
     fn read_meta(&self, key: &[u8], missing: &'static str) -> Result<fjall::Slice> {
         self.meta.get(key)?.ok_or(Error::CorruptMeta(missing))
     }
+}
+
+/// Decode a log key: a big-endian `u64` index.
+fn log_index(key: &[u8]) -> Result<u64> {
+    let bytes: [u8; 8] = key
+        .try_into()
+        .map_err(|_| Error::CorruptMeta("log key is not 8 bytes"))?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 impl std::fmt::Debug for Engine {

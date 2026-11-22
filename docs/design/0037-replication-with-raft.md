@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest.
+Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters.
 
 ## Summary
 
@@ -257,12 +257,50 @@ These give ADR-0036's cost model and capacity planning their numbers:
     | `Buffered`, commit log | 52,471/s | 230,463/s | 188,080/s | 209,169/s |
 
     Under `Sync` the fsync dominates and the paths are close; p99 stays near 2 ms at 256 clients on both. Under `Buffered` the log path writes every commit twice, once to the log and once to the data, and reaches 58–87% of the single-node path. Compaction's occasional fsync still shows as a rare maximum latency of about 0.25 s under `Buffered`.
-- [ ] **Phase 2: Replication in process.**
+- [x] **Phase 2: Replication in process.**
   - `Transport`, its in-memory implementation and its turmoil implementation;
   - openraft integration;
   - leader validation, forwarding and `CommitOutcomeUnknown` on leader change;
   - deterministic three- and five-node clusters in one process.
   - *Testing:* layers 2 and 3 of [Testing](#testing).
+  - *As implemented:*
+    - **Storage's side** is the public module `interlaken_storage::replica`:
+      - `CommitPath` is now a public trait. Transactions commit through it, and the sequencer implements it.
+      - `CommitRequest` is public but opaque, with `encode` and `decode`, so a follower can forward it.
+      - `FjallStorage::open_replicated` opens a database whose commit path the caller builds from a `Replica`.
+      - A `Replica` applies committed batches and keeps the Raft log and state: a `replica_log` keyspace of entries by index, and `meta` entries for the vote, the committed and applied log IDs and the membership. The keyspace is separate from phase 1's `raftlog`, because Raft's entries carry terms and can be truncated.
+      - A `Proposer` validates requests against the history, gives survivors consecutive timestamps, and returns them as one batch in phase 1's `LogEntry` format.
+    - **Applying** writes a batch's versions, the entry's applied log ID and, for a membership entry, the membership, in one unsynced batch. A restarted replica therefore knows exactly which entries its data holds. The log is the durable record: under `Durability::Sync`, votes and appended entries are synced before they are acknowledged.
+    - **Phantom proposals.** The leader records proposals in its validation history as it makes them, so later requests are validated against them. A leader that loses office may hold proposals that never commit. Each batch carries a random identifier in `LogEntry`'s index field, which a replicated batch doesn't otherwise use. When an entry applies, its identifier is compared with this replica's oldest outstanding proposal. A match means the history already holds the entry. Anything else means every outstanding proposal is a phantom: they are dropped from the history before the entry is recorded. This needs no assumption about when leadership changes are noticed.
+    - **openraft 0.10.1, pinned.**
+      - The log carries `Batch` (encoded bytes) and answers `()`.
+      - Messages are postcard-encoded.
+      - AppendEntries answers travel as `StreamAppendResult`, which drops openraft's conflict hint since the hint has no serialized form. A follower that diverges is found by binary search instead.
+      - Snapshots are off (`SnapshotPolicy::Never`), so the log is never purged and grows until phase 4. The state machine and network refuse snapshot operations.
+    - **The leader** runs a proposer task that takes queued requests in groups of up to 256. It proposes each group with `client_write_ff`, which enqueues in order, and answers the group once the entry commits and the leader has applied it.
+      - A new leader proposes only after it has applied an entry of its own term, the blank entry each term begins with. Timestamps then continue from the last commit, and the history holds every earlier write.
+      - If a proposal's outcome is lost, the leader proposes nothing more in that term: later proposals of the term might still commit, so their timestamps can't be reused.
+    - **Followers** forward encoded requests to the leader. Once the leader answers with the entry's index, the follower waits until it has applied that entry, so its next transaction sees the commit.
+      - A request that surely didn't arrive, or that the receiver refused because it doesn't lead, is retried until `CommitConfig::timeout` (5 s by default) runs out.
+      - A request that may have arrived is never sent again.
+    - **Errors.** `CommitOutcomeUnknown` now maps to SQLSTATE `08007` (`transaction_resolution_unknown`). It covers a lost reply, a leader change after proposing, and a commit that wasn't applied locally in time. The new `ReplicationUnavailable` maps to `57P03` (`cannot_connect_now`): there's no leader, or none could be reached before the timeout, and the commit surely didn't happen.
+    - **Transactions on a follower read its applied state.** Histories are therefore serializable but not strictly serializable: a follower can begin before it has applied a commit that another node already acknowledged. Fresh reads, in phase 3, make them strict. Validation is still exact, because the leader's history covers every commit. If the leader trims history past an old follower snapshot, the transaction fails with `SnapshotTooOld`.
+    - **Determinism.** Turmoil makes the network and time deterministic, but storage runs on real threads, as [Testing](#testing) foresaw. A seed usually reproduces a failure but isn't guaranteed to. Storage's real-time work also lets simulated time run ahead, so simulated replicas use longer timeouts: 200 ms heartbeats, elections after 1–2 s.
+    - **Turmoil's transport lives in the tests.** Turmoil is a dev dependency, so its `Transport` (length-prefixed frames over turmoil's TCP, one connection per request) is part of the simulation tests, not a crate feature.
+    - **Deferred from layer 2:**
+      - Workloads use storage transactions directly: engine sessions aren't replicated until `Engine::open_cluster` in phase 5. So DDL and policy changes aren't mixed in yet.
+      - Read-write-register workloads are deferred.
+      - The faults are symmetric partitions of random minorities, crashes and restarts, and message latency. One-way partitions, message loss, clock skew, and membership changes or snapshot installs come with phases 3 and 4.
+    - **Layer 3 moves to phase 5.** LazyFS power loss and the `SIGKILL` harness need replicas in separate processes, which phase 5 brings. Phase 5's testing already lists power loss on every node. In phase 2, the simulation crashes and restarts hosts from their directories, which is a process crash: unsynced writes stay in OS buffers.
+  - *Testing:*
+    - **Storage unit tests:** commit requests round-trip and reject damage; truncating the history restores earlier writes. `crates/storage/tests/replica.rs` covers proposals applying at consecutive timestamps, validation against outstanding proposals, and a phantom proposal dropped when another leader's entry applies.
+    - **openraft's storage suite** passes, except the 11 tests that build or install snapshots, which wait for phase 4.
+    - **`crates/replication/tests/cluster.rs`:** three- and five-node clusters over the in-memory transport. Commits from the leader and from followers reach every replica, and the committing node sees its commit at once. Conflicts span replicas. Five replicas agree under concurrent increments from every node. A new leader takes over when the leader crashes, and the old one catches up when it restarts. A minority can't commit, failing with `57P03` or `08007`, and converges after healing. Each test passed 20 consecutive runs.
+    - **`crates/replication/tests/simulation.rs`:** turmoil clusters of three and five nodes, two clients per node, and a seeded schedule of partitions, crashes and restarts.
+      - The list-append histories are checked by Elle as serializable. Every acknowledged append is in the final list on every replica, no failed append is, and an append whose outcome was unknown appears at most once.
+      - The bank workload never changes the total any transaction reads or any replica holds.
+      - After healing, every replica holds the same data at the same applied timestamp.
+      - 20 seeds of each three-node workload and 20 of the five-node one ran clean locally. Pull requests run two seeds each; the nightly job runs 50.
 - [ ] **Phase 3: Reads.**
   - read index and leases;
   - `freshness`;

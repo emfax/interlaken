@@ -154,6 +154,13 @@ impl Sequencer {
     }
 }
 
+impl crate::replica::CommitPath for Sequencer {
+    /// Submit through the sequencer thread.
+    fn submit(&self, request: CommitRequest) -> crate::replica::CommitFuture<'_> {
+        Box::pin(Sequencer::submit(self, request))
+    }
+}
+
 impl Drop for Sequencer {
     /// Close the queue, let queued commits finish, and join the threads.
     fn drop(&mut self) {

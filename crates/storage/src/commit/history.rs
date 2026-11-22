@@ -72,6 +72,34 @@ impl CommitHistory {
                 .any(|range| self.range_changed_after(range, ts))
     }
 
+    /// Forget commits after `ts`: proposals a deposed leader recorded that
+    /// may never commit (ADR-0037). Each key's latest commit is restored
+    /// from the commits that remain.
+    pub(crate) fn truncate_after(&mut self, ts: Timestamp) {
+        let mut forgotten = Vec::new();
+        while let Some((last, _)) = self.log.back()
+            && *last > ts
+        {
+            forgotten.extend(self.log.pop_back().expect("back exists").1);
+        }
+        for key in forgotten {
+            let restored = self
+                .log
+                .iter()
+                .rev()
+                .find(|(_, keys)| keys.contains(&key))
+                .map(|(written, _)| *written);
+            match restored {
+                Some(written) => {
+                    self.latest.insert(key, written);
+                }
+                None => {
+                    self.latest.remove(&key);
+                }
+            }
+        }
+    }
+
     /// Record that the commit at `ts` wrote `keys`. Timestamps must increase.
     pub(crate) fn record(&mut self, ts: Timestamp, keys: Vec<Key>) {
         for key in &keys {
@@ -217,6 +245,39 @@ mod tests {
         assert_eq!(
             history.validate(&request(0, &["b"], ReadSet::default())),
             Err(Conflict::SnapshotTooOld)
+        );
+    }
+
+    #[test]
+    /// Assert truncating forgets later commits and restores each key's
+    /// latest earlier commit.
+    fn truncate_restores_earlier_writes() {
+        let mut history = CommitHistory::new(ts(0));
+        history.record(ts(1), vec![k("a")]);
+        history.record(ts(2), vec![k("a"), k("b")]);
+        history.record(ts(3), vec![k("c")]);
+        history.truncate_after(ts(1));
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.validate(&request(1, &["a"], ReadSet::default())),
+            Ok(())
+        );
+        assert_eq!(
+            history.validate(&request(0, &["a"], ReadSet::default())),
+            Err(Conflict::WriteWrite)
+        );
+        assert_eq!(
+            history.validate(&request(0, &["b"], ReadSet::default())),
+            Ok(())
+        );
+        assert_eq!(
+            history.validate(&request(0, &["c"], ReadSet::default())),
+            Ok(())
+        );
+        history.record(ts(2), vec![k("c")]);
+        assert_eq!(
+            history.validate(&request(1, &["c"], ReadSet::default())),
+            Err(Conflict::WriteWrite)
         );
     }
 }

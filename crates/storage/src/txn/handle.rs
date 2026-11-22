@@ -455,7 +455,7 @@ impl Txn {
             writes: state.writes.into_intents(),
         };
         // `inner` keeps the snapshot pin alive until validation is done.
-        let ts = inner.shared.sequencer.submit(request).await?;
+        let ts = inner.shared.commit.submit(request).await?;
         Ok(CommitInfo {
             commit_ts: Some(ts),
         })

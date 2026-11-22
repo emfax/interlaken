@@ -9,6 +9,7 @@ use crate::commit::{CommitClock, CommitStats, Sequencer, SequencerConfig, Sequen
 use crate::engine::{DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES};
 use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
+use crate::replica::{CommitPath, Replica, ReplicaState, Validation};
 use crate::{Engine, Result, Timestamp, Txn, TxnOptions};
 
 /// Entry point to the transactional storage layer.
@@ -141,8 +142,8 @@ pub(crate) struct Shared {
     pub(crate) pool: Arc<StoragePool>,
     /// The visibility watermark and pinned snapshots.
     pub(crate) clock: Arc<CommitClock>,
-    /// The thread that validates and writes commits.
-    pub(crate) sequencer: Sequencer,
+    /// Where commits go: the sequencer, or a replicated commit path.
+    pub(crate) commit: Arc<dyn crate::replica::CommitPath>,
     /// Counters the sequencer updates.
     pub(crate) stats: Arc<SequencerStats>,
     /// Per-transaction limits.
@@ -191,6 +192,66 @@ impl FjallStorage {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn open(path: impl AsRef<Path>, options: StorageOptions) -> Result<Self> {
+        Self::open_with(
+            path,
+            &options,
+            |engine, clock, _pool, last, last_index, stats| {
+                let config = SequencerConfig {
+                    durability: options.durability,
+                    max_group: options.max_commit_group,
+                    queue_capacity: options.commit_queue_capacity,
+                    log: options.commit_log,
+                };
+                let sequencer = Sequencer::start(engine, clock, last, last_index, config, stats)?;
+                Ok(Arc::new(sequencer))
+            },
+        )
+    }
+
+    /// Open or create a replicated database: commits go through the
+    /// [`CommitPath`] that `commit_path` builds from the database's
+    /// [`Replica`], instead of the commit sequencer (ADR-0037).
+    ///
+    /// `options.commit_log`, `max_commit_group` and `commit_queue_capacity`
+    /// don't apply; the commit path decides how commits are grouped.
+    ///
+    /// # Errors
+    ///
+    /// As [`FjallStorage::open`], or `commit_path`'s error.
+    pub fn open_replicated(
+        path: impl AsRef<Path>,
+        options: &StorageOptions,
+        commit_path: impl FnOnce(Replica) -> Result<Arc<dyn CommitPath>>,
+    ) -> Result<Self> {
+        Self::open_with(
+            path,
+            options,
+            |_engine, clock, pool, last, _index, _stats| {
+                let state = Arc::new(ReplicaState {
+                    pool,
+                    clock,
+                    validation: std::sync::Mutex::new(Validation::new(last)),
+                });
+                commit_path(Replica::new(state))
+            },
+        )
+    }
+
+    /// Open the database and its threads, committing through the path
+    /// `commit_path` builds from the engine, clock, pool, last commit
+    /// timestamp, last commit log index and sequencer counters.
+    fn open_with(
+        path: impl AsRef<Path>,
+        options: &StorageOptions,
+        commit_path: impl FnOnce(
+            Engine,
+            Arc<CommitClock>,
+            Arc<StoragePool>,
+            Timestamp,
+            u64,
+            Arc<SequencerStats>,
+        ) -> Result<Arc<dyn CommitPath>>,
+    ) -> Result<Self> {
         let engine = Engine::open_with(path, options.max_journal_bytes, options.memtable_bytes)?;
         // Entries committed to the log but not applied before the last
         // close or crash are applied first, whichever path follows.
@@ -201,19 +262,13 @@ impl FjallStorage {
             options.pool_threads,
             options.queue_capacity,
         )?);
-        let config = SequencerConfig {
-            durability: options.durability,
-            max_group: options.max_commit_group,
-            queue_capacity: options.commit_queue_capacity,
-            log: options.commit_log,
-        };
         let stats = Arc::new(SequencerStats::default());
-        let sequencer = Sequencer::start(
+        let commit = commit_path(
             engine,
             Arc::clone(&clock),
+            Arc::clone(&pool),
             last,
             last_index,
-            config,
             Arc::clone(&stats),
         )?;
         let gc = GcContext {
@@ -232,7 +287,7 @@ impl FjallStorage {
                 gc,
                 pool,
                 clock,
-                sequencer,
+                commit,
                 stats,
                 limits: Limits {
                     max_write_set_bytes: options.max_write_set_bytes,

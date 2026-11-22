@@ -34,6 +34,26 @@ INTERLAKEN_COMMIT_LOG=1 scripts/power-loss.sh
 
 Pull requests run the storage tests on both paths. The nightly workflow runs the whole test suite and the power-loss tests on both.
 
+## Replicated clusters under faults
+
+`interlaken-replication` replicates storage with Raft ([ADR-0037](../reference/design-records.md)). Its simulation tests run clusters of three and five replicas inside [turmoil](https://github.com/tokio-rs/turmoil), which simulates the network and time between them. While clients commit on every replica, a schedule drawn from a seed cuts minorities off, heals partitions, and crashes and restarts replicas from their directories:
+
+```sh
+SIM_SEEDS=50 cargo test --release -p interlaken-replication --test simulation
+SIM_SEED=17 cargo test --release -p interlaken-replication --test simulation
+```
+
+`SIM_SEEDS` sets how many seeds each test runs (two by default), and `SIM_SEED` runs one. Every run checks that:
+- Elle finds the list-append history serializable;
+- no acknowledged commit is lost;
+- a commit whose outcome was unknown happened at most once;
+- the bank workload's total never changes;
+- after healing, every replica holds the same data.
+
+Elle needs Java and `elle-cli`, as the storage crate's Elle tests do; without them the other checks still run, and histories are saved under `target/elle/`.
+
+Storage runs on real threads, so a seed usually reproduces a failure but isn't guaranteed to. Failures report their seed.
+
 ## Disk space: `scripts/disk-space-soak.sh`
 
 ```sh

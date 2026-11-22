@@ -22,7 +22,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0007 | Minimal catalog and row layer | implemented |
 | 0008 | Version garbage collection | implemented |
 | 0009 | Storage correctness testing strategy | implemented |
-| 0037 | Replication with Raft | proposal: phase 1 (the commit log on one node) is built |
+| 0037 | Replication with Raft | proposal: phases 1 (the commit log on one node) and 2 (replication in process) are built |
 
 ## IR and optimizer
 

@@ -7,6 +7,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 <!-- begin generated: sqlstates -->
 | Code | Condition | When |
 | --- | --- | --- |
+| `08007` | `transaction_resolution_unknown` | A commit may or may not have happened: writing it failed, or a replicated database's leader changed while it was in flight. |
 | `08P01` | `protocol_violation` | A statement was run with a different number of parameter values than the parameters it declares. |
 | `0A000` | `feature_not_supported` | The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it. |
 | `21000` | `cardinality_violation` | A scalar subquery returned more than one row. |
@@ -45,5 +46,6 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `54000` | `program_limit_exceeded` | The transaction's buffered writes exceed `StorageOptions::max_write_set_bytes`. |
 | `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; or a revocation would remove the last administrator. |
 | `57014` | `query_canceled` | The statement ran past its `statement_timeout`. |
+| `57P03` | `cannot_connect_now` | A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit. |
 | `XX000` | `internal_error` | An internal error: a storage failure, or the stored catalog disagrees with itself. |
 <!-- end generated: sqlstates -->

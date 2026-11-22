@@ -29,6 +29,11 @@ const fn state(code: &'static str, name: &'static str, meaning: &'static str) ->
 /// Every SQLSTATE code the engine returns, in code order.
 pub const SQLSTATES: &[SqlState] = &[
     state(
+        "08007",
+        "transaction_resolution_unknown",
+        "A commit may or may not have happened: writing it failed, or a replicated database's leader changed while it was in flight.",
+    ),
+    state(
         "08P01",
         "protocol_violation",
         "A statement was run with a different number of parameter values than the parameters it declares.",
@@ -201,6 +206,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "57014",
         "query_canceled",
         "The statement ran past its `statement_timeout`.",
+    ),
+    state(
+        "57P03",
+        "cannot_connect_now",
+        "A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit.",
     ),
     state(
         "XX000",
