@@ -213,6 +213,19 @@ impl<T: Transport> RaftCommit<T> {
         );
     }
 
+    /// Return the transport, once started.
+    ///
+    /// # Panics
+    ///
+    /// Panics before the commit path starts, which [`ReplicaNode::open`](crate::ReplicaNode::open) does.
+    pub(crate) fn transport(&self) -> &T {
+        &self
+            .started
+            .get()
+            .expect("the commit path has started")
+            .transport
+    }
+
     /// Return a read index for another replica's fresh snapshot, if this node leads.
     pub(crate) async fn remote_read_index(&self) -> Result<u64, CommitError> {
         match self.started.get() {

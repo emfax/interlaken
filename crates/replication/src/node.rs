@@ -1,6 +1,6 @@
 //! A replica: storage, Raft and the commit path together (ADR-0037).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,15 +8,19 @@ use std::time::Duration;
 use interlaken_storage::replica::{CommitPath, Replica};
 use interlaken_storage::{CommitRequest, Durability, Error, FjallStorage, Result, StorageOptions};
 use openraft::async_runtime::WatchReceiver;
-use openraft::{BasicNode, SnapshotPolicy};
+use openraft::error::ClientWriteError;
+use openraft::impls::ChangeMembers;
+use openraft::{BasicNode, ServerState, SnapshotPolicy};
 use tokio::sync::watch;
+use tokio::time::{Instant, sleep};
 
 use crate::commit::{CommitConfig, Outcome, RaftCommit};
 use crate::log_store::LogStore;
 use crate::network::NetworkFactory;
 use crate::state_machine::StateMachine;
 use crate::transport::{
-    CommitError, Committed, Handler, HandlerFuture, Request, Response, Transport,
+    CommitError, Committed, Handler, HandlerFuture, MembershipChange, Request, Response, Transport,
+    TransportError,
 };
 use crate::types::{NodeId, Raft};
 
@@ -37,11 +41,17 @@ pub struct ReplicaConfig {
     /// transactions on other replicas whose snapshots are that old can be
     /// validated once this node leads.
     pub history_retention: Duration,
+    /// Build a snapshot after this many log entries since the last one.
+    pub snapshot_every: u64,
+    /// Log entries kept after a snapshot, so replicas slightly behind catch
+    /// up from the log rather than from a snapshot.
+    pub logs_kept: u64,
 }
 
 impl ReplicaConfig {
     /// Return the settings for node `id`: 50 ms heartbeats, elections after
-    /// 150 to 300 ms, the default commit settings and a minute's history.
+    /// 150 to 300 ms, the default commit settings, a minute's history, and a
+    /// snapshot every 10,000 entries keeping the last 1,000.
     #[must_use]
     pub fn new(id: NodeId) -> Self {
         Self {
@@ -51,6 +61,8 @@ impl ReplicaConfig {
             election_max: Duration::from_millis(300),
             commit: CommitConfig::default(),
             history_retention: Duration::from_secs(60),
+            snapshot_every: 10_000,
+            logs_kept: 1_000,
         }
     }
 }
@@ -70,6 +82,82 @@ pub struct ReplicaNode<T: Transport> {
     storage: FjallStorage,
     /// The commit path.
     commit: Arc<RaftCommit<T>>,
+    /// How long a membership change may wait for a leader.
+    timeout: Duration,
+    /// How long to wait between attempts to reach a leader.
+    retry: Duration,
+}
+
+/// A replica's view of the cluster (ADR-0037 phase 4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterStatus {
+    /// This node.
+    pub id: NodeId,
+    /// This node's role: `leader`, `follower`, `candidate` or `learner`.
+    pub role: &'static str,
+    /// The current term.
+    pub term: u64,
+    /// The node this replica believes leads, if any.
+    pub leader: Option<NodeId>,
+    /// The index of the last log entry here.
+    pub last_log_index: Option<u64>,
+    /// The index of the last entry known committed.
+    pub committed_index: Option<u64>,
+    /// The index of the last entry applied here.
+    pub applied_index: Option<u64>,
+    /// The index the latest snapshot covers, if any.
+    pub snapshot_index: Option<u64>,
+    /// The voters, in the latest membership.
+    pub voters: Vec<NodeId>,
+    /// The learners, in the latest membership.
+    pub learners: Vec<NodeId>,
+    /// On the leader, how many entries each other member's log trails the
+    /// leader's by, or `None` for a member not yet heard from.
+    pub lag: BTreeMap<NodeId, Option<u64>>,
+}
+
+/// Make `change` on this node, if it leads.
+async fn change_here(
+    raft: &Raft,
+    id: NodeId,
+    change: MembershipChange,
+) -> std::result::Result<(), CommitError> {
+    let refused = |e: openraft::error::RaftError<_, ClientWriteError<_>>| match e.api_error() {
+        Some(ClientWriteError::ForwardToLeader(_)) => CommitError::NotLeader,
+        _ => CommitError::Unavailable(e.to_string()),
+    };
+    match change {
+        MembershipChange::AddLearner(node) => raft
+            .add_learner(node, BasicNode::new(node.to_string()), true)
+            .await
+            .map(drop)
+            .map_err(refused),
+        MembershipChange::SetVoters { voters, retain } => raft
+            .change_membership(
+                ChangeMembers::ReplaceAllVoters(voters.into_iter().collect()),
+                retain,
+            )
+            .await
+            .map(drop)
+            .map_err(refused),
+        MembershipChange::RemoveLearners(nodes) => raft
+            .change_membership(
+                ChangeMembers::RemoveNodes(nodes.into_iter().collect::<BTreeSet<_>>()),
+                false,
+            )
+            .await
+            .map(drop)
+            .map_err(refused),
+        MembershipChange::TransferLeadership(to) => {
+            if raft.metrics().borrow_watched().current_leader != Some(id) {
+                return Err(CommitError::NotLeader);
+            }
+            raft.trigger()
+                .transfer_leader(to)
+                .await
+                .map_err(|e| CommitError::Unavailable(e.to_string()))
+        }
+    }
 }
 
 impl<T: Transport> std::fmt::Debug for ReplicaNode<T> {
@@ -122,8 +210,8 @@ impl<T: Transport> ReplicaNode<T> {
             heartbeat_interval: millis(config.heartbeat),
             election_timeout_min: millis(config.election_min),
             election_timeout_max: millis(config.election_max),
-            // Snapshots come with phase 4; until then the log is kept whole.
-            snapshot_policy: SnapshotPolicy::Never,
+            snapshot_policy: SnapshotPolicy::LogsSinceLast(config.snapshot_every.max(1)),
+            max_in_snapshot_log_to_keep: config.logs_kept,
             ..openraft::Config::default()
         }
         .validate()
@@ -146,6 +234,8 @@ impl<T: Transport> ReplicaNode<T> {
             raft,
             storage,
             commit,
+            timeout: config.commit.timeout,
+            retry: config.commit.retry,
         })
     }
 
@@ -192,10 +282,130 @@ impl<T: Transport> ReplicaNode<T> {
             .map_err(|e| Error::ReplicationUnavailable(e.to_string()))
     }
 
+    /// Make a membership change through the leader, retrying until a
+    /// leader takes it or the commit timeout passes. Changes use joint
+    /// consensus, so the cluster stays available throughout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReplicationUnavailable`] if no leader took the change, or
+    /// the leader refused it, such as a voter set without a learner that
+    /// has caught up.
+    pub async fn change_membership(&self, change: MembershipChange) -> Result<()> {
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let leader = self.leader();
+            let outcome = match leader {
+                Some(leader) if leader == self.id => {
+                    change_here(&self.raft, self.id, change.clone()).await
+                }
+                Some(leader) => match self
+                    .commit
+                    .transport()
+                    .send(leader, Request::Membership(change.clone()))
+                    .await
+                {
+                    Ok(Response::Membership(outcome)) => outcome,
+                    Ok(_) | Err(TransportError::NotDelivered(_) | TransportError::NoReply(_)) => {
+                        Err(CommitError::NotLeader)
+                    }
+                },
+                None => Err(CommitError::NotLeader),
+            };
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(CommitError::NotLeader) if Instant::now() < deadline => sleep(self.retry).await,
+                Err(CommitError::NotLeader) => {
+                    return Err(Error::ReplicationUnavailable(
+                        "no leader took the membership change".into(),
+                    ));
+                }
+                Err(other) => return Err(Error::ReplicationUnavailable(format!("{other:?}"))),
+            }
+        }
+    }
+
+    /// Add node `id` as a learner, returning once it has caught up.
+    ///
+    /// # Errors
+    ///
+    /// As [`ReplicaNode::change_membership`].
+    pub async fn add_learner(&self, id: NodeId) -> Result<()> {
+        self.change_membership(MembershipChange::AddLearner(id))
+            .await
+    }
+
+    /// Make exactly `voters` the voting members. Nodes added must be
+    /// learners already; voters removed leave the cluster.
+    ///
+    /// # Errors
+    ///
+    /// As [`ReplicaNode::change_membership`].
+    pub async fn set_voters(&self, voters: &[NodeId]) -> Result<()> {
+        self.change_membership(MembershipChange::SetVoters {
+            voters: voters.to_vec(),
+            retain: false,
+        })
+        .await
+    }
+
+    /// Hand leadership to node `to`, which must be a voter.
+    ///
+    /// # Errors
+    ///
+    /// As [`ReplicaNode::change_membership`].
+    pub async fn transfer_leadership(&self, to: NodeId) -> Result<()> {
+        self.change_membership(MembershipChange::TransferLeadership(to))
+            .await
+    }
+
+    /// Return this replica's view of the cluster.
+    #[must_use]
+    pub fn status(&self) -> ClusterStatus {
+        let metrics = self.raft.metrics().borrow_watched().clone();
+        let membership = metrics.membership_config.membership();
+        let voters: Vec<NodeId> = membership.voter_ids().collect();
+        let learners: Vec<NodeId> = membership.non_write_voter_ids().collect();
+        let last = metrics.last_log_index;
+        let lag = metrics
+            .replication
+            .as_ref()
+            .map(|replication| {
+                replication
+                    .iter()
+                    .filter(|(id, _)| **id != self.id)
+                    .map(|(id, matched)| {
+                        let matched = matched.as_ref().map(openraft::LogId::index);
+                        (*id, matched.zip(last).map(|(m, l)| l.saturating_sub(m)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ClusterStatus {
+            id: self.id,
+            role: match metrics.state {
+                ServerState::Leader => "leader",
+                ServerState::Candidate => "candidate",
+                ServerState::Learner => "learner",
+                _ => "follower",
+            },
+            term: metrics.current_term,
+            leader: metrics.current_leader,
+            last_log_index: last,
+            committed_index: metrics.local_committed.as_ref().map(openraft::LogId::index),
+            applied_index: metrics.last_applied.as_ref().map(openraft::LogId::index),
+            snapshot_index: metrics.snapshot.as_ref().map(openraft::LogId::index),
+            voters,
+            learners,
+            lag,
+        }
+    }
+
     /// Return a handler that answers other replicas' requests to this node.
     #[must_use]
     pub fn handler(&self) -> Arc<dyn Handler> {
         Arc::new(NodeHandler {
+            id: self.id,
             raft: self.raft.clone(),
             commit: Arc::clone(&self.commit),
         })
@@ -209,6 +419,8 @@ impl<T: Transport> ReplicaNode<T> {
 
 /// Answers other replicas' requests to one node.
 struct NodeHandler<T: Transport> {
+    /// The node.
+    id: NodeId,
     /// The node's Raft handle.
     raft: Raft,
     /// The node's commit path.
@@ -220,6 +432,7 @@ impl<T: Transport> Handler for NodeHandler<T> {
     fn handle(&self, request: Request) -> HandlerFuture {
         let raft = self.raft.clone();
         let commit = Arc::clone(&self.commit);
+        let id = self.id;
         Box::pin(async move {
             match request {
                 Request::Append(rpc) => match raft.append_entries(rpc).await {
@@ -235,6 +448,23 @@ impl<T: Transport> Handler for NodeHandler<T> {
                     Err(e) => Response::Refused(e.to_string()),
                 },
                 Request::ReadIndex => Response::ReadIndex(commit.remote_read_index().await),
+                Request::Snapshot { vote, meta, data } => {
+                    let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
+                        meta,
+                        snapshot: std::io::Cursor::new(data),
+                    };
+                    match raft.install_full_snapshot(vote, snapshot).await {
+                        Ok(response) => Response::Snapshot(response),
+                        Err(e) => Response::Refused(e.to_string()),
+                    }
+                }
+                Request::TransferLeader(req) => match raft.handle_transfer_leader(req).await {
+                    Ok(response) => Response::TransferLeader(response),
+                    Err(e) => Response::Refused(e.to_string()),
+                },
+                Request::Membership(change) => {
+                    Response::Membership(change_here(&raft, id, change).await)
+                }
                 Request::Commit(bytes) => {
                     let Ok(request) = CommitRequest::decode(&bytes) else {
                         return Response::Commit(Err(CommitError::Unavailable(

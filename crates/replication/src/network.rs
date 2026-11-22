@@ -7,7 +7,8 @@ use openraft::alias::{SnapshotOf, VoteOf};
 use openraft::error::{NetworkError, RPCError, ReplicationClosed, StreamingError, Unreachable};
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
 use openraft::raft::{
-    AppendEntriesRequest, AppendResult, SnapshotResponse, VoteRequest, VoteResponse,
+    AppendEntriesRequest, AppendResult, SnapshotResponse, TransferLeaderRequest,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 
 use crate::state_machine::SnapshotData;
@@ -124,17 +125,51 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
         self.ballot(Request::PreVote(rpc)).await
     }
 
-    /// Refuse: snapshots come with phase 4, and without them the log is
-    /// never purged, so a peer always catches up from it.
+    /// Send a whole snapshot in one message, unless cancelled first.
     async fn full_snapshot(
         &mut self,
-        _vote: VoteOf<TypeConfig>,
-        _snapshot: SnapshotOf<TypeConfig, SnapshotData>,
-        _cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
+        vote: VoteOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, SnapshotData>,
+        cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
-        Err(StreamingError::Unreachable(Unreachable::from_string(
-            "snapshots are not supported yet (ADR-0037 phase 4)",
-        )))
+        let request = Request::Snapshot {
+            vote,
+            meta: snapshot.meta,
+            data: snapshot.snapshot.into_inner(),
+        };
+        let response = tokio::select! {
+            response = self.transport.send(self.target, request) => response,
+            closed = cancel => return Err(StreamingError::Closed(closed)),
+        };
+        match response {
+            Ok(Response::Snapshot(response)) => Ok(response),
+            Ok(other) => Err(StreamingError::Network(NetworkError::from_string(format!(
+                "unexpected response {other:?}"
+            )))),
+            Err(TransportError::NotDelivered(m)) => {
+                Err(StreamingError::Unreachable(Unreachable::from_string(m)))
+            }
+            Err(TransportError::NoReply(m)) => {
+                Err(StreamingError::Network(NetworkError::from_string(m)))
+            }
+        }
+    }
+
+    /// Ask the peer to take over leadership.
+    async fn transfer_leader(
+        &mut self,
+        req: TransferLeaderRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        match self
+            .transport
+            .send(self.target, Request::TransferLeader(req))
+            .await
+            .map_err(rpc_error)?
+        {
+            Response::TransferLeader(response) => Ok(response),
+            other => Err(unexpected(&other)),
+        }
     }
 }

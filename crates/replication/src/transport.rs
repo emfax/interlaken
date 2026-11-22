@@ -21,7 +21,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use interlaken_storage::Conflict;
-use openraft::raft::{AppendEntriesRequest, StreamAppendResult, VoteRequest, VoteResponse};
+use openraft::alias::{SnapshotMetaOf, VoteOf};
+use openraft::raft::{
+    AppendEntriesRequest, SnapshotResponse, StreamAppendResult, TransferLeaderRequest,
+    TransferLeaderResponse, VoteRequest, VoteResponse,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{NodeId, TypeConfig, decode, encode};
@@ -39,6 +43,38 @@ pub enum Request {
     Commit(Vec<u8>),
     /// A read index, for a fresh snapshot on the sender.
     ReadIndex,
+    /// A whole snapshot from the leader, for a replica too far behind its log.
+    Snapshot {
+        /// The sending leader's vote.
+        vote: VoteOf<TypeConfig>,
+        /// The snapshot's Raft metadata.
+        meta: SnapshotMetaOf<TypeConfig>,
+        /// The snapshot's data.
+        data: Vec<u8>,
+    },
+    /// Raft's request that the receiver take over leadership.
+    TransferLeader(TransferLeaderRequest<TypeConfig>),
+    /// A membership change, forwarded to the leader.
+    Membership(MembershipChange),
+}
+
+/// A change to the cluster's membership (ADR-0037 phase 4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MembershipChange {
+    /// Add a non-voting replica, which catches up from the leader.
+    AddLearner(NodeId),
+    /// Make exactly these nodes the voters, through joint consensus.
+    /// Voters left out become learners if `retain`, else leave.
+    SetVoters {
+        /// The new voters.
+        voters: Vec<NodeId>,
+        /// Whether removed voters stay as learners.
+        retain: bool,
+    },
+    /// Remove learners.
+    RemoveLearners(Vec<NodeId>),
+    /// Hand leadership to a voter.
+    TransferLeadership(NodeId),
 }
 
 /// A replica's answer to a [`Request`].
@@ -54,6 +90,12 @@ pub enum Response {
     /// The answer to [`Request::ReadIndex`]: the log index the sender must
     /// apply before its snapshot is fresh.
     ReadIndex(Result<u64, CommitError>),
+    /// The answer to [`Request::Snapshot`].
+    Snapshot(SnapshotResponse<TypeConfig>),
+    /// The answer to [`Request::TransferLeader`].
+    TransferLeader(TransferLeaderResponse<TypeConfig>),
+    /// The answer to [`Request::Membership`].
+    Membership(Result<(), CommitError>),
     /// The node couldn't handle the request, such as before Raft started.
     Refused(String),
 }

@@ -36,7 +36,7 @@ Pull requests run the storage tests on both paths. The nightly workflow runs the
 
 ## Replicated clusters under faults
 
-`interlaken-replication` replicates storage with Raft ([ADR-0037](../reference/design-records.md)). Its simulation tests run clusters of three and five replicas inside [turmoil](https://github.com/tokio-rs/turmoil), which simulates the network and time between them. While clients commit on every replica, a schedule drawn from a seed cuts minorities off, heals partitions, and crashes and restarts replicas from their directories:
+`interlaken-replication` replicates storage with Raft ([ADR-0037](../reference/design-records.md)). Its simulation tests run clusters of three and five replicas inside [turmoil](https://github.com/tokio-rs/turmoil), which simulates the network and time between them. While clients commit on every replica, a schedule drawn from a seed cuts minorities off, heals partitions, and crashes and restarts replicas from their directories. Replicas snapshot every 30 entries, so those that fall behind catch up from snapshots. One workload also adds a new replica and has it replace another while the faults go on:
 
 ```sh
 SIM_SEEDS=50 cargo test --release -p interlaken-replication --test simulation

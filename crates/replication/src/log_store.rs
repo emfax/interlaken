@@ -174,8 +174,12 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             .map_err(io)
     }
 
-    /// Remove every entry up to and including `log_id`, and remember it as purged.
+    /// Remove every entry up to and including `log_id`, and remember it as
+    /// purged. Applying writes data unsynced, the log being the durable
+    /// record, so everything is synced first: purged entries can't be
+    /// applied again.
     async fn purge(&mut self, log_id: LogId) -> Result<(), std::io::Error> {
+        self.replica.persist().await.map_err(io)?;
         self.write(PURGED, &log_id, self.sync).await?;
         self.replica
             .log_remove(0, log_id.index() + 1, false)

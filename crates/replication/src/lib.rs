@@ -19,7 +19,8 @@ pub mod transport;
 pub mod types;
 
 pub use commit::{CommitConfig, RaftCommit};
-pub use node::{ReplicaConfig, ReplicaNode};
+pub use node::{ClusterStatus, ReplicaConfig, ReplicaNode};
 pub use transport::{
-    Handler, MemoryNetwork, MemoryTransport, Request, Response, Transport, TransportError,
+    Handler, MembershipChange, MemoryNetwork, MemoryTransport, Request, Response, Transport,
+    TransportError,
 };

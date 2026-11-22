@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions.
+Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions. Phase 4 is built: snapshots, log compaction and membership changes.
 
 ## Summary
 
@@ -333,12 +333,50 @@ These give ADR-0036's cost model and capacity planning their numbers:
   - *Measured* (`measure_fresh_snapshots`, release build, in-memory transport, so these are overheads without network latency):
     - a lone fresh `begin` costs 10–13 µs with leases and 23–27 µs without, against 0.2 µs for a local one;
     - batching lets 64 concurrent clients reach 0.8–1.2 million fresh begins a second, close to local ones.
-- [ ] **Phase 4: Snapshots, compaction and membership.**
+- [x] **Phase 4: Snapshots, compaction and membership.**
   - fjall checkpoints streamed as snapshots;
   - log compaction;
   - joint-consensus membership with learners;
   - the admin API.
   - *Testing:* membership changes under faults in the simulation, and a replica rebuilt from a snapshot matching the leader's data.
+  - *As implemented:*
+    - **A snapshot is a logical export, not a checkpoint.** fjall 3.1 has no checkpoint API, but it has consistent views across keyspaces. The state machine captures one between applies (`Replica::capture`), so later applies don't disturb it. Storage then exports from the view: the whole `data` keyspace, every version included, the last commit timestamp, the GC watermark, and the `meta` entries the caller names (here the applied log ID and membership).
+      - A snapshot is held in memory and sent as one message. Streaming it in chunks is future work, needed before databases outgrow memory; phase 5's gRPC transport is the natural place.
+      - `ReplicaConfig::snapshot_every` (10,000 entries by default) sets how often snapshots are built. `logs_kept` (1,000) sets how many entries survive one, so replicas slightly behind catch up from the log.
+    - **Snapshots are stored before they are used.** Every snapshot built or received goes into a `replica_snapshot` keyspace, with its Raft metadata, under a new generation. A `meta` pointer to the generation, synced, makes it current, and older generations are then removed.
+      - The first version cleared the old snapshot before writing the new one. A stress run found the leader reading the current snapshot in that window, to send it, and finding none, which openraft treats as a fatal storage error.
+      - With generations, readers take the pointer and the chunks from one consistent view.
+    - **Installing** stores the snapshot, then imports it (`Replica::import`):
+      - a marker in `meta` is synced;
+      - `data` is cleared and refilled;
+      - the snapshot's `meta` entries, the last commit timestamp and a GC watermark no lower than either side's are written, with the marker removed;
+      - everything is synced.
+
+      A restart that finds the marker redoes the import from the stored snapshot before Raft starts.
+      - Validation history restarts at the snapshot's last commit, so older transactions on that replica fail with `40001` if it later leads.
+      - Transactions reading on the installing replica during the import can see its data incomplete. Installs happen only to replicas far behind, which can't serve fresh reads until they catch up anyway, but local reads there aren't protected.
+    - **Compaction** is openraft purging the log after a snapshot. Applying writes data unsynced, so the purge syncs everything first: purged entries can't be applied again. Phase 1's `raftlog` keyspace and compaction thread aren't used by replicas.
+    - **Membership.** `ReplicaNode::change_membership` takes a `MembershipChange`:
+      - adding a learner, which returns once it has caught up;
+      - setting the voters, through openraft's joint consensus, which skips the joint step when every old quorum intersects every new one;
+      - removing learners;
+      - transferring leadership.
+
+      Changes made on any node are forwarded to the leader and retried until the commit timeout, as commits are. `ReplicaNode::status` reports this node's role, the term, the leader, the log, commit, applied and snapshot indexes, the voters and learners, and, on the leader, each member's lag in entries.
+    - **The admin API is the node's, not yet the engine's.** `Engine::add_member` and the rest, with their `admin` privilege check, need `Engine::open_cluster`, which phase 5 brings. Node addresses are node IDs until then: each transport resolves an ID itself.
+    - **Test settings.** In-process test clusters now use 500–1,000 ms elections. With the 150–300 ms defaults, a machine running several test binaries at once missed heartbeats, and leaders were deposed in the middle of commits. That correctly answered `08007`, but made tests flaky.
+  - *Testing:*
+    - **openraft's storage suite now passes in full**, the 11 snapshot tests included.
+    - **Storage tests** cover a snapshot carrying a replica's data, last commit and chosen `meta` entries to another replica, which continues from it: old snapshots fail validation there, and new commits take the next timestamp. They also cover an interrupted import being redone after reopening.
+    - **`crates/replication/tests/membership.rs`:**
+      - a new node added after the log was compacted is built from a snapshot, holds the leader's data, and then votes;
+      - a replica down while the log was compacted past it catches up from a snapshot;
+      - the leader can be replaced while commits continue;
+      - leadership can be transferred, from any node;
+      - status reports roles and lag.
+
+      These, with the cluster and read tests, ran 10 times in a row, then 150 times as six parallel loops of the three test binaries, without failure.
+    - **The simulation** builds snapshots every 30 entries. A new workload adds a fourth replica as a learner while faults continue, then replaces node 1 with it. The checks run over whichever nodes are voters at the end, and Elle finds the histories strictly serializable. All five simulations ran clean over 20 seeds.
 - [ ] **Phase 5: Production network.**
   - `interlaken-net` with tonic, mTLS and tower layers;
   - `Engine::open_cluster`;

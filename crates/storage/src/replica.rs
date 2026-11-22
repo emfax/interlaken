@@ -335,6 +335,112 @@ impl Replica {
     pub async fn persist(&self) -> Result<()> {
         self.state.pool.run(Engine::persist).await?
     }
+
+    /// Capture this replica's state as it is now, for a snapshot. Call it
+    /// between applies; the view is unaffected by later ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn capture(&self) -> Result<SnapshotView> {
+        let view = self.state.pool.run(Engine::view).await?;
+        Ok(SnapshotView {
+            pool: Arc::clone(&self.state.pool),
+            view,
+        })
+    }
+
+    /// Replace this replica's data with `snapshot`'s, made by
+    /// [`SnapshotView::export`] on another replica, and continue from its
+    /// last commit. Validation history restarts there, so transactions
+    /// whose snapshots are older fail with `40001`.
+    ///
+    /// Store the snapshot durably first ([`Replica::store_snapshot`]): an
+    /// import a crash interrupts is redone from it on restart
+    /// ([`Replica::import_pending`]). Transactions reading while the data
+    /// is replaced can see it incomplete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptMeta`] for a malformed snapshot, or a storage error.
+    pub async fn import(&self, snapshot: Vec<u8>) -> Result<()> {
+        let last = self
+            .state
+            .pool
+            .run(move |engine: &Engine| engine.import(&snapshot))
+            .await??;
+        let mut validation = lock(&self.state.validation);
+        let retention = validation.retention;
+        let next_id = validation.next_id;
+        *validation = Validation::new(last);
+        validation.retention = retention;
+        validation.next_id = next_id;
+        drop(validation);
+        self.state.clock.publish(last);
+        Ok(())
+    }
+
+    /// Return `true` if a crash interrupted a snapshot import, which must be
+    /// redone from the stored snapshot before the replica is used.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn import_pending(&self) -> Result<bool> {
+        self.state.pool.run(Engine::import_pending).await?
+    }
+
+    /// Replace the stored snapshot with `blob`, durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn store_snapshot(&self, blob: Vec<u8>) -> Result<()> {
+        self.state
+            .pool
+            .run(move |engine: &Engine| engine.store_snapshot(&blob))
+            .await?
+    }
+
+    /// Return the stored snapshot, if one was stored completely.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn stored_snapshot(&self) -> Result<Option<Vec<u8>>> {
+        self.state.pool.run(Engine::stored_snapshot).await?
+    }
+}
+
+/// A replica's state at one moment, from [`Replica::capture`].
+pub struct SnapshotView {
+    /// Runs the export off the async threads.
+    pool: Arc<StoragePool>,
+    /// fjall's consistent view.
+    view: fjall::Snapshot,
+}
+
+impl std::fmt::Debug for SnapshotView {
+    /// Render the view opaquely.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotView").finish_non_exhaustive()
+    }
+}
+
+impl SnapshotView {
+    /// Encode the captured data, last commit timestamp and GC watermark,
+    /// with the `meta` entries at `meta_keys`, as one snapshot for
+    /// [`Replica::import`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn export(self, meta_keys: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+        let view = self.view;
+        self.pool
+            .run(move |engine: &Engine| engine.export(&view, &meta_keys))
+            .await?
+    }
 }
 
 /// Validates commits on the leader and turns each group into one batch

@@ -126,3 +126,130 @@ async fn phantom_proposals_are_forgotten() {
     replica.apply(batch, Vec::new()).await.unwrap();
     assert_eq!(get(&storage, "p").await.as_deref(), Some(&b"later"[..]));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert a snapshot carries a replica's data, last commit and chosen
+/// `meta` entries to another, which continues from it: old snapshots fail
+/// validation there, new ones commit at the next timestamp.
+async fn snapshots_carry_a_replica() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    for i in 0..50 {
+        let r = request(&storage, &captured, &format!("k{i}"), &i.to_string()).await;
+        let (batch, _) = replica.proposer().propose(&[r]);
+        replica.apply(batch, Vec::new()).await.unwrap();
+    }
+    // Overwrite one key, so the snapshot holds two versions of it.
+    let r = request(&storage, &captured, "k0", "new").await;
+    let (batch, _) = replica.proposer().propose(&[r]);
+    replica
+        .apply(batch, vec![(b"raft_applied".to_vec(), b"51".to_vec())])
+        .await
+        .unwrap();
+    let snapshot = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(vec![b"raft_applied".to_vec(), b"absent".to_vec()])
+        .await
+        .unwrap();
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let (other_storage, other, other_captured) = open(other_dir.path());
+    let stale = request(&other_storage, &other_captured, "k1", "stale").await;
+    other.store_snapshot(snapshot.clone()).await.unwrap();
+    assert_eq!(
+        other.stored_snapshot().await.unwrap(),
+        Some(snapshot.clone())
+    );
+    other.import(snapshot).await.unwrap();
+    assert!(!other.import_pending().await.unwrap());
+    assert_eq!(other.visible_ts(), replica.visible_ts());
+    assert_eq!(
+        other.meta(b"raft_applied".to_vec()).await.unwrap(),
+        Some(b"51".to_vec())
+    );
+    assert_eq!(other.meta(b"absent".to_vec()).await.unwrap(), None);
+    assert_eq!(
+        get(&other_storage, "k0").await.as_deref(),
+        Some(&b"new"[..])
+    );
+    assert_eq!(
+        get(&other_storage, "k49").await.as_deref(),
+        Some(&b"49"[..])
+    );
+    // The old version is there too, for snapshots that predate the overwrite.
+    let mut proposer = other.proposer();
+    let (_, outcomes) = proposer.propose(&[stale]);
+    assert_eq!(outcomes[0].as_ref().unwrap_err().sqlstate(), "40001");
+    let fresh = request(&other_storage, &other_captured, "k1", "fresh").await;
+    let (batch, outcomes) = proposer.propose(&[fresh]);
+    assert_eq!(
+        outcomes[0].as_ref().unwrap().into_raw(),
+        replica.visible_ts().into_raw() + 1
+    );
+    other.apply(batch, Vec::new()).await.unwrap();
+    assert_eq!(
+        get(&other_storage, "k1").await.as_deref(),
+        Some(&b"fresh"[..])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert an import a crash interrupted is reported after reopening, and
+/// redoing it from the stored snapshot completes it.
+async fn interrupted_imports_are_redone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    let r = request(&storage, &captured, "k", "v").await;
+    let (batch, _) = replica.proposer().propose(&[r]);
+    replica.apply(batch, Vec::new()).await.unwrap();
+    let snapshot = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(Vec::new())
+        .await
+        .unwrap();
+
+    let other_dir = tempfile::tempdir().unwrap();
+    {
+        let (_storage, other, _) = open(other_dir.path());
+        other.store_snapshot(snapshot).await.unwrap();
+        // What a crash part-way through an import leaves behind.
+        other
+            .set_meta(vec![(b"replica_importing".to_vec(), b"1".to_vec())], true)
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (other_storage, other, _) = open(other_dir.path());
+    assert!(other.import_pending().await.unwrap());
+    let stored = other.stored_snapshot().await.unwrap().unwrap();
+    other.import(stored).await.unwrap();
+    assert!(!other.import_pending().await.unwrap());
+    assert_eq!(get(&other_storage, "k").await.as_deref(), Some(&b"v"[..]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert a damaged snapshot is refused before the replica's data is touched.
+async fn damaged_snapshots_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    let r = request(&storage, &captured, "k", "v").await;
+    let (batch, _) = replica.proposer().propose(&[r]);
+    replica.apply(batch, Vec::new()).await.unwrap();
+    let snapshot = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(Vec::new())
+        .await
+        .unwrap();
+    for len in [0, 7, 12, 20, snapshot.len() - 1] {
+        let error = replica.import(snapshot[..len].to_vec()).await.unwrap_err();
+        assert_eq!(error.sqlstate(), "XX000", "prefix of {len}: {error}");
+        assert!(!replica.import_pending().await.unwrap());
+        assert_eq!(get(&storage, "k").await.as_deref(), Some(&b"v"[..]));
+    }
+}

@@ -195,8 +195,17 @@ struct History {
     failures: Mutex<BTreeMap<String, u64>>,
     /// Faults injected, by kind.
     faults: Mutex<BTreeMap<&'static str, u64>>,
-    /// Replicas in the cluster.
+    /// Replicas the cluster starts with.
     nodes: u64,
+    /// Hosts in the simulation: the replicas, and one that joins later.
+    hosts: u64,
+    /// The voters, as membership changes leave them.
+    members: Mutex<BTreeSet<u64>>,
+    /// How far the membership changes have got: 0 none, 1 learner added,
+    /// 2 node 1 replaced by the new node.
+    membership_step: AtomicU64,
+    /// The highest log index a replica reported a snapshot of.
+    snapshot_index: AtomicU64,
 }
 
 impl History {
@@ -227,6 +236,9 @@ enum Workload {
     ListAppend,
     /// Elle's list-append, with local snapshots for read-only transactions.
     LocalReads,
+    /// Elle's list-append, every snapshot fresh, while a new node joins and
+    /// replaces node 1.
+    Membership,
     /// Transfers between accounts.
     Bank,
 }
@@ -354,16 +366,18 @@ async fn client(
         // Think time, so the workload spans many faults.
         tokio::time::sleep(Duration::from_millis(rng.next() % 500)).await;
         let mops: Vec<Mop> = match workload {
-            Workload::ListAppend | Workload::LocalReads => (0..1 + rng.next() % 3)
-                .map(|_| {
-                    let k = rng.next() % KEYS;
-                    if rng.next().is_multiple_of(2) {
-                        Mop::Append(k, history.next_value.fetch_add(1, Ordering::Relaxed))
-                    } else {
-                        Mop::Read(k, None)
-                    }
-                })
-                .collect(),
+            Workload::ListAppend | Workload::LocalReads | Workload::Membership => {
+                (0..1 + rng.next() % 3)
+                    .map(|_| {
+                        let k = rng.next() % KEYS;
+                        if rng.next().is_multiple_of(2) {
+                            Mop::Append(k, history.next_value.fetch_add(1, Ordering::Relaxed))
+                        } else {
+                            Mop::Read(k, None)
+                        }
+                    })
+                    .collect()
+            }
             Workload::Bank => {
                 if rng.next().is_multiple_of(3) {
                     vec![Mop::Balances(None)]
@@ -410,6 +424,9 @@ fn config(id: u64) -> ReplicaConfig {
     config.election_max = Duration::from_millis(2000);
     config.commit.timeout = Duration::from_secs(20);
     config.commit.retry = Duration::from_millis(100);
+    // Frequent snapshots, so lagging and new replicas catch up from them.
+    config.snapshot_every = 30;
+    config.logs_kept = 10;
     config
 }
 
@@ -454,6 +471,9 @@ async fn replica(
             tokio::spawn(serve(stream, Arc::clone(&handler)));
         }
     });
+    if workload == Workload::Membership && id != history.hosts {
+        tokio::spawn(change_membership(Arc::clone(&node), Arc::clone(&history)));
+    }
     for p in 0..PROCESSES {
         let boot = history.next_process.load(Ordering::Relaxed);
         tokio::spawn(client(
@@ -468,8 +488,59 @@ async fn replica(
         if let Ok(report) = read_all(node.storage()).await {
             history.reports.lock().unwrap().insert(id, report);
         }
+        if let Some(index) = node.status().snapshot_index {
+            history.snapshot_index.fetch_max(index, Ordering::Relaxed);
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// Make the membership changes, from whichever replica gets there first:
+/// add the new node as a learner, then make it a voter in node 1's place.
+async fn change_membership(node: Arc<ReplicaNode<TurmoilTransport>>, history: Arc<History>) {
+    let new = history.hosts;
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    loop {
+        match history.membership_step.load(Ordering::Acquire) {
+            0 => {
+                if node.add_learner(new).await.is_ok() {
+                    let _ = history.membership_step.compare_exchange(
+                        0,
+                        1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                }
+            }
+            1 => {
+                let voters: Vec<u64> = (2..=new).collect();
+                if node.set_voters(&voters).await.is_ok() {
+                    *history.members.lock().unwrap() = voters.into_iter().collect();
+                    let _ = history.membership_step.compare_exchange(
+                        1,
+                        2,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                }
+            }
+            _ => return,
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Return the latest reports of the current voters.
+fn member_reports(history: &History) -> BTreeMap<u64, Report> {
+    let members = history.members.lock().unwrap().clone();
+    history
+        .reports
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(id, _)| members.contains(id))
+        .map(|(id, report)| (*id, report.clone()))
+        .collect()
 }
 
 /// Wait in simulated time until the replicas report identical data.
@@ -481,8 +552,8 @@ async fn converge(history: Arc<History>) -> Result<(), Box<dyn std::error::Error
             agreed = 0;
             continue;
         }
-        let reports = history.reports.lock().unwrap().clone();
-        let same = reports.len() as u64 == history.nodes
+        let reports = member_reports(&history);
+        let same = reports.len() == history.members.lock().unwrap().len()
             && reports
                 .values()
                 .all(|r| r == reports.values().next().unwrap());
@@ -501,11 +572,14 @@ async fn converge(history: Arc<History>) -> Result<(), Box<dyn std::error::Error
 /// Run one simulation of `workload` on `nodes` replicas from `seed`,
 /// returning its history.
 fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
+    let hosts = nodes + u64::from(workload == Workload::Membership);
     let history = Arc::new(History {
         nodes,
+        hosts,
+        members: Mutex::new((1..=nodes).collect()),
         ..History::default()
     });
-    let dirs: Vec<tempfile::TempDir> = (0..nodes).map(|_| tempfile::tempdir().unwrap()).collect();
+    let dirs: Vec<tempfile::TempDir> = (0..hosts).map(|_| tempfile::tempdir().unwrap()).collect();
     let total = 400;
     let mut sim = turmoil::Builder::new()
         .simulation_duration(Duration::from_secs(3600))
@@ -513,7 +587,7 @@ fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
         .min_message_latency(Duration::from_millis(1))
         .max_message_latency(Duration::from_millis(20))
         .build();
-    for id in 1..=nodes {
+    for id in 1..=hosts {
         let dir = dirs[(id - 1) as usize].path().to_path_buf();
         let history = Arc::clone(&history);
         sim.host(host(id), move || {
@@ -537,9 +611,11 @@ fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
             continue;
         }
         next_fault = sim.elapsed() + Duration::from_millis(1000 + rng.next() % 2000);
-        if history.issued.load(Ordering::Relaxed) >= total + PROCESSES * nodes {
+        let changing =
+            history.membership_step.load(Ordering::Acquire) < 2 && workload == Workload::Membership;
+        if history.issued.load(Ordering::Relaxed) >= total + PROCESSES * hosts && !changing {
             // The workload is over: heal everything and let the replicas converge.
-            heal(&sim, nodes);
+            heal(&sim, hosts);
             if let Some(id) = crashed.take() {
                 sim.bounce(host(id));
             }
@@ -553,10 +629,10 @@ fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
                 // A random minority, cut off from the rest.
                 let mut minority = BTreeSet::new();
                 for _ in 0..=(rng.next() % ((nodes - 1) / 2)) {
-                    minority.insert(1 + rng.next() % nodes);
+                    minority.insert(1 + rng.next() % hosts);
                 }
                 for &id in &minority {
-                    for other in (1..=nodes).filter(|o| !minority.contains(o)) {
+                    for other in (1..=hosts).filter(|o| !minority.contains(o)) {
                         sim.partition(host(id), host(other));
                     }
                 }
@@ -564,11 +640,11 @@ fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
             }
             1 => {
                 fault("heal");
-                heal(&sim, nodes);
+                heal(&sim, hosts);
                 isolated = false;
             }
             2 if crashed.is_none() => {
-                let id = 1 + rng.next() % nodes;
+                let id = 1 + rng.next() % hosts;
                 sim.crash(host(id));
                 fault("crash");
                 crashed = Some(id);
@@ -582,10 +658,12 @@ fn simulate(workload: Workload, nodes: u64, seed: u64) -> Arc<History> {
         }
     }
     eprintln!(
-        "seed {seed}: {:?} simulated, faults {:?}, failures {:?}",
+        "seed {seed}: {:?} simulated, faults {:?}, failures {:?}, latest snapshot {}, voters {:?}",
         sim.elapsed(),
         history.faults.lock().unwrap(),
-        history.failures.lock().unwrap()
+        history.failures.lock().unwrap(),
+        history.snapshot_index.load(Ordering::Relaxed),
+        history.members.lock().unwrap()
     );
     drop(sim);
     history
@@ -612,9 +690,9 @@ fn seeds() -> Vec<u64> {
     (1..=count).collect()
 }
 
-/// Assert the replicas' final data is identical, and return it.
+/// Assert the voters' final data is identical, and return it.
 fn final_data(history: &History, seed: u64) -> BTreeMap<u64, Vec<i64>> {
-    let reports = history.reports.lock().unwrap();
+    let reports = member_reports(history);
     let first = reports.values().next().expect("reports").clone();
     for (id, report) in reports.iter() {
         assert_eq!(report, &first, "seed {seed}: replica {id} differs");
@@ -716,6 +794,13 @@ fn list_append(nodes: u64) {
 }
 
 #[test]
+/// Assert the list-append checks hold while a new replica joins, catching
+/// up from snapshots, and replaces node 1, under the same faults.
+fn membership_changes_under_faults() {
+    check_list_append(Workload::Membership, 3, "strict-serializable");
+}
+
+#[test]
 /// Assert histories whose read-only transactions take local snapshots
 /// keep each client's order and lose nothing, though they may be stale.
 fn local_reads_under_faults() {
@@ -741,6 +826,17 @@ fn check_list_append(workload: Workload, nodes: u64, model: &str) -> Vec<PathBuf
     let mut paths = Vec::new();
     for seed in seeds() {
         let history = simulate(workload, nodes, seed);
+        if workload == Workload::Membership {
+            assert_eq!(
+                history.membership_step.load(Ordering::Acquire),
+                2,
+                "seed {seed}: the membership changes didn't finish"
+            );
+            assert!(
+                history.snapshot_index.load(Ordering::Relaxed) > 0,
+                "seed {seed}: no replica took a snapshot"
+            );
+        }
         let data = final_data(&history, seed);
         let mut seen = BTreeMap::<i64, usize>::new();
         for list in data.values() {
@@ -788,6 +884,7 @@ fn check_list_append(workload: Workload, nodes: u64, model: &str) -> Vec<PathBuf
         drop(ops);
         let name = match workload {
             Workload::LocalReads => "replicated-local-reads",
+            Workload::Membership => "replicated-membership",
             _ => "replicated-list-append",
         };
         let path = out.join(format!("{name}-{nodes}-{seed}.edn"));

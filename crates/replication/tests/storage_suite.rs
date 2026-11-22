@@ -1,12 +1,4 @@
 //! openraft's storage conformance suite, run against the log store and state machine.
-//!
-//! The suite's tests that build or install snapshots are left out until
-//! snapshots arrive in phase 4: `snapshot_meta`, `snapshot_meta_optional`,
-//! `transfer_snapshot`, and the `get_initial_state_*` tests whose state
-//! machine starts ahead of the log (`membership_from_empty_log_and_sm`,
-//! `membership_from_sm_inlog_is_smaller`, `membership_from_log_insm_is_smaller`,
-//! `last_log_lt_sm`, `last_log_lt_sm_past_snapshot`, `sm_lt_purged`,
-//! `log_ids` and `re_apply_committed`).
 
 use std::sync::Arc;
 
@@ -62,57 +54,8 @@ impl StoreBuilder<TypeConfig, LogStore, StateMachine, (TempDir, FjallStorage)> f
 /// The suite, for our store.
 type S = Suite<TypeConfig, LogStore, StateMachine, Builder, (TempDir, FjallStorage)>;
 
-/// Run each named suite test on a fresh store, failing with its name.
-macro_rules! run {
-    ($($test:ident),* $(,)?) => {
-        $(
-            let (_g, store, sm) = Builder.build().await.unwrap();
-            if let Err(e) = S::$test(store, sm).await {
-                panic!("{}: {e}", stringify!($test));
-            }
-        )*
-    };
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Assert the log store and state machine pass openraft's storage suite.
+/// Assert the log store and state machine pass openraft's whole storage suite.
 async fn openraft_storage_suite() {
-    run!(
-        last_membership_in_log_initial,
-        last_membership_in_log,
-        last_membership_in_log_multi_step,
-        get_membership_initial,
-        get_membership_from_log_and_empty_sm,
-        get_membership_from_empty_log_and_sm,
-        get_membership_from_log_le_sm_last_applied,
-        get_membership_from_log_gt_sm_last_applied_1,
-        get_membership_from_log_gt_sm_last_applied_2,
-        get_initial_state_without_init,
-        get_initial_state_with_state,
-        get_initial_state_last_log_gt_sm,
-        get_initial_state_inverted_log_order,
-        get_initial_state_conflict_at_same_index,
-        save_vote,
-        get_log_entries,
-        limited_get_log_entries,
-        leader_bounded_stream,
-        entries_stream,
-        try_get_log_entry,
-        log_reader_reads_new_entries,
-        initial_logs,
-        get_log_state,
-        get_log_id,
-        last_id_in_log,
-        last_applied_state,
-        purge_logs_upto_0,
-        purge_logs_upto_5,
-        purge_logs_upto_20,
-        delete_logs_after_11,
-        delete_logs_after_5,
-        delete_logs_after_0,
-        delete_logs_after_none,
-        append_to_log,
-        apply_single,
-        apply_multiple,
-    );
+    S::test_all(Builder).await.unwrap();
 }

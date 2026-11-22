@@ -25,10 +25,15 @@ pub struct Cluster {
     configure: fn(&mut ReplicaConfig),
 }
 
-/// Return the settings tests use: short commit timeouts, so unavailability shows quickly.
+/// Return the settings tests use: short commit timeouts, so unavailability
+/// shows quickly, and elections slow enough that a loaded machine running
+/// many clusters at once doesn't depose leaders by accident.
 fn config(id: u64) -> ReplicaConfig {
     let mut config = ReplicaConfig::new(id);
-    config.commit.timeout = Duration::from_secs(2);
+    config.heartbeat = Duration::from_millis(100);
+    config.election_min = Duration::from_millis(500);
+    config.election_max = Duration::from_millis(1000);
+    config.commit.timeout = Duration::from_secs(4);
     config
 }
 
@@ -75,6 +80,13 @@ impl Cluster {
         self.nodes.insert(id, node);
     }
 
+    /// Start node `id` in a new directory, outside the cluster until added.
+    pub async fn add_node(&mut self, id: u64) {
+        self.dirs.insert(id, tempfile::tempdir().unwrap());
+        self.ids.push(id);
+        self.boot(id).await;
+    }
+
     /// Stop node `id`, as if it crashed, keeping its directory.
     pub async fn crash(&mut self, id: u64) {
         self.network.unregister(id);
@@ -87,7 +99,7 @@ impl Cluster {
 
     /// Return the leader, once the running nodes agree on one.
     pub async fn leader(&self) -> u64 {
-        for _ in 0..200 {
+        for _ in 0..400 {
             let leaders: Vec<_> = self.nodes.values().map(ReplicaNode::leader).collect();
             if let Some(Some(leader)) = leaders.first()
                 && self.nodes.contains_key(leader)
