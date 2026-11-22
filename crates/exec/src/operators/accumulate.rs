@@ -336,6 +336,9 @@ impl Accumulator {
     pub(crate) fn finish(self, agg: &Aggregate, kind: Kind) -> Result<Datum, ExecError> {
         Ok(match (self, kind) {
             (Self::Count(n), _) => Datum::Int8(n),
+            // A sum over no values is the identity, not SQL's NULL (ADR-0034).
+            (Self::Int { rows: 0, .. }, Kind::IntSum) => Datum::Int8(0),
+            (Self::Float { rows: 0, .. }, Kind::FloatSum) => Datum::Float8(0.0),
             (Self::Int { rows: 0, .. } | Self::Float { rows: 0, .. }, _)
             | (Self::Best(None), _)
             | (Self::Bool(None), _) => Datum::Null,

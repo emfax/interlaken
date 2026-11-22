@@ -192,11 +192,11 @@ The smallest non-NULL value, or NULL if there are none.
 
 immutable · strict · not leakproof
 
-- `sum((option int2)) → (option int8)`
-- `sum((option int4)) → (option int8)`
-- `sum((option int8)) → (option int8)`
-- `sum((option float8)) → (option float8)`
+- `sum((option int2)) → int8`
+- `sum((option int4)) → int8`
+- `sum((option int8)) → int8`
+- `sum((option float8)) → float8`
 
-The sum of the non-NULL values, or NULL if there are none. Integer sums are exact and return `int8`, failing with `22003` if the total does not fit.
+The sum of the non-NULL values, or 0 if there are none, unlike SQL's NULL (ADR-0034). Integer sums are exact and return `int8`, failing with `22003` if the total does not fit.
 
 <!-- end generated: functions -->

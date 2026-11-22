@@ -16,6 +16,6 @@
           (get (tid 101) :as p :bind 1)
           (keys (as #1.1 author_id))
           (aggs (as (agg (fid 25) #1.3) total)))
-        (coalesce (lift (> #2.1 3)) false))
+        (> #2.1 3))
       (as #2.0 author_id))
     (as #3.0 author_id)))

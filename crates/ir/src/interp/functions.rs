@@ -8,7 +8,7 @@ use super::error::EvalError;
 use super::eval::scalar_type_of;
 use super::rel::Interp;
 use crate::catalog::FunctionDef;
-use crate::types::ScalarType;
+use crate::types::{DataType, ScalarType};
 
 /// Compute aggregate `def` over the argument tuples of a group's rows.
 ///
@@ -147,7 +147,12 @@ impl Interp<'_> {
             "count" => Datum::Int8(
                 i64::try_from(rows.len()).map_err(|_| int_range_error(ScalarType::Int8))?,
             ),
-            "sum" | "avg" if rows.is_empty() => Datum::Null,
+            // A sum over no values is the identity, not SQL's NULL (ADR-0034).
+            "sum" if rows.is_empty() => match def.returns.data {
+                DataType::Scalar(ScalarType::Float8) => Datum::Float8(0.0),
+                _ => Datum::Int8(0),
+            },
+            "avg" if rows.is_empty() => Datum::Null,
             "sum" => match &rows[0][0] {
                 Datum::Float8(_) => Datum::Float8(values().map(float).sum()),
                 _ => {

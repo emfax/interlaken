@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 and 2, the option type and two-valued expressions, are built; phases 3 to 6 aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
+Accepted. Phases 1 to 3 are built: the option type, two-valued expressions, and operators and aggregates. Phases 4 to 6 aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
 
 ## Summary
 
@@ -145,7 +145,8 @@ The optimizer simplifies the common shapes away. `(coalesce (lift = c (param 1 T
     - **Evaluation barely changed.** `lift` compiles to its inner operator, whose kernels already propagate NULL. `and3` and `or3` compile to the connective kernels and short-circuit in the interpreter too: the kernel differential test found the interpreter evaluating both arguments of `or3`, which raised an error `or` would have avoided. `not3` is the `not` kernel.
     - **`unwrap` isn't a new form:** `assert_present` already is it, failing with `22004`. `is-some` and `is-none` are `is-not-null` and `is-null`.
     - **Plans keep their index use and pushdown** (phase 4's simplification moved here). `logic::comparison` recognises `(coalesce (lift (cmp a b)) false)` as `cmp a b` for index access (`exec::access`), hash join keys (`exec::physical`) and decorrelation's correlated equalities. The quantified rewrite sees through `lift` in its aggregate arguments. Both forms are true exactly when both operands are present and the comparison holds, as the filter meant before.
-- [ ] **Phase 3: Operators and aggregates.** Outer joins and `Single` apply produce options; `sum` returns its identity; `min`, `max` and `avg` return options; inserts may omit only option columns.
+- [x] **Phase 3: Operators and aggregates.** Outer joins and `Single` apply produce options; `sum` returns its identity; `min`, `max` and `avg` return options; inserts may omit only option columns.
+  - *As implemented:* outer joins, left and single applies, `min`, `max` and `avg`, and inserts that omit columns already behaved as specified since phase 1. The change is `sum`: it returns `int8` or `float8`, plain, and 0 over no values, in the catalog, the interpreter and the executor's accumulators. The scalar-aggregate decorrelation now fills a padded group's `sum` with 0, as it did for `count`. Tested by `aggregates_over_nothing` and `correlated_sum_of_nothing_is_zero` (`crates/ir/tests/interp.rs`), which runs a correlated `sum` over a user with no posts before and after decorrelation.
 - [ ] **Phase 4: Optimizer.** Rewrites that are now valid in two-valued logic; simplification of lowered SQL patterns back to index keys; property tests that lowered and hand-written forms plan alike.
 - [ ] **Phase 5: Storage and security.** `IndexSpec::nones_distinct`; typed masks; the Cedar schema from option types.
 - [ ] **Phase 6: SQL lowering.** Written with the SQL front end: the lowering table above, and differential runs against Postgres through the lowering.

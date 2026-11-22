@@ -433,12 +433,23 @@ impl Decorrelator<'_> {
             .enumerate()
             .map(|(j, a)| {
                 let reference = column(new, col_id(n + j));
-                let is_count = matches!(&a.agg.func, FunctionRef::Id(id)
-                    if self.catalog.function_by_id(*id).is_some_and(|f| f.name.to_string() == "count"));
-                if is_count {
-                    Expr::Coalesce(vec![reference, Expr::Literal(Value::Int8(0))])
-                } else {
-                    reference
+                // `count` and `sum` of a group with no rows are 0, not the
+                // NULL the left join pads with (ADR-0034 for `sum`).
+                let def = match &a.agg.func {
+                    FunctionRef::Id(id) => self.catalog.function_by_id(*id),
+                    FunctionRef::Named(_) => None,
+                };
+                let zero = def.and_then(|f| match (f.name.to_string().as_str(), &f.returns.data) {
+                    ("count", _) => Some(Value::Int8(0)),
+                    ("sum", crate::types::DataType::Scalar(crate::types::ScalarType::Float8)) => {
+                        Some(Value::Float8(0.0))
+                    }
+                    ("sum", _) => Some(Value::Int8(0)),
+                    _ => None,
+                });
+                match zero {
+                    Some(zero) => Expr::Coalesce(vec![reference, Expr::Literal(zero)]),
+                    None => reference,
                 }
             })
             .collect();

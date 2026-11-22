@@ -275,8 +275,7 @@ impl<'a> Normalizer<'a> {
                     return true;
                 };
                 self.catalog.function_by_id(*id).is_none_or(|def| {
-                    def.returns.optional
-                        || (def.properties.strict && args.iter().any(&optional))
+                    def.returns.optional || (def.properties.strict && args.iter().any(&optional))
                 })
             }
             Expr::Lift(inner) => optional(inner),

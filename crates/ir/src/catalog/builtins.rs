@@ -138,7 +138,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
             "sum",
             aggregate,
             vec![s(t)],
-            s(S::Int8).option(),
+            s(S::Int8).plain(),
             pure(true, false),
         );
     }
@@ -146,7 +146,7 @@ pub fn builtin_functions() -> Vec<FunctionDef> {
         "sum",
         aggregate,
         vec![s(S::Float8)],
-        s(S::Float8).option(),
+        s(S::Float8).plain(),
         pure(true, false),
     );
     for t in [S::Int2, S::Int4, S::Int8, S::Float8] {
@@ -276,8 +276,9 @@ pub fn builtin_description(name: &str) -> Option<&'static str> {
              whose argument is not NULL."
         }
         "sum" => {
-            "The sum of the non-NULL values, or NULL if there are none. Integer sums are \
-             exact and return `int8`, failing with `22003` if the total does not fit."
+            "The sum of the non-NULL values, or 0 if there are none, unlike SQL's NULL \
+             (ADR-0034). Integer sums are exact and return `int8`, failing with `22003` if the \
+             total does not fit."
         }
         "avg" => "The mean of the non-NULL values as `float8`, or NULL if there are none.",
         "min" => "The smallest non-NULL value, or NULL if there are none.",

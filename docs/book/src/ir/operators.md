@@ -111,7 +111,7 @@ AGG: (agg FUNCTION ARG... [:distinct true] [:filter PREDICATE]) | (as (agg ...) 
 Groups the input rows by the key items and computes the aggregates over each group. The output has one row per group, with the keys' columns followed by the aggregates' columns:
 
 - **Keys** must be comparable types (not `jsonb`, arrays or records).
-- **With no keys**, the whole input is one group, and the output is exactly one row, even when the input is empty: `count` gives 0 and the other aggregates give NULL.
+- **With no keys**, the whole input is one group, and the output is exactly one row, even when the input is empty: `count` and `sum` give 0, and the other aggregates give NULL. Unlike SQL, `sum` of nothing is 0, not NULL ([ADR-0034](../reference/design-records.md)). For SQL's NULL, compute `count` alongside `sum` and choose with a `case` in a projection above the aggregate.
 - **`:distinct true`** aggregates each distinct argument value once.
 - **`:filter`** feeds the aggregate only the rows where its predicate is true, as SQL's `FILTER (WHERE ...)` does.
 

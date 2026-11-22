@@ -104,12 +104,13 @@ fn outer_joins_and_grouping() {
 }
 
 #[test]
-/// Assert an aggregate without keys returns one row even with no input.
+/// Assert an aggregate without keys returns one row even with no input, with
+/// `sum` of nothing 0 (ADR-0034) and other aggregates NULL.
 fn aggregates_over_nothing() {
     rows(
         "(plan (aggregate (filter (get users :as u) (> u.age 100)) (keys)
            (aggs (agg count) (agg sum u.karma) (agg max u.name) (agg bool_or (> u.karma 1)))))",
-        &["0 | NULL | NULL | NULL"],
+        &["0 | 0 | NULL | NULL"],
     );
     rows(
         "(plan (aggregate (get posts :as p) (keys)
@@ -327,4 +328,35 @@ fn dml() {
     ));
     // bob's karma is unchanged by the two failed updates.
     assert!(matches!(db.rows(TableId::new(100))[1][4], Datum::Int8(0)));
+}
+
+#[test]
+/// Assert a correlated scalar `sum` over no rows is 0 (ADR-0034), both as
+/// a nested loop and after decorrelation into a left join, which pads a
+/// group with no rows with NULL and must fill in 0 as it does for `count`.
+fn correlated_sum_of_nothing_is_zero() {
+    let catalog = catalog();
+    // cy (3) has no posts.
+    let plan = "(plan (sort (project (get users :as u) u.id
+        (scalar (aggregate (filter (get posts :as p) (= p.author_id u.id)) (keys)
+          (aggs (agg sum p.likes)))))
+        (asc id)))";
+    let resolved = resolve(&parse_plan(plan).unwrap(), &catalog).unwrap().plan;
+    let optimized = interlaken_ir::optimize::optimize(&resolved, &catalog);
+    let printed = interlaken_ir::text::print_plan(&optimized);
+    assert!(!printed.contains("(apply"), "not decorrelated:\n{printed}");
+    verify(&optimized, &catalog, &VerifyOptions::default()).unwrap();
+    for plan in [&resolved, &optimized] {
+        let got: Vec<String> = execute(plan, &catalog, &mut data(), &[], ExecOptions::default())
+            .unwrap()
+            .iter()
+            .map(|row| row.iter().map(render).collect::<Vec<_>>().join(" | "))
+            .collect();
+        assert_eq!(
+            got,
+            ["1 | 12", "2 | 1", "3 | 0"],
+            "{}",
+            interlaken_ir::text::print_plan(plan)
+        );
+    }
 }
