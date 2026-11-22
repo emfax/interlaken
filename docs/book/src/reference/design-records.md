@@ -34,6 +34,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0014 | Rule-based optimizer for the MVP | implemented |
 | 0021 | IR correctness and security testing strategy | implemented |
 | 0034 | Two-valued logic with an explicit option type | accepted: built except SQL lowering, which waits for the SQL front end |
+| 0036 | Statistics and cost-based planning | proposal |
 
 ## Security
 
