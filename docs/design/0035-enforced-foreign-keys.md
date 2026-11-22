@@ -1,12 +1,12 @@
 ---
 id: 0035
 title: Enforced Foreign Keys
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [engine, exec, storage, security, ddl]
 feature-flag:
 created: 2026-11-21
 accepted: 2026-11-21
-implemented:
+implemented: 2026-11-22
 spec-sections: ["mvp-completion.md#beyond-the-mvp"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 to 3 are built: declarations, checks on writes and cascades. The optimizer (phase 4) isn't.
+Implemented, except cardinality estimates, which wait for a cost model (see phase 4).
 
 ## Summary
 
@@ -230,7 +230,26 @@ These facts allow:
       - composite keys;
       - policies that forbid a cascaded delete (`42501`), which then succeed once the row is the principal's own. With the count check removed, this test fails;
       - a cascade into a membership edges table, which keeps the closure exact.
-- [ ] **Phase 4: Optimizer.** Join elimination for ungoverned parents, and foreign-key cardinality estimates, with property tests that eliminated and original plans agree.
+- [x] **Phase 4: Optimizer.** Join elimination for ungoverned parents, and foreign-key cardinality estimates, with property tests that eliminated and original plans agree.
+  - *As implemented:*
+    - **Join elimination** is a new optimizer phase, `optimize::eliminate`, between pushdown and pruning. It removes an inner join whose condition is exactly a foreign key's equalities, plain or SQL-style lifted, when all of these hold:
+      - the parent side is a bare `Get`, so no filter, `PolicyFilter` or mask;
+      - the referencing columns are plain and not padded on their way up from the child's `Get`;
+      - nothing else in the plan references the parent's binding;
+      - the join's output isn't consumed by position.
+
+      It repeats until nothing changes, so chains of joins reading only their first table collapse. Because it runs after security lowering, a governed parent always has its `PolicyFilter` and is never eliminated, as the ADR requires.
+    - **Cardinality estimates aren't built.** The optimizer has no cost model (ADR-0014): joins keep the order the query gave, and nothing would read an estimate. They wait for a cost model.
+  - *Testing:* `crates/ir/tests/join_elimination.rs` covers eliminated joins with the parent on either side, a transitive chain, and a filter on the child. It also covers joins that must stay:
+      - the parent read;
+      - an optional referencing column;
+      - an extra condition;
+      - equal columns without a foreign key;
+      - output consumed whole;
+      - a left join padding the child;
+      - a governed parent.
+
+      Every case also checks that the optimized plan returns the same rows. `foreign_keys_eliminate_joins` checks EXPLAIN through the engine.
 
 ## Consequences
 

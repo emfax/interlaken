@@ -1,6 +1,7 @@
 //! The optimizer's entry point.
 
 use super::decorrelate::decorrelate;
+use super::eliminate::eliminate;
 use super::order::order;
 use super::prune::prune;
 use super::pushdown::Pushdown;
@@ -12,7 +13,8 @@ use crate::verify::column_types;
 
 /// Optimize a resolved, verified plan by rule-based rewriting in fixed phases:
 /// simplification, decorrelation, predicate pushdown under the barrier rules,
-/// projection pruning, and limit pushdown with sort elimination.
+/// join elimination through foreign keys, projection pruning, and limit
+/// pushdown with sort elimination.
 ///
 /// The result means the same as the input (the reference interpreter
 /// returns the same rows for both, as a bag) and verifies under the same
@@ -50,6 +52,7 @@ pub fn optimize(plan: &Plan, catalog: &dyn Catalog) -> Plan {
     let pushdown = Pushdown { catalog, types };
     plan.root = pushdown.run(take(&mut plan.root));
     simplify(&mut plan.root, &pushdown.types, catalog);
+    eliminate(&mut plan.root, catalog);
     prune(&mut plan.root);
     order(&mut plan.root, catalog);
     // Rewrites may write SQL-style shorthand; make it explicit again (ADR-0034).

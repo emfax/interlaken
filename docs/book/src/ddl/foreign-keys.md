@@ -134,6 +134,14 @@ Checks read rows whatever the writer's policies allow, because a constraint can'
 
 Unique indexes reveal existence in the same way, as they do in Postgres. Error messages carry only the writer's own values and the names of tables and foreign keys, never values from rows the writer can't read. Don't put a foreign key across a boundary that must hide whether rows exist.
 
+### Queries
+
+The optimizer drops a join from a table to the parent its foreign key refers to when the query reads none of the parent's columns: the foreign key says each child row has exactly one parent, so the join changes nothing. The join stays if:
+- the query reads the parent;
+- the join condition does anything beyond the foreign key's equalities;
+- a referencing column can be NULL;
+- the parent is governed by policies, since the join then also hides children whose parent the principal can't see.
+
 ## Dropping
 
 `drop_foreign_key(name)` removes a foreign key; its tables and indexes stay. A foreign key also limits other DDL:

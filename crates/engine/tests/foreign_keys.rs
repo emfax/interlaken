@@ -1167,3 +1167,21 @@ async fn cascades_maintain_closures() {
         ["[Int8(2), Int8(7)]"]
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert the optimizer drops a join to the parent on a foreign key when
+/// the query reads only the child, and keeps it when it reads the parent.
+async fn foreign_keys_eliminate_joins() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = cascading_schema(&engine).await;
+    let only_docs =
+        "(plan (project (join inner (get docs :as d) (get users :as u) (= d.owner u.id)) d.id))";
+    let plan = root.explain(only_docs, false).await.unwrap();
+    assert!(!plan.contains("Join") && !plan.contains("users"), "{plan}");
+    assert_eq!(rows(&mut root, only_docs).await.len(), 3);
+    let with_user = "(plan (project (join inner (get docs :as d) (get users :as u) (= d.owner u.id)) d.id u.id))";
+    let plan = root.explain(with_user, false).await.unwrap();
+    assert!(plan.contains("users"), "{plan}");
+    assert_eq!(rows(&mut root, with_user).await.len(), 3);
+}
