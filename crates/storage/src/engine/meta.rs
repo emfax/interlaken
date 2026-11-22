@@ -14,6 +14,10 @@ pub(crate) const FORMAT_VERSION_KEY: &[u8] = b"format_version";
 pub(crate) const LAST_COMMIT_TS_KEY: &[u8] = b"last_commit_ts";
 /// Key holding the GC watermark, as a big-endian `u64`.
 pub(crate) const GC_WATERMARK_KEY: &[u8] = b"gc_watermark";
+/// Key holding the index of the last commit log entry applied to `data`,
+/// as a big-endian `u64` (ADR-0037). Absent in databases that never used
+/// the commit log, which means 0.
+pub(crate) const LAST_APPLIED_INDEX_KEY: &[u8] = b"last_applied_index";
 
 /// Encode a format version as a `meta` value.
 pub(crate) fn encode_format_version(version: u32) -> [u8; 4] {

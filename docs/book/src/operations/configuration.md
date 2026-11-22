@@ -136,4 +136,18 @@ Size at which a keyspace's memtable is flushed to a table. Defaults
 to 64 MiB; values below 1 MiB are raised to 1 MiB. Recorded when the
 database is created; later opens keep the original size.
 
+### `commit_log`
+
+Type `bool`.
+
+Commit through the commit log (ADR-0037 phase 1): each validated
+group is first appended to the `raftlog` keyspace, which is the
+commit, and then applied to the data by a separate thread, as
+replication will need. `false` is the single-node path. Defaults to
+`false`, or `true` when `INTERLAKEN_COMMIT_LOG` is `1`; the
+environment variable lets every test suite run on either path unchanged.
+
+A database can switch between the two paths from one open to the
+next: opening it applies anything left in the log first.
+
 <!-- end generated: options -->

@@ -69,6 +69,16 @@ pub struct StorageOptions {
     /// to 64 MiB; values below 1 MiB are raised to 1 MiB. Recorded when the
     /// database is created; later opens keep the original size.
     pub memtable_bytes: u64,
+    /// Commit through the commit log (ADR-0037 phase 1): each validated
+    /// group is first appended to the `raftlog` keyspace, which is the
+    /// commit, and then applied to the data by a separate thread, as
+    /// replication will need. `false` is the single-node path. Defaults to
+    /// `false`, or `true` when `INTERLAKEN_COMMIT_LOG` is `1`; the
+    /// environment variable lets every test suite run on either path unchanged.
+    ///
+    /// A database can switch between the two paths from one open to the
+    /// next: opening it applies anything left in the log first.
+    pub commit_log: bool,
 }
 
 impl Default for StorageOptions {
@@ -87,6 +97,7 @@ impl Default for StorageOptions {
             gc_chunk_versions: 4096,
             max_journal_bytes: DEFAULT_MAX_JOURNAL_BYTES,
             memtable_bytes: DEFAULT_MEMTABLE_BYTES,
+            commit_log: std::env::var_os("INTERLAKEN_COMMIT_LOG").is_some_and(|v| v == "1"),
         }
     }
 }
@@ -181,7 +192,9 @@ impl FjallStorage {
     /// ```
     pub fn open(path: impl AsRef<Path>, options: StorageOptions) -> Result<Self> {
         let engine = Engine::open_with(path, options.max_journal_bytes, options.memtable_bytes)?;
-        let last = engine.last_commit_ts()?;
+        // Entries committed to the log but not applied before the last
+        // close or crash are applied first, whichever path follows.
+        let (last, last_index) = engine.replay_log()?;
         let clock = Arc::new(CommitClock::new(last));
         let pool = Arc::new(StoragePool::start(
             &engine,
@@ -192,10 +205,17 @@ impl FjallStorage {
             durability: options.durability,
             max_group: options.max_commit_group,
             queue_capacity: options.commit_queue_capacity,
+            log: options.commit_log,
         };
         let stats = Arc::new(SequencerStats::default());
-        let sequencer =
-            Sequencer::start(engine, Arc::clone(&clock), last, config, Arc::clone(&stats))?;
+        let sequencer = Sequencer::start(
+            engine,
+            Arc::clone(&clock),
+            last,
+            last_index,
+            config,
+            Arc::clone(&stats),
+        )?;
         let gc = GcContext {
             pool: Arc::clone(&pool),
             clock: Arc::clone(&clock),

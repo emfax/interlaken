@@ -88,8 +88,8 @@ cargo bench -p interlaken-storage --bench commit_throughput  # commits per secon
 
 Three GitHub Actions workflows live in `.github/workflows`:
 
-- **`ci.yml`** checks every pull request to `main`: formatting, clippy, the API docs with warnings denied, the test suite (which also checks this book's examples and generated sections), a build on Rust 1.90, and the book build.
-- **`nightly.yml`** runs at 03:00 UTC, on nights when `main` has new commits: clippy, the full test suite, the SMT prover tests, the slow ignored tests, the power-loss tests on LazyFS and the disk-space soak. Run it by hand from the Actions tab to skip the check for new commits.
+- **`ci.yml`** checks every pull request to `main`: formatting, clippy, the API docs with warnings denied, the test suite (which also checks this book's examples and generated sections), the storage tests again on the commit log path, a build on Rust 1.90, and the book build.
+- **`nightly.yml`** runs at 03:00 UTC, on nights when `main` has new commits: clippy, the full test suite on both commit paths, the SMT prover tests, the slow ignored tests, the power-loss tests on LazyFS on both commit paths, and the disk-space soak. Run it by hand from the Actions tab to skip the check for new commits.
 - **`book.yml`** builds this book and publishes it to GitHub Pages whenever a change to `docs/book` reaches `main`.
 
 ## Documentation

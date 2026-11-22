@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest.
 
 ## Summary
 
@@ -225,13 +225,38 @@ These give ADR-0036's cost model and capacity planning their numbers:
 
 ## Implementation Phases
 
-- [ ] **Phase 1: A log-based commit path on one node.**
+- [x] **Phase 1: A log-based commit path on one node.**
   - `CommitPath` in storage;
   - the proposal and apply split;
   - the `raftlog` keyspace and log-derived timestamps;
   - recovery by replaying the log past the persisted applied index;
   - no network yet.
   - *Testing:* the storage model, crash and power-loss tests pass on this path too.
+  - *As implemented:*
+    - **The path is `StorageOptions::commit_log`**, off by default. Its default follows the environment variable `INTERLAKEN_COMMIT_LOG`, so every existing test, the crash and power-loss harnesses included, runs on the log path unchanged. Pull requests run the storage tests on both paths; the nightly job runs the whole workspace and the power-loss script on both.
+    - **Proposal and apply.** The sequencer thread is the proposer. It validates exactly as before, then appends each group as one `LogEntry` to the `raftlog` keyspace, synced as `durability` says. That append is the commit.
+      - An *apply* thread writes each entry's versions to `data` with `last_commit_ts` and a new `last_applied_index` in `meta`, unsynced, since the log is the durable record. It then publishes `visible_ts` and answers the callers.
+      - The proposer validates the next group while earlier ones are applied, against a history that already holds them.
+      - A *compaction* thread syncs and removes applied entries every 4,096 entries. It began inline in the apply thread every 256 entries, but its fsyncs then stalled commits: p99 rose to 10–17 ms, and under `Buffered`, which otherwise never syncs, throughput fell to a fifth.
+    - **Timestamps are carried, not computed.** Each entry records the timestamp of its first transaction, and its `i`th transaction commits at that plus `i`, instead of the ADR's `base + index × 1024 + position`. It is just as deterministic, since every replica reads the same entry. It also leaves no gaps, has no 1,024-transaction cap, and lets a database move between paths without rebasing: a log entry simply continues after the last commit, whichever path made it.
+    - **Recovery** applies every entry after `last_applied_index` when the database opens, whichever path it then uses. A gap in the log is corruption.
+    - **`CommitPath` isn't a public trait yet.** Both paths are modes of the one sequencer, and the split that matters, proposal against apply, is in place. The public trait waits for phase 2, where its second implementation, in `interlaken-replication`, shows what it must expose: the validation history and the apply step.
+  - *Testing:*
+    - unit tests: entries round-trip and reject damage; unapplied entries are replayed once and in order; compaction keeps unapplied entries; gaps are refused;
+    - `crates/storage/tests/commit_log.rs` covers switching between the paths four times across compactions, with timestamps continuing, and conflict detection through the log;
+    - the whole storage suite on the log path;
+    - `scripts/power-loss.sh` on the log path: under `Sync`, 50 power-loss cycles with 259,299 acknowledged commits and none lost; under `Buffered`, only losses that mode permits;
+    - the whole workspace on the log path: 403 tests passed.
+  - *Measured* (`commit_throughput`, blind writes, the development disk):
+
+    | | 1 client | 16 | 64 | 256 |
+    | --- | --- | --- | --- | --- |
+    | `Sync`, single-node path | 3,916/s | 26,762/s | 78,854/s | 181,218/s |
+    | `Sync`, commit log | 3,596/s | 19,206/s | 73,979/s | 188,300/s |
+    | `Buffered`, single-node path | 89,683/s | 361,607/s | 300,290/s | 241,182/s |
+    | `Buffered`, commit log | 52,471/s | 230,463/s | 188,080/s | 209,169/s |
+
+    Under `Sync` the fsync dominates and the paths are close; p99 stays near 2 ms at 256 clients on both. Under `Buffered` the log path writes every commit twice, once to the log and once to the data, and reaches 58–87% of the single-node path. Compaction's occasional fsync still shows as a rare maximum latency of about 0.25 s under `Buffered`.
 - [ ] **Phase 2: Replication in process.**
   - `Transport`, its in-memory implementation and its turmoil implementation;
   - openraft integration;

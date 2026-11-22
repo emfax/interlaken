@@ -469,6 +469,7 @@ fn configuration() -> String {
         gc_chunk_versions,
         max_journal_bytes,
         memtable_bytes,
+        commit_log: _,
     } = StorageOptions::default();
     let count = |n: usize| {
         let s = n.to_string();
@@ -512,6 +513,10 @@ fn configuration() -> String {
         ("gc_chunk_versions", count(gc_chunk_versions)),
         ("max_journal_bytes", bytes(max_journal_bytes)),
         ("memtable_bytes", bytes(memtable_bytes)),
+        (
+            "commit_log",
+            "`false`, or `true` when `INTERLAKEN_COMMIT_LOG` is `1`".to_owned(),
+        ),
     ];
     let mut out = String::new();
     options_section(

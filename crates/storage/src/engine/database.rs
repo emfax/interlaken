@@ -5,10 +5,12 @@ use std::path::Path;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 
 use super::meta::{
-    FORMAT_VERSION, FORMAT_VERSION_KEY, GC_WATERMARK_KEY, LAST_COMMIT_TS_KEY,
-    decode_format_version, decode_timestamp, encode_format_version, encode_timestamp,
+    FORMAT_VERSION, FORMAT_VERSION_KEY, GC_WATERMARK_KEY, LAST_APPLIED_INDEX_KEY,
+    LAST_COMMIT_TS_KEY, decode_format_version, decode_timestamp, encode_format_version,
+    encode_timestamp,
 };
 use super::stored::encode_stored;
+use crate::commit::LogEntry;
 use crate::encoding::versioned_key;
 use crate::{Durability, Error, Result, Timestamp};
 
@@ -25,8 +27,10 @@ pub(crate) const MIN_MEMTABLE_BYTES: u64 = 1024 * 1024;
 const DATA_KEYSPACE: &str = "data";
 /// Name of the unversioned keyspace holding engine state.
 const META_KEYSPACE: &str = "meta";
+/// Name of the keyspace holding commit log entries by index (ADR-0037).
+const LOG_KEYSPACE: &str = "raftlog";
 
-/// The fjall database with its `data` and `meta` keyspaces.
+/// The fjall database with its `data`, `meta` and `raftlog` keyspaces.
 ///
 /// All methods are synchronous and call fjall directly. Per ADR-0001 they
 /// must only run on storage threads, never inside an async task.
@@ -39,6 +43,7 @@ pub struct Engine {
     db: Database,
     data: Keyspace,
     meta: Keyspace,
+    log: Keyspace,
 }
 
 impl Engine {
@@ -92,7 +97,13 @@ impl Engine {
         let create = || KeyspaceCreateOptions::default().max_memtable_size(memtable_bytes);
         let data = db.keyspace(DATA_KEYSPACE, create)?;
         let meta = db.keyspace(META_KEYSPACE, create)?;
-        let engine = Self { db, data, meta };
+        let log = db.keyspace(LOG_KEYSPACE, create)?;
+        let engine = Self {
+            db,
+            data,
+            meta,
+            log,
+        };
 
         match engine.meta.get(FORMAT_VERSION_KEY)? {
             Some(value) => engine.validate_meta(&value)?,
@@ -174,6 +185,112 @@ impl Engine {
         Ok(())
     }
 
+    /// Return the index of the last commit log entry applied to `data`; 0
+    /// if the database never used the commit log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptMeta`] if the entry is malformed, or
+    /// [`Error::Fjall`] if the read fails.
+    pub(crate) fn last_applied_index(&self) -> Result<u64> {
+        match self.meta.get(LAST_APPLIED_INDEX_KEY)? {
+            None => Ok(0),
+            Some(value) => {
+                Ok(decode_timestamp(&value, "last_applied_index is not 8 bytes")?.into_raw())
+            }
+        }
+    }
+
+    /// Append `entry` to the commit log as one batch, synced as `durability`
+    /// says (ADR-0037). Once this returns, the entry is committed: if the
+    /// process stops before it is applied, opening the database applies it.
+    pub(crate) fn append_log(&self, entry: &LogEntry, durability: Durability) -> Result<()> {
+        let mode = match durability {
+            Durability::Sync => PersistMode::SyncAll,
+            Durability::Buffered => PersistMode::Buffer,
+        };
+        let mut batch = self.db.batch().durability(Some(mode));
+        batch.insert(&self.log, entry.index.to_be_bytes(), entry.encode());
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Apply a committed log entry: write its versions to `data`, and set
+    /// `last_commit_ts` and `last_applied_index` in `meta`, in one batch.
+    ///
+    /// The batch isn't synced: the log entry is the durable record, and
+    /// replaying it on open restores anything a crash loses.
+    pub(crate) fn apply_entry(&self, entry: &LogEntry) -> Result<()> {
+        let mut batch = self.db.batch();
+        for (ts, write) in entry.versions() {
+            batch.insert(
+                &self.data,
+                versioned_key(&write.key, ts),
+                encode_stored(write.value.as_deref()),
+            );
+        }
+        batch.insert(
+            &self.meta,
+            LAST_COMMIT_TS_KEY,
+            encode_timestamp(entry.last_ts()),
+        );
+        batch.insert(
+            &self.meta,
+            LAST_APPLIED_INDEX_KEY,
+            encode_timestamp(Timestamp::from_raw(entry.index)),
+        );
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Apply every log entry after the last applied one, in order, and
+    /// return the last commit timestamp and the last log index.
+    ///
+    /// Opening a database calls this whichever commit path it then uses,
+    /// so entries committed to the log before a crash are never lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptMeta`] for a malformed entry or a gap in the
+    /// log, or [`Error::Fjall`] if a read or write fails.
+    pub(crate) fn replay_log(&self) -> Result<(Timestamp, u64)> {
+        let applied = self.last_applied_index()?;
+        let mut last_index = applied;
+        for item in self.log.range((applied + 1).to_be_bytes()..) {
+            let entry = LogEntry::decode(&item.value()?)?;
+            if entry.index != last_index + 1 {
+                return Err(Error::CorruptMeta("gap in the commit log"));
+            }
+            self.apply_entry(&entry)?;
+            last_index = entry.index;
+        }
+        // The highest index ever logged, so new entries never reuse one.
+        let logged = self
+            .log
+            .last_key_value()
+            .map(|item| item.key())
+            .transpose()?
+            .map_or(Ok::<u64, Error>(0), |key| {
+                let bytes: [u8; 8] = key[..]
+                    .try_into()
+                    .map_err(|_| Error::CorruptMeta("commit log key is not 8 bytes"))?;
+                Ok(u64::from_be_bytes(bytes))
+            })?;
+        Ok((self.last_commit_ts()?, last_index.max(logged)))
+    }
+
+    /// Sync everything written so far, then remove the log entries up to
+    /// and including `through`, whose versions are then durable in `data`.
+    pub(crate) fn compact_log(&self, through: u64) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        let mut batch = self.db.batch();
+        for item in self.log.range(..=through.to_be_bytes()) {
+            batch.remove(&self.log, item.key()?);
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Physically remove versioned keys from `data` in one unsynced batch (ADR-0008).
     pub(crate) fn remove_versions(&self, keys: Vec<Vec<u8>>) -> Result<()> {
         if keys.is_empty() {
@@ -218,7 +335,7 @@ impl Engine {
     /// Refuses to initialise if either keyspace already holds data, since that
     /// means `meta` was lost rather than never written.
     fn initialise_meta(&self) -> Result<()> {
-        if !self.meta.is_empty()? || !self.data.is_empty()? {
+        if !self.meta.is_empty()? || !self.data.is_empty()? || !self.log.is_empty()? {
             return Err(Error::CorruptMeta(
                 "format_version missing from a populated database",
             ));
@@ -237,6 +354,11 @@ impl Engine {
         batch.insert(
             &self.meta,
             GC_WATERMARK_KEY,
+            encode_timestamp(Timestamp::ZERO),
+        );
+        batch.insert(
+            &self.meta,
+            LAST_APPLIED_INDEX_KEY,
             encode_timestamp(Timestamp::ZERO),
         );
         batch.commit()?;
@@ -285,6 +407,113 @@ mod tests {
         let engine = Engine::open(dir.path()).unwrap();
         assert_eq!(engine.format_version().unwrap(), FORMAT_VERSION);
         assert_eq!(engine.data().get(b"k").unwrap().as_deref(), Some(&b"v"[..]));
+    }
+
+    /// Return a log entry with one transaction per `(key, value)` pair.
+    fn entry(index: u64, first_ts: u64, writes: &[(&str, Option<&str>)]) -> LogEntry {
+        use crate::commit::LogWrite;
+        LogEntry {
+            index,
+            first_ts: Timestamp::from_raw(first_ts),
+            txns: writes
+                .iter()
+                .map(|(k, v)| {
+                    vec![LogWrite {
+                        key: bytes::Bytes::copy_from_slice(k.as_bytes()),
+                        value: v.map(|v| bytes::Bytes::copy_from_slice(v.as_bytes())),
+                    }]
+                })
+                .collect(),
+        }
+    }
+
+    /// Return the log indexes present.
+    fn logged(engine: &Engine) -> Vec<u64> {
+        engine
+            .log
+            .iter()
+            .map(|item| u64::from_be_bytes(item.key().unwrap()[..].try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    /// Assert entries appended to the log but not applied before a crash
+    /// are applied when the database opens, in order, and only once.
+    fn unapplied_entries_are_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let engine = Engine::open(dir.path()).unwrap();
+            engine
+                .append_log(&entry(1, 1, &[("a", Some("1"))]), Durability::Sync)
+                .unwrap();
+            engine
+                .apply_entry(&entry(1, 1, &[("a", Some("1"))]))
+                .unwrap();
+            // Committed to the log; the process stops before applying them.
+            engine
+                .append_log(
+                    &entry(2, 2, &[("b", Some("2")), ("a", None)]),
+                    Durability::Sync,
+                )
+                .unwrap();
+            engine
+                .append_log(&entry(3, 4, &[("c", Some("3"))]), Durability::Sync)
+                .unwrap();
+            assert_eq!(engine.last_applied_index().unwrap(), 1);
+        }
+        let engine = Engine::open(dir.path()).unwrap();
+        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(4), 3));
+        assert_eq!(engine.last_applied_index().unwrap(), 3);
+        for (key, ts, value) in [
+            ("b", 2, Some(&b"2"[..])),
+            ("a", 3, None),
+            ("c", 4, Some(b"3")),
+        ] {
+            let stored = engine
+                .data()
+                .get(versioned_key(key.as_bytes(), Timestamp::from_raw(ts)))
+                .unwrap()
+                .expect("replayed version");
+            assert_eq!(stored, encode_stored(value), "{key}@{ts}");
+        }
+        // Replaying again changes nothing.
+        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(4), 3));
+    }
+
+    #[test]
+    /// Assert compaction removes applied entries up to the index given and
+    /// keeps the rest, and a later open neither reapplies nor reuses them.
+    fn compaction_keeps_unapplied_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let engine = Engine::open(dir.path()).unwrap();
+            for i in 1..=5 {
+                let e = entry(i, i, &[("k", Some("v"))]);
+                engine.append_log(&e, Durability::Sync).unwrap();
+                engine.apply_entry(&e).unwrap();
+            }
+            engine.compact_log(3).unwrap();
+            assert_eq!(logged(&engine), [4, 5]);
+            engine.compact_log(5).unwrap();
+            assert!(logged(&engine).is_empty());
+        }
+        let engine = Engine::open(dir.path()).unwrap();
+        // Applied index 5 is kept in `meta`, so new entries continue after it.
+        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(5), 5));
+    }
+
+    #[test]
+    /// Assert a gap in the log is reported as corruption, not skipped.
+    fn gaps_are_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(dir.path()).unwrap();
+        engine
+            .append_log(&entry(2, 1, &[("k", Some("v"))]), Durability::Sync)
+            .unwrap();
+        assert!(matches!(
+            engine.replay_log(),
+            Err(Error::CorruptMeta("gap in the commit log"))
+        ));
     }
 
     #[test]

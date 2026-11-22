@@ -23,6 +23,17 @@ The script needs FUSE (`/dev/fuse` and `fusermount3`) but not root. It builds La
 
 Without `LAZYFS_ROOT`, `cargo test` skips the power-loss tests and runs only the process-crash ones.
 
+## Both commit paths
+
+Commits take one of two paths through storage: the single-node sequencer, by default, or the commit log, which replication will build on ([ADR-0037](../reference/design-records.md)). `StorageOptions::commit_log` chooses between them, and its default follows the environment variable `INTERLAKEN_COMMIT_LOG`. So any test or script runs on the log path with that variable set to `1`:
+
+```sh
+INTERLAKEN_COMMIT_LOG=1 cargo test --release -p interlaken-storage
+INTERLAKEN_COMMIT_LOG=1 scripts/power-loss.sh
+```
+
+Pull requests run the storage tests on both paths. The nightly workflow runs the whole test suite and the power-loss tests on both.
+
 ## Disk space: `scripts/disk-space-soak.sh`
 
 ```sh
