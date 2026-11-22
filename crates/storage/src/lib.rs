@@ -47,4 +47,4 @@ pub use scan::{
 };
 pub use storage::{Durability, FjallStorage, Storage, StorageMetrics, StorageOptions};
 pub use timestamp::Timestamp;
-pub use txn::{CommitInfo, Isolation, SavepointId, Txn, TxnOptions};
+pub use txn::{CommitInfo, Freshness, Isolation, SavepointId, Txn, TxnOptions};

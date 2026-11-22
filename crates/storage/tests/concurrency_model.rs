@@ -187,6 +187,7 @@ async fn run_script(steps: Vec<Step>) {
                     .begin(TxnOptions {
                         isolation,
                         read_only,
+                        ..TxnOptions::default()
                     })
                     .await
                     .unwrap();

@@ -1,15 +1,18 @@
 //! Replicated clusters under a simulated network, with turmoil (ADR-0037
-//! phase 2, testing layer 2).
+//! phases 2 and 3, testing layer 2).
 //!
 //! Each replica is a turmoil host talking to the others over turmoil's TCP,
 //! through a [`Transport`] that frames requests on the wire. Workloads run
 //! on every node while a schedule drawn from a seed isolates nodes, heals
 //! partitions, and crashes and restarts hosts from their directories. Then:
 //!
-//! - **list-append:** Elle checks the history is serializable (strict
-//!   serializability needs fresh reads, phase 3); every acknowledged append
-//!   is in the final list on every replica, no failed append is, and each
-//!   append whose outcome was unknown appears at most once.
+//! - **list-append:** with fresh snapshots, Elle checks the history is
+//!   strictly serializable; every acknowledged append is in the final list
+//!   on every replica, no failed append is, and each append whose outcome
+//!   was unknown appears at most once.
+//! - **local reads:** read-only transactions take local snapshots, which
+//!   may be stale; Elle checks the history is still serializable and keeps
+//!   each client's own order (strong session serializability).
 //! - **bank:** transfers between accounts never change the total that any
 //!   transaction reads, or that each replica holds at the end.
 //! - **convergence:** after the faults heal, every replica holds the same
@@ -34,7 +37,9 @@ use bytes::Bytes;
 use interlaken_replication::{
     ReplicaConfig, ReplicaNode, Request, Response, Transport, TransportError,
 };
-use interlaken_storage::{Durability, Error, FjallStorage, Storage, StorageOptions, TxnOptions};
+use interlaken_storage::{
+    Durability, Error, FjallStorage, Freshness, Storage, StorageOptions, TxnOptions,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use turmoil::net::{TcpListener, TcpStream};
 
@@ -218,8 +223,10 @@ impl History {
 /// The workload a simulation runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
-    /// Elle's list-append.
+    /// Elle's list-append, every snapshot fresh.
     ListAppend,
+    /// Elle's list-append, with local snapshots for read-only transactions.
+    LocalReads,
     /// Transfers between accounts.
     Bank,
 }
@@ -265,8 +272,18 @@ async fn read_all(storage: &FjallStorage) -> Result<Report, Error> {
 
 /// Run one transaction of `mops` on `storage`, returning the completed
 /// micro-operations or the error.
-async fn run_txn(storage: &FjallStorage, mops: &[Mop]) -> Result<Vec<Mop>, Error> {
-    let txn = storage.begin(TxnOptions::default()).await?;
+async fn run_txn(storage: &FjallStorage, mops: &[Mop], local: bool) -> Result<Vec<Mop>, Error> {
+    let reads_only = mops
+        .iter()
+        .all(|m| matches!(m, Mop::Read(..) | Mop::Balances(_)));
+    let options = if local && reads_only {
+        TxnOptions::default()
+            .read_only()
+            .freshness(Freshness::Local)
+    } else {
+        TxnOptions::default()
+    };
+    let txn = storage.begin(options).await?;
     let mut done = Vec::new();
     for mop in mops {
         match mop {
@@ -337,7 +354,7 @@ async fn client(
         // Think time, so the workload spans many faults.
         tokio::time::sleep(Duration::from_millis(rng.next() % 500)).await;
         let mops: Vec<Mop> = match workload {
-            Workload::ListAppend => (0..1 + rng.next() % 3)
+            Workload::ListAppend | Workload::LocalReads => (0..1 + rng.next() % 3)
                 .map(|_| {
                     let k = rng.next() % KEYS;
                     if rng.next().is_multiple_of(2) {
@@ -358,7 +375,7 @@ async fn client(
             }
         };
         let index = history.invoke(process, mops.clone());
-        match run_txn(&storage, &mops).await {
+        match run_txn(&storage, &mops, workload == Workload::LocalReads).await {
             Ok(done) => history.complete(index, Kind::Ok, done),
             Err(e) if matches!(e.sqlstate(), "40001" | "57P03") => {
                 *history
@@ -641,8 +658,9 @@ fn write_edn(history: &History, path: &Path) {
     std::fs::write(path, lines.join("\n") + "\n").unwrap();
 }
 
-/// Check the history with Elle against `model`, if Elle is available.
-fn elle(path: &Path, model: &str) {
+/// Return Elle's verdict on whether the history at `path` satisfies
+/// `model`, or `None` when Elle isn't available.
+fn elle_verdict(path: &Path, model: &str) -> Option<bool> {
     let jar = std::env::var_os("ELLE_CLI")
         .map_or_else(|| target_dir().join("elle-cli.jar"), PathBuf::from);
     if !jar.exists() {
@@ -650,7 +668,7 @@ fn elle(path: &Path, model: &str) {
             "elle-cli not found; history saved at {}, Elle check skipped",
             path.display()
         );
-        return;
+        return None;
     }
     let output = Command::new("java")
         .arg("-jar")
@@ -662,10 +680,17 @@ fn elle(path: &Path, model: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let verdict = stdout
         .lines()
-        .find(|l| l.starts_with(&path.display().to_string()));
-    assert!(
-        verdict.is_some_and(|l| l.trim_end().ends_with("true")),
-        "{} isn't {model}:\n{stdout}",
+        .find(|l| l.starts_with(&path.display().to_string()))
+        .unwrap_or_else(|| panic!("Elle gave no verdict for {}:\n{stdout}", path.display()));
+    Some(verdict.trim_end().ends_with("true"))
+}
+
+/// Assert the history satisfies `model`, if Elle is available.
+fn elle(path: &Path, model: &str) {
+    assert_ne!(
+        elle_verdict(path, model),
+        Some(false),
+        "{} isn't {model}",
         path.display()
     );
 }
@@ -687,10 +712,35 @@ fn five_replicas_list_append_under_faults() {
 
 /// Run the list-append simulations on `nodes` replicas and check them.
 fn list_append(nodes: u64) {
+    check_list_append(Workload::ListAppend, nodes, "strict-serializable");
+}
+
+#[test]
+/// Assert histories whose read-only transactions take local snapshots
+/// keep each client's order and lose nothing, though they may be stale.
+fn local_reads_under_faults() {
+    let paths = check_list_append(Workload::LocalReads, 3, "strong-session-serializable");
+    // Local snapshots can be stale, so some history should show it: this
+    // shows the strict check can fail, and that fresh snapshots prevent it.
+    let strict: Vec<_> = paths
+        .iter()
+        .filter_map(|path| elle_verdict(path, "strict-serializable"))
+        .collect();
+    assert!(
+        strict.is_empty() || strict.contains(&false),
+        "no local-read history was stale"
+    );
+}
+
+/// Run list-append simulations of `workload` on `nodes` replicas, check
+/// what was committed, and check the history against Elle's `model`;
+/// return the histories' paths.
+fn check_list_append(workload: Workload, nodes: u64, model: &str) -> Vec<PathBuf> {
     let out = target_dir().join("elle");
     std::fs::create_dir_all(&out).unwrap();
+    let mut paths = Vec::new();
     for seed in seeds() {
-        let history = simulate(Workload::ListAppend, nodes, seed);
+        let history = simulate(workload, nodes, seed);
         let data = final_data(&history, seed);
         let mut seen = BTreeMap::<i64, usize>::new();
         for list in data.values() {
@@ -736,10 +786,16 @@ fn list_append(nodes: u64) {
             ops.len()
         );
         drop(ops);
-        let path = out.join(format!("replicated-list-append-{nodes}-{seed}.edn"));
+        let name = match workload {
+            Workload::LocalReads => "replicated-local-reads",
+            _ => "replicated-list-append",
+        };
+        let path = out.join(format!("{name}-{nodes}-{seed}.edn"));
         write_edn(&history, &path);
-        elle(&path, "serializable");
+        elle(&path, model);
+        paths.push(path);
     }
+    paths
 }
 
 #[test]

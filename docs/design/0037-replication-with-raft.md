@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters.
+Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions.
 
 ## Summary
 
@@ -301,12 +301,38 @@ These give ADR-0036's cost model and capacity planning their numbers:
       - The bank workload never changes the total any transaction reads or any replica holds.
       - After healing, every replica holds the same data at the same applied timestamp.
       - 20 seeds of each three-node workload and 20 of the five-node one ran clean locally. Pull requests run two seeds each; the nightly job runs 50.
-- [ ] **Phase 3: Reads.**
+- [x] **Phase 3: Reads.**
   - read index and leases;
   - `freshness`;
   - read-your-writes through local apply;
   - history retention for follower transactions.
   - *Testing:* linearizability checks of `Fresh` snapshots in the simulation; staleness bounds of `Local`.
+  - *As implemented:*
+    - **`TxnOptions::freshness`** takes `Freshness::Fresh`, the default, or `Freshness::Local`. `Local` applies only to read-only transactions: a read-write transaction is always fresh, rather than refused, so every writer stays strictly serializable. A single-node database ignores the option.
+    - **The barrier is `CommitPath::read_barrier`.** `begin` calls it before taking its snapshot. It is a no-op by default, so the sequencer needs no change.
+      - The Raft commit path asks for a read index, then waits until this replica has applied it. openraft's `get_read_log_id` supplies the index: `max(the term's blank entry, the commit index)`, once leadership is confirmed.
+      - Under READ COMMITTED only the first snapshot is fresh. Later statements take the local `visible_ts`, which never goes backwards.
+    - **Leases.**
+      - With `CommitConfig::lease_reads`, on by default, the leader confirms its leadership from a quorum's acknowledgement within its lease, openraft's election timeout. Without a recent enough acknowledgement, it sends heartbeats at once.
+      - openraft's voters refuse to elect a new leader while they have heard from the current one within its lease, so a leader whose lease holds is still the only leader. This assumes clock drift between nodes is small against the election timeout.
+      - Turning `lease_reads` off makes every read index wait for a fresh round of heartbeats.
+    - **Batching.** A reader task on each node answers every request queued so far with one read index. Each request was queued before the index was obtained, so the index covers everything acknowledged before any of them.
+      - A follower sends one `ReadIndex` request per batch to the leader, which batches it with its own.
+      - Read-index requests are idempotent, so any failure is retried until the commit timeout. After that, `begin` fails with `57P03`.
+    - **Read-your-writes** came with phase 2: a commit returns only once its node has applied it, so a local snapshot on that node sees it.
+    - **History retention.** A replica keeps every commit it applied within `ReplicaConfig::history_retention`, a minute by default, as well as what local pins need. Any replica that becomes leader can then validate a follower's transaction whose snapshot is that old. The ADR asked for the maximum transaction age, five minutes by default. A busy leader would hold five minutes of written keys in memory, though, so the retention is its own setting. A transaction whose snapshot is older than the retention fails validation with `40001`, as the ADR intends.
+  - *Testing:*
+    - `crates/replication/tests/reads.rs`:
+      - fresh reads on every node see a commit acknowledged on another node just before, with and without leases;
+      - a node cut off from the majority serves stale local reads but refuses fresh ones (`57P03`), its local reads catch up within moments of healing, and it reads its own commits locally;
+      - a deposed leader refuses fresh reads once the majority has elected a successor and committed;
+      - a follower's transaction validates against history newer than its snapshot, and fails with `40001` when retention is zero.
+
+      Each test passed 20 consecutive runs.
+    - **The simulation** now checks fresh list-append histories, of three and five nodes, as strictly serializable under Elle. A new workload gives read-only transactions local snapshots. Elle finds its histories strongly session-serializable: they keep each client's own order, and lose and duplicate nothing. It also finds them not strictly serializable, which shows the check can fail and that fresh snapshots are what prevent it.
+  - *Measured* (`measure_fresh_snapshots`, release build, in-memory transport, so these are overheads without network latency):
+    - a lone fresh `begin` costs 10–13 µs with leases and 23–27 µs without, against 0.2 µs for a local one;
+    - batching lets 64 concurrent clients reach 0.8–1.2 million fresh begins a second, close to local ones.
 - [ ] **Phase 4: Snapshots, compaction and membership.**
   - fjall checkpoints streamed as snapshots;
   - log compaction;

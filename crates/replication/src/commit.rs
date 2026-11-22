@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use interlaken_storage::replica::{CommitFuture, CommitPath, Proposer, Replica};
+use interlaken_storage::replica::{BarrierFuture, CommitFuture, CommitPath, Proposer, Replica};
 use interlaken_storage::{CommitRequest, Error, Result, Timestamp};
 use openraft::ServerState;
 use openraft::async_runtime::WatchReceiver;
@@ -38,6 +38,7 @@ use openraft::impls::ProgressResponder;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep, timeout};
 
+use crate::read::{Origin, Reader};
 use crate::transport::{
     CommitError, Request, Response, Transport, TransportError, conflict_code, conflict_of,
 };
@@ -52,15 +53,22 @@ pub struct CommitConfig {
     pub timeout: Duration,
     /// How long to wait between attempts to reach a leader.
     pub retry: Duration,
+    /// Whether a leader serves read indexes from its lease, without a round
+    /// of heartbeats, while a quorum acknowledged it recently. The lease
+    /// assumes clock drift between nodes is small against the election
+    /// timeout.
+    pub lease_reads: bool,
 }
 
 impl Default for CommitConfig {
-    /// Return groups of up to 256, a five-second timeout and 20 ms retries.
+    /// Return groups of up to 256, a five-second timeout, 20 ms retries
+    /// and lease reads.
     fn default() -> Self {
         Self {
             max_group: 256,
             timeout: Duration::from_secs(5),
             retry: Duration::from_millis(20),
+            lease_reads: true,
         }
     }
 }
@@ -92,6 +100,8 @@ struct Started<T> {
     applied: watch::Receiver<u64>,
     /// The connection to other replicas.
     transport: Arc<T>,
+    /// Obtains read indexes for fresh snapshots.
+    reader: Reader,
 }
 
 /// The Raft commit path: storage's [`CommitPath`] for a replica.
@@ -184,15 +194,59 @@ impl<T: Transport> RaftCommit<T> {
             failed_term: Arc::new(AtomicU64::new(0)),
         };
         tokio::spawn(task.run(jobs));
+        let reader = Reader::start(
+            self.id,
+            raft.clone(),
+            Arc::clone(&transport),
+            self.config.lease_reads,
+            self.config.timeout,
+        );
         let started = Started {
             raft,
             applied,
             transport,
+            reader,
         };
         assert!(
             self.started.set(started).is_ok(),
             "the commit path starts once"
         );
+    }
+
+    /// Return a read index for another replica's fresh snapshot, if this node leads.
+    pub(crate) async fn remote_read_index(&self) -> Result<u64, CommitError> {
+        match self.started.get() {
+            Some(started) => started.reader.read_index(Origin::Remote).await,
+            None => Err(CommitError::NotLeader),
+        }
+    }
+
+    /// Wait until this node has applied everything committed anywhere
+    /// before the call, retrying until a leader answers or the timeout.
+    async fn fresh(&self) -> Result<()> {
+        let started = self
+            .started
+            .get()
+            .ok_or_else(|| Error::ReplicationUnavailable("replication hasn't started".into()))?;
+        let deadline = Instant::now() + self.config.timeout;
+        loop {
+            if let Ok(index) = started.reader.read_index(Origin::Local).await {
+                let mut applied = started.applied.clone();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                return match timeout(remaining, applied.wait_for(|&i| i >= index)).await {
+                    Ok(Ok(_)) => Ok(()),
+                    _ => Err(Error::ReplicationUnavailable(format!(
+                        "this replica didn't apply index {index} in time"
+                    ))),
+                };
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::ReplicationUnavailable(
+                    "no leader confirmed a read index before the timeout".into(),
+                ));
+            }
+            sleep(self.config.retry).await;
+        }
     }
 
     /// Queue `request` for this node's proposer and return its outcome.
@@ -293,6 +347,11 @@ impl<T: Transport> CommitPath for RaftCommit<T> {
     /// Commit through the leader.
     fn submit(&self, request: CommitRequest) -> CommitFuture<'_> {
         Box::pin(self.commit(request))
+    }
+
+    /// Wait for a read index from the leader to apply here.
+    fn read_barrier(&self) -> BarrierFuture<'_> {
+        Box::pin(self.fresh())
     }
 }
 

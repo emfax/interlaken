@@ -12,6 +12,20 @@ pub enum Isolation {
     Serializable,
 }
 
+/// How recent a transaction's snapshot must be on a replicated database
+/// (ADR-0037). A single-node database is always fresh.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Freshness {
+    /// See every transaction acknowledged anywhere in the cluster before
+    /// this one began: a linearizable snapshot. On a follower it costs a
+    /// round trip to the leader, shared by concurrent transactions.
+    #[default]
+    Fresh,
+    /// Read this replica's applied state, which may lag the leader. Applies
+    /// to read-only transactions; read-write ones are always fresh.
+    Local,
+}
+
 /// Options for [`Storage::begin`](crate::Storage::begin).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct TxnOptions {
@@ -19,6 +33,8 @@ pub struct TxnOptions {
     pub isolation: Isolation,
     /// Reject writes. Read-only transactions skip commit validation.
     pub read_only: bool,
+    /// How recent the snapshot must be. Defaults to [`Freshness::Fresh`].
+    pub freshness: Freshness,
 }
 
 impl TxnOptions {
@@ -28,7 +44,15 @@ impl TxnOptions {
         Self {
             isolation,
             read_only: false,
+            freshness: Freshness::Fresh,
         }
+    }
+
+    /// Return these options with the given freshness.
+    #[must_use]
+    pub const fn freshness(mut self, freshness: Freshness) -> Self {
+        self.freshness = freshness;
+        self
     }
 
     /// Return these options marked read-only.

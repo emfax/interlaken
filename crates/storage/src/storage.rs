@@ -10,7 +10,7 @@ use crate::engine::{DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES};
 use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
 use crate::replica::{CommitPath, Replica, ReplicaState, Validation};
-use crate::{Engine, Result, Timestamp, Txn, TxnOptions};
+use crate::{Engine, Freshness, Result, Timestamp, Txn, TxnOptions};
 
 /// Entry point to the transactional storage layer.
 pub trait Storage: Send + Sync + 'static {
@@ -343,8 +343,14 @@ impl FjallStorage {
 }
 
 impl Storage for FjallStorage {
-    /// Begin a transaction at the current visible timestamp; no storage call is needed.
+    /// Begin a transaction at the current visible timestamp; no storage
+    /// call is needed. On a replicated database a fresh transaction first
+    /// waits until this replica has applied everything committed before it
+    /// began.
     async fn begin(&self, options: TxnOptions) -> Result<Txn> {
+        if options.freshness == Freshness::Fresh || !options.read_only {
+            self.shared.commit.read_barrier().await?;
+        }
         Ok(Txn::begin(self.shared.clone(), options))
     }
 }

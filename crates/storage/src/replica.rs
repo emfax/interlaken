@@ -29,6 +29,12 @@
 //! commit, from a leadership this replica lost, and is forgotten before the
 //! entry is recorded.
 //!
+//! The history must also outlive transactions running on other replicas,
+//! whose snapshots this replica can't see pinned: it keeps every commit
+//! applied within the history retention ([`Replica::set_history_retention`],
+//! a minute by default), as well as those local pins need. A transaction
+//! whose snapshot is older than that fails validation with `40001`.
+//!
 //! [`FjallStorage::open_replicated`]: crate::FjallStorage::open_replicated
 
 use std::collections::VecDeque;
@@ -36,6 +42,7 @@ use std::future::Future;
 use std::hash::{BuildHasher, RandomState};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
@@ -46,6 +53,9 @@ use crate::{Error, Result, Timestamp};
 
 /// The future [`CommitPath::submit`] returns.
 pub type CommitFuture<'a> = Pin<Box<dyn Future<Output = Result<Timestamp>> + Send + 'a>>;
+
+/// The future [`CommitPath::read_barrier`] returns.
+pub type BarrierFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 /// Where a transaction's commit goes: validation, ordering and durability.
 ///
@@ -62,6 +72,18 @@ pub trait CommitPath: Send + Sync + 'static {
     /// [`Error::CommitOutcomeUnknown`] if the commit may or may not have
     /// happened, or another error if it surely didn't.
     fn submit(&self, request: CommitRequest) -> CommitFuture<'_>;
+
+    /// Wait until a transaction beginning on this node would see every
+    /// commit acknowledged anywhere before the call: the barrier for
+    /// fresh transactions (ADR-0037). A single node needs none.
+    ///
+    /// # Errors
+    ///
+    /// An error if the barrier can't be established, such as
+    /// [`Error::ReplicationUnavailable`] without a leader.
+    fn read_barrier(&self) -> BarrierFuture<'_> {
+        Box::pin(std::future::ready(Ok(())))
+    }
 }
 
 /// Lock `mutex`, ignoring poisoning: the guarded state stays consistent.
@@ -87,7 +109,16 @@ pub(crate) struct Validation {
     pub(crate) proposed: VecDeque<u64>,
     /// The identifier of the next proposal.
     pub(crate) next_id: u64,
+    /// The last timestamp of each applied entry within the retention, with
+    /// when it was applied, oldest first.
+    applied_at: VecDeque<(Timestamp, Instant)>,
+    /// How long applied commits stay in the history for other replicas'
+    /// transactions.
+    retention: Duration,
 }
+
+/// How long applied commits stay in the history by default.
+const DEFAULT_RETENTION: Duration = Duration::from_secs(60);
 
 impl Validation {
     /// Construct the state for a database whose last commit is at `last`.
@@ -97,6 +128,26 @@ impl Validation {
             proposed: VecDeque::new(),
             // Random, so proposals from different replicas don't collide.
             next_id: RandomState::new().hash_one(last.into_raw()),
+            applied_at: VecDeque::new(),
+            retention: DEFAULT_RETENTION,
+        }
+    }
+
+    /// Note that commits up to `last` were applied now, and trim the
+    /// history to what local pins (`horizon`) and the retention still need.
+    fn applied(&mut self, last: Timestamp, horizon: Timestamp) {
+        let now = Instant::now();
+        self.applied_at.push_back((last, now));
+        // The newest commit applied before the retention began may go.
+        let mut expired = None;
+        while let Some(&(ts, at)) = self.applied_at.front()
+            && now.duration_since(at) >= self.retention
+        {
+            expired = Some(ts);
+            self.applied_at.pop_front();
+        }
+        if let Some(expired) = expired {
+            self.history.trim(horizon.min(expired));
         }
     }
 
@@ -134,6 +185,13 @@ impl Replica {
     #[must_use]
     pub fn visible_ts(&self) -> Timestamp {
         self.state.clock.visible_ts()
+    }
+
+    /// Keep applied commits in the validation history for at least
+    /// `retention`, so transactions on other replicas whose snapshots are
+    /// that old can still be validated here once this replica leads.
+    pub fn set_history_retention(&self, retention: Duration) {
+        lock(&self.state.validation).retention = retention;
     }
 
     /// Return a proposer that continues after the last applied commit,
@@ -187,7 +245,7 @@ impl Replica {
                     validation.history.record(Timestamp::from_raw(ts), keys);
                 }
             }
-            validation.history.trim(self.state.clock.horizon());
+            validation.applied(entry.last_ts(), self.state.clock.horizon());
             drop(validation);
             self.state.clock.publish(entry.last_ts());
         }

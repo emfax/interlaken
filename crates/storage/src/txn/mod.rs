@@ -6,6 +6,6 @@ mod read_set;
 mod write_buffer;
 
 pub use handle::{CommitInfo, SavepointId, Txn};
-pub use options::{Isolation, TxnOptions};
+pub use options::{Freshness, Isolation, TxnOptions};
 pub(crate) use read_set::ReadSet;
 pub(crate) use write_buffer::WriteOp;

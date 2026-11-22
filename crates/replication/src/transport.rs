@@ -37,6 +37,8 @@ pub enum Request {
     PreVote(VoteRequest<TypeConfig>),
     /// A commit request, encoded, forwarded to the leader.
     Commit(Vec<u8>),
+    /// A read index, for a fresh snapshot on the sender.
+    ReadIndex,
 }
 
 /// A replica's answer to a [`Request`].
@@ -49,6 +51,9 @@ pub enum Response {
     Vote(VoteResponse<TypeConfig>),
     /// The answer to [`Request::Commit`].
     Commit(Result<Committed, CommitError>),
+    /// The answer to [`Request::ReadIndex`]: the log index the sender must
+    /// apply before its snapshot is fresh.
+    ReadIndex(Result<u64, CommitError>),
     /// The node couldn't handle the request, such as before Raft started.
     Refused(String),
 }

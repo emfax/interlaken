@@ -148,6 +148,7 @@ async fn run_script(steps: Vec<Step>) {
                 let options = TxnOptions {
                     isolation: script.isolation,
                     read_only: script.read_only,
+                    ..TxnOptions::default()
                 };
                 let txn = storage.begin(options).await.unwrap();
                 let mut model_txn = ModelTxn::begin(&model, script.isolation, script.read_only);

@@ -33,11 +33,15 @@ pub struct ReplicaConfig {
     pub election_max: Duration,
     /// How commits are grouped and retried.
     pub commit: CommitConfig,
+    /// How long applied commits stay in the validation history, so that
+    /// transactions on other replicas whose snapshots are that old can be
+    /// validated once this node leads.
+    pub history_retention: Duration,
 }
 
 impl ReplicaConfig {
     /// Return the settings for node `id`: 50 ms heartbeats, elections after
-    /// 150 to 300 ms, and the default commit settings.
+    /// 150 to 300 ms, the default commit settings and a minute's history.
     #[must_use]
     pub fn new(id: NodeId) -> Self {
         Self {
@@ -46,6 +50,7 @@ impl ReplicaConfig {
             election_min: Duration::from_millis(150),
             election_max: Duration::from_millis(300),
             commit: CommitConfig::default(),
+            history_retention: Duration::from_secs(60),
         }
     }
 }
@@ -123,6 +128,7 @@ impl<T: Transport> ReplicaNode<T> {
         }
         .validate()
         .map_err(|e| Error::ReplicationUnavailable(e.to_string()))?;
+        replica.set_history_retention(config.history_retention);
         let (applied_tx, applied) = watch::channel(0);
         let transport = Arc::new(transport);
         let raft = Raft::new(
@@ -228,6 +234,7 @@ impl<T: Transport> Handler for NodeHandler<T> {
                     Ok(response) => Response::Vote(response),
                     Err(e) => Response::Refused(e.to_string()),
                 },
+                Request::ReadIndex => Response::ReadIndex(commit.remote_read_index().await),
                 Request::Commit(bytes) => {
                     let Ok(request) = CommitRequest::decode(&bytes) else {
                         return Response::Commit(Err(CommitError::Unavailable(

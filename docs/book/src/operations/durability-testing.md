@@ -44,7 +44,7 @@ SIM_SEED=17 cargo test --release -p interlaken-replication --test simulation
 ```
 
 `SIM_SEEDS` sets how many seeds each test runs (two by default), and `SIM_SEED` runs one. Every run checks that:
-- Elle finds the list-append history serializable;
+- Elle finds list-append histories strictly serializable when every snapshot is fresh, and strongly session-serializable when read-only transactions take local snapshots;
 - no acknowledged commit is lost;
 - a commit whose outcome was unknown happened at most once;
 - the bank workload's total never changes;

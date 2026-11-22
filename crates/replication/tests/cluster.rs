@@ -1,129 +1,13 @@
 //! Replicated clusters in one process, over the in-memory transport (ADR-0037 phase 2).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
-use interlaken_replication::{MemoryNetwork, MemoryTransport, ReplicaConfig, ReplicaNode};
-use interlaken_storage::{Error, Storage, StorageOptions, Timestamp, TxnOptions};
-use tempfile::TempDir;
-
-/// A cluster of replicas in temporary directories.
-struct Cluster {
-    /// The network connecting them.
-    network: Arc<MemoryNetwork>,
-    /// Each node's directory, kept across restarts.
-    dirs: BTreeMap<u64, TempDir>,
-    /// The running nodes.
-    nodes: BTreeMap<u64, ReplicaNode<MemoryTransport>>,
-    /// Every member's ID.
-    ids: Vec<u64>,
-}
-
-/// Return the settings tests use: short commit timeouts, so unavailability shows quickly.
-fn config(id: u64) -> ReplicaConfig {
-    let mut config = ReplicaConfig::new(id);
-    config.commit.timeout = Duration::from_secs(2);
-    config
-}
-
-impl Cluster {
-    /// Start `n` nodes and form a cluster of them.
-    async fn start(n: u64) -> Self {
-        let mut cluster = Self {
-            network: MemoryNetwork::new(),
-            dirs: BTreeMap::new(),
-            nodes: BTreeMap::new(),
-            ids: (1..=n).collect(),
-        };
-        for id in 1..=n {
-            cluster.dirs.insert(id, tempfile::tempdir().unwrap());
-            cluster.boot(id).await;
-        }
-        cluster.nodes[&1].initialize(&cluster.ids).await.unwrap();
-        cluster.leader().await;
-        cluster
-    }
-
-    /// Open node `id` from its directory and connect it.
-    async fn boot(&mut self, id: u64) {
-        let node = ReplicaNode::open(
-            self.dirs[&id].path().to_path_buf(),
-            StorageOptions::default(),
-            config(id),
-            self.network.transport(id),
-        )
-        .await
-        .unwrap();
-        self.network.register(id, node.handler());
-        self.nodes.insert(id, node);
-    }
-
-    /// Stop node `id`, as if it crashed, keeping its directory.
-    async fn crash(&mut self, id: u64) {
-        self.network.unregister(id);
-        let node = self.nodes.remove(&id).unwrap();
-        node.shutdown().await;
-        drop(node);
-        // Let background tasks holding the storage finish.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    /// Return the leader, once the running nodes agree on one.
-    async fn leader(&self) -> u64 {
-        for _ in 0..200 {
-            let leaders: Vec<_> = self.nodes.values().map(ReplicaNode::leader).collect();
-            if let Some(Some(leader)) = leaders.first()
-                && self.nodes.contains_key(leader)
-                && leaders.iter().all(|l| l == &Some(*leader))
-            {
-                return *leader;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        panic!("no leader elected");
-    }
-
-    /// Return a running node other than `leader`.
-    fn follower(&self, leader: u64) -> u64 {
-        *self.nodes.keys().find(|&&id| id != leader).unwrap()
-    }
-
-    /// Put `key` = `value` in one transaction on node `id`.
-    async fn put(&self, id: u64, key: &str, value: &str) -> Result<Timestamp, Error> {
-        let storage = self.nodes[&id].storage();
-        let txn = storage.begin(TxnOptions::default()).await?;
-        txn.put(
-            Bytes::copy_from_slice(key.as_bytes()),
-            Bytes::copy_from_slice(value.as_bytes()),
-        )?;
-        Ok(txn.commit().await?.commit_ts.unwrap())
-    }
-
-    /// Return `key`'s value on node `id`, once it has applied `ts`.
-    async fn get(&self, id: u64, key: &str, ts: Timestamp) -> Option<String> {
-        let storage = self.nodes[&id].storage();
-        for _ in 0..400 {
-            if storage.visible_ts() >= ts {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(storage.visible_ts() >= ts, "node {id} applied {ts:?}");
-        let txn = storage
-            .begin(TxnOptions::default().read_only())
-            .await
-            .unwrap();
-        let values = txn
-            .get_many(vec![Bytes::copy_from_slice(key.as_bytes())])
-            .await
-            .unwrap();
-        values[0]
-            .as_ref()
-            .map(|v| String::from_utf8(v.to_vec()).unwrap())
-    }
-}
+use common::Cluster;
+use interlaken_storage::{Storage, TxnOptions};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 /// Assert commits on the leader and on followers reach every replica, and a
