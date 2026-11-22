@@ -36,29 +36,19 @@
         (when
           (coalesce
             (case
-              (when
-                (or (is-null #1.4) (= (coalesce #9.2 0) 0))
-                (cast null bool))
+              (when (= (coalesce #9.2 0) 0) (cast null bool))
               (else (lift (<= #1.4 #9.3))))
             false)
           true)
-        (when
-          (>
-            (coalesce #9.1 0)
-            (case (when (is-null #1.4) 0) (else (coalesce #9.2 0))))
-          (cast null bool))
+        (when (> (coalesce #9.1 0) (coalesce #9.2 0)) (cast null bool))
         (else false)))
     (case
       (when
         (coalesce
           (case
-            (when (or (is-null #1.4) (= (coalesce #10.2 0) 0)) (cast null bool))
+            (when (= (coalesce #10.2 0) 0) (cast null bool))
             (else (call (fid 79) (lift (<> #1.4 #10.3)) (lift (<> #1.4 #10.4)))))
           false)
         true)
-      (when
-        (>
-          (coalesce #10.1 0)
-          (case (when (is-null #1.4) 0) (else (coalesce #10.2 0))))
-        (cast null bool))
+      (when (> (coalesce #10.1 0) (coalesce #10.2 0)) (cast null bool))
       (else false))))

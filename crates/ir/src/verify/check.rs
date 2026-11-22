@@ -1052,13 +1052,24 @@ fn scope<'a>(local: &'a Schema, outer: &[&'a Schema]) -> Vec<&'a Schema> {
         .collect()
 }
 
-/// Combine a result type with another branch's: data types must match; optional if either is.
+/// Combine a result type with another branch's: data types must match, or
+/// one must widen to the other; optional if either is.
 fn merge(acc: Option<Type>, next: Type) -> std::result::Result<Type, String> {
     match acc {
         None => Ok(next),
         Some(prev) if prev.data == next.data => {
             let nullable = prev.optional || next.optional;
             Ok(prev.with_optional(nullable))
+        }
+        // Plain elements and fields widen to optional ones (ADR-0034).
+        Some(prev) if prev.data.widens_to(&next.data) || next.data.widens_to(&prev.data) => {
+            let nullable = prev.optional || next.optional;
+            let wider = if prev.data.widens_to(&next.data) {
+                next.data
+            } else {
+                prev.data
+            };
+            Ok(wider.plain().with_optional(nullable))
         }
         Some(prev) => Err(format!(
             "branches have types {} and {}",

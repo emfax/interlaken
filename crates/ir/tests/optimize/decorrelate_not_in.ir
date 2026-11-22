@@ -33,17 +33,11 @@
               (coalesce
                 (case
                   (when (is-not-null #9.0) true)
-                  (when
-                    (or (is-null #1.0) (= (coalesce #6.1 0) 0))
-                    (cast null bool))
+                  (when (= (coalesce #6.1 0) 0) (cast null bool))
                   (else false))
                 false)
               true)
-            (when
-              (>
-                (coalesce #6.0 0)
-                (case (when (is-null #1.0) 0) (else (coalesce #6.1 0))))
-              (cast null bool))
+            (when (> (coalesce #6.0 0) (coalesce #6.1 0)) (cast null bool))
             (else false))
           true)))
     (as #1.1 name)))

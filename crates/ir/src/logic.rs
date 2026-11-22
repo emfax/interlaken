@@ -107,7 +107,27 @@ pub fn unlifted(expr: &Expr) -> &Expr {
 /// ```
 pub fn normalize(plan: &mut Plan, catalog: &dyn Catalog) {
     let types = crate::verify::column_types(plan, catalog);
-    let normalizer = Normalizer::new(types, catalog);
+    let normalizer = Normalizer::new(types, catalog, false);
+    normalizer.rel(&mut plan.root, &HashSet::new());
+}
+
+/// Normalize `plan` as [`normalize`] does, and also apply the rewrites
+/// two-valued logic makes valid (ADR-0034 phase 4). The optimizer uses
+/// this; the resolver doesn't, so resolved plans show what was written.
+///
+/// - `(is-null c)` of a column, parameter or literal that can't be absent
+///   is `false`, and `(is-not-null c)` is `true`.
+/// - `(not (op a b))` of a comparison of values that can't be absent is
+///   the negated comparison: `(not (< a b))` is `(>= a b)`. Comparisons
+///   are total orders on plain values, `nan` included.
+/// - `(not (coalesce (lift (op a b)) x))` is `(coalesce (lift (negated op
+///   a b)) (not x))`, so `not` over SQL-style comparisons becomes a
+///   comparison that index selection and pushdown recognise. `not` moves
+///   through `and` and `or` by De Morgan's laws to reach them.
+/// - Constant `and`, `or` and `not` fold.
+pub(crate) fn normalize_folding(plan: &mut Plan, catalog: &dyn Catalog) {
+    let types = crate::verify::column_types(plan, catalog);
+    let normalizer = Normalizer::new(types, catalog, true);
     normalizer.rel(&mut plan.root, &HashSet::new());
 }
 
@@ -127,6 +147,8 @@ struct Normalizer<'a> {
     or3: Option<FunctionId>,
     /// See `and3`.
     not3: Option<FunctionId>,
+    /// Whether to apply the rewrites of [`normalize_folding`].
+    fold: bool,
 }
 
 /// Return the literal `value`.
@@ -141,7 +163,11 @@ fn take(expr: &mut Expr) -> Expr {
 
 impl<'a> Normalizer<'a> {
     /// Start a normalization with `types` against `catalog`.
-    fn new(types: HashMap<(BindingId, ColumnId), Type>, catalog: &'a dyn Catalog) -> Self {
+    fn new(
+        types: HashMap<(BindingId, ColumnId), Type>,
+        catalog: &'a dyn Catalog,
+        fold: bool,
+    ) -> Self {
         let bool = DataType::Scalar(ScalarType::Bool);
         let id = |name: &str, arity: usize| {
             catalog
@@ -154,6 +180,7 @@ impl<'a> Normalizer<'a> {
             not3: id("not3", 1),
             types,
             catalog,
+            fold,
         }
     }
 
@@ -376,7 +403,7 @@ impl<'a> Normalizer<'a> {
                 }
             }
         }
-        match expr {
+        let normalized = match expr {
             Expr::Lift(inner) => match *inner {
                 lifted @ Expr::Lift(_) => lifted,
                 other if self.needs_lift(&other, scope) => Expr::Lift(Box::new(other)),
@@ -418,6 +445,164 @@ impl<'a> Normalizer<'a> {
                 }
             }
             other => other,
+        };
+        self.simplify(normalized, scope)
+    }
+
+    /// Apply the rewrites of [`normalize_folding`] to the top of `expr`,
+    /// whose operands are already normalized, if folding.
+    fn simplify(&self, expr: Expr, scope: &Padded) -> Expr {
+        if !self.fold {
+            return expr;
+        }
+        // Only expressions that can't raise errors are folded away.
+        let simple =
+            |e: &Expr| matches!(e, Expr::Column(_) | Expr::Param { .. } | Expr::Literal(_));
+        match expr {
+            Expr::Unary {
+                op: op @ (UnaryOp::IsNull | UnaryOp::IsNotNull),
+                expr: operand,
+            } if simple(&operand) && !self.optional(&operand, scope) => {
+                boolean(op == UnaryOp::IsNotNull)
+            }
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr: operand,
+            } => self.negate(*operand, scope),
+            // A branch whose condition is false is never taken; one whose
+            // condition is true is, if every branch before it was dropped.
+            // With nothing left and no `else`, the result is NULL of the
+            // case's type, which isn't written here, so that case stays.
+            Expr::Case {
+                operand: None,
+                branches,
+                otherwise,
+            } if branches
+                .iter()
+                .any(|b| matches!(b.when, Expr::Literal(Value::Bool(_))))
+                && (otherwise.is_some() || branches.iter().any(|b| b.when != boolean(false))) =>
+            {
+                let mut kept: Vec<CaseBranch> = Vec::new();
+                for branch in branches {
+                    match branch.when {
+                        Expr::Literal(Value::Bool(false)) => {}
+                        Expr::Literal(Value::Bool(true)) if kept.is_empty() => return branch.then,
+                        _ => kept.push(branch),
+                    }
+                }
+                match (kept.is_empty(), otherwise) {
+                    (true, Some(otherwise)) => *otherwise,
+                    (_, otherwise) => Expr::Case {
+                        operand: None,
+                        branches: kept,
+                        otherwise,
+                    },
+                }
+            }
+            Expr::And(items) => {
+                let items = match flatten_and(items) {
+                    Expr::And(items) => items,
+                    other => vec![other],
+                };
+                self.connective(items, false, Expr::And)
+            }
+            Expr::Or(items) => {
+                let items = match flatten_or(items) {
+                    Expr::Or(items) => items,
+                    other => vec![other],
+                };
+                self.connective(items, true, Expr::Or)
+            }
+            other => other,
+        }
+    }
+
+    /// Fold the constants of an `and` (`decisive` false) or `or` (`decisive`
+    /// true) of `items`, as the optimizer's simplification does: the
+    /// neutral constant goes, and the decisive one drops the operands after
+    /// it, which never run, and those before it only if none can raise an
+    /// error, which matters inside `try`.
+    fn connective(&self, items: Vec<Expr>, decisive: bool, build: fn(Vec<Expr>) -> Expr) -> Expr {
+        let mut kept = Vec::new();
+        for item in items {
+            match item {
+                Expr::Literal(Value::Bool(b)) if b != decisive => {}
+                Expr::Literal(Value::Bool(_)) => {
+                    if kept
+                        .iter()
+                        .all(|e| crate::optimize::leakproof(e, &self.types, self.catalog))
+                    {
+                        kept.clear();
+                    }
+                    kept.push(boolean(decisive));
+                    break;
+                }
+                other => kept.push(other),
+            }
+        }
+        match kept.len() {
+            0 => boolean(!decisive),
+            1 => kept.pop().expect("one item"),
+            _ => build(kept),
+        }
+    }
+
+    /// Return `(not operand)`, rewritten where two-valued logic allows.
+    fn negate(&self, operand: Expr, scope: &Padded) -> Expr {
+        match operand {
+            Expr::Literal(Value::Bool(b)) => boolean(!b),
+            // De Morgan, which also keeps the operands' evaluation order.
+            Expr::And(items) => self.simplify(
+                Expr::Or(items.into_iter().map(|e| self.negate(e, scope)).collect()),
+                scope,
+            ),
+            Expr::Or(items) => self.simplify(
+                Expr::And(items.into_iter().map(|e| self.negate(e, scope)).collect()),
+                scope,
+            ),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                expr,
+            } => *expr,
+            Expr::Binary { op, left, right }
+                if op.is_comparison()
+                    && !self.optional(&left, scope)
+                    && !self.optional(&right, scope) =>
+            {
+                Expr::Binary {
+                    op: crate::typing::negate_comparison(op),
+                    left,
+                    right,
+                }
+            }
+            Expr::Coalesce(mut items)
+                if items.len() == 2
+                    && matches!(items[1], Expr::Literal(Value::Bool(_)))
+                    && matches!(&items[0], Expr::Lift(inner)
+                        if matches!(&**inner, Expr::Binary { op, .. } if op.is_comparison())) =>
+            {
+                let Some(Expr::Literal(Value::Bool(x))) = items.pop() else {
+                    unreachable!("matched above")
+                };
+                let Some(Expr::Lift(inner)) = items.pop() else {
+                    unreachable!("matched above")
+                };
+                let Expr::Binary { op, left, right } = *inner else {
+                    unreachable!("matched above")
+                };
+                Expr::Coalesce(vec![
+                    Expr::Lift(Box::new(Expr::Binary {
+                        op: crate::typing::negate_comparison(op),
+                        left,
+                        right,
+                    })),
+                    boolean(!x),
+                ])
+            }
+            other => Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(other),
+            },
         }
     }
 
@@ -443,6 +628,12 @@ impl<'a> Normalizer<'a> {
     /// absent: `(coalesce expr absent)`, pushed through `and3`, `or3`,
     /// `not3` and `try`.
     fn truth(&self, expr: Expr, absent: bool, scope: &Padded) -> Expr {
+        let truth = self.truth_unsimplified(expr, absent, scope);
+        self.simplify(truth, scope)
+    }
+
+    /// Return `truth`'s result before its top is simplified.
+    fn truth_unsimplified(&self, expr: Expr, absent: bool, scope: &Padded) -> Expr {
         if !self.optional(&expr, scope) {
             return expr;
         }

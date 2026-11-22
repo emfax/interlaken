@@ -53,7 +53,8 @@ pub fn optimize(plan: &Plan, catalog: &dyn Catalog) -> Plan {
     prune(&mut plan.root);
     order(&mut plan.root, catalog);
     // Rewrites may write SQL-style shorthand; make it explicit again (ADR-0034).
-    crate::logic::normalize(&mut plan, catalog);
+    // and apply the rewrites two-valued logic makes valid.
+    crate::logic::normalize_folding(&mut plan, catalog);
     plan
 }
 

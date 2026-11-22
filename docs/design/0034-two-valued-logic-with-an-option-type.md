@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 to 3 and 5 are built: the option type, two-valued expressions, operators and aggregates, and storage and security. Phase 4 (optimizer) and phase 6 (SQL lowering, which waits for the SQL front end) aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
+Accepted. Phases 1 to 5 are built. Phase 6 (SQL lowering) waits for the SQL front end. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
 
 ## Summary
 
@@ -147,7 +147,19 @@ The optimizer simplifies the common shapes away. `(coalesce (lift = c (param 1 T
     - **Plans keep their index use and pushdown** (phase 4's simplification moved here). `logic::comparison` recognises `(coalesce (lift (cmp a b)) false)` as `cmp a b` for index access (`exec::access`), hash join keys (`exec::physical`) and decorrelation's correlated equalities. The quantified rewrite sees through `lift` in its aggregate arguments. Both forms are true exactly when both operands are present and the comparison holds, as the filter meant before.
 - [x] **Phase 3: Operators and aggregates.** Outer joins and `Single` apply produce options; `sum` returns its identity; `min`, `max` and `avg` return options; inserts may omit only option columns.
   - *As implemented:* outer joins, left and single applies, `min`, `max` and `avg`, and inserts that omit columns already behaved as specified since phase 1. The change is `sum`: it returns `int8` or `float8`, plain, and 0 over no values, in the catalog, the interpreter and the executor's accumulators. The scalar-aggregate decorrelation now fills a padded group's `sum` with 0, as it did for `count`. Tested by `aggregates_over_nothing` and `correlated_sum_of_nothing_is_zero` (`crates/ir/tests/interp.rs`), which runs a correlated `sum` over a user with no posts before and after decorrelation.
-- [ ] **Phase 4: Optimizer.** Rewrites that are now valid in two-valued logic; simplification of lowered SQL patterns back to index keys; property tests that lowered and hand-written forms plan alike.
+- [x] **Phase 4: Optimizer.** Rewrites that are now valid in two-valued logic; simplification of lowered SQL patterns back to index keys; property tests that lowered and hand-written forms plan alike.
+  - *As implemented:*
+    - **Simplification back to index keys came in phase 2**, so plans never regressed: `logic::comparison` and the matchers that use it.
+    - **This phase adds the rewrites two-valued logic makes valid**, applied by `logic::normalize_folding` at the end of `optimize`. The resolver doesn't apply them, so resolved plans show what was written. The pass knows which values can be absent in each scope, outer join padding included, and the optimizer's other rules don't:
+      - `is-null` and `is-not-null` of a column, parameter or literal that can't be absent fold to constants;
+      - `not` of a comparison of plain values becomes the negated comparison, which is valid because comparisons are total orders on plain values, `nan` included;
+      - `not` of `(coalesce (lift (op a b)) x)` becomes `(coalesce (lift (negated op a b)) (not x))`;
+      - `not` moves through `and` and `or` by De Morgan's laws;
+      - constant `and`, `or` and `case` branches fold, dropping operands only when the ones before them can't raise errors, as the optimizer's `simplify` does, since errors matter inside `try`.
+    - **Effect:** the null-aware branches of quantified comparisons over plain operands fold away, and `not` over SQL-style comparisons ends up as comparisons that index selection and pushdown recognise.
+    - **Branch types widen.** Folding can make an expression plain after another rule typed its counterpart optional. For example, decorrelating a nest writes an empty-array fallback typed with an optional field, and the nested field then folds plain. So the verifier merges `case` and `coalesce` branches whose data types differ only by widening, as the resolver's unification already did. The operator differential test found this.
+    - **Not done:** a rewrite of `NOT IN` to a plain anti-join when both operands are plain. The quantified rewrite's null-aware form is still used, minus the branches that fold away.
+  - *Testing:* `crates/ir/tests/two_valued.rs`. `rewrites` pins each rewrite. `shorthand_and_explicit_forms_plan_alike` generates random predicates over plain and optional columns, with `and`, `or`, `not`, NULL tests and arithmetic, and checks two things: SQL-style text and its explicit form, pasted back as hand-written IR, optimize to the same plan; and the optimized plan returns the same rows as the unoptimized one.
 - [x] **Phase 5: Storage and security.** `IndexSpec::nones_distinct`; typed masks; the Cedar schema from option types.
   - *As implemented:*
     - **`nones_distinct`.** The flag is on the engine's `IndexSpec` and the IR's `IndexDef` (catalog text `:nones-distinct false`). In storage it's `IndexSpec::nulls_distinct` and a new `sys_indexes` column: storage knows NULL, not options. A unique index whose NULLs aren't distinct writes every entry under its exclusive key, so a second NULL key conflicts as a duplicate value does. The interpreter checks the same.
