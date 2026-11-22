@@ -1,0 +1,153 @@
+//! Requests to other replicas over gRPC with mutual TLS.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::Duration;
+
+use interlaken_replication::types::NodeId;
+use interlaken_replication::{Request, Response, Transport, TransportError};
+use tonic::codegen::http::uri::PathAndQuery;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+
+use crate::codec::BytesCodec;
+use crate::metrics::Counters;
+
+/// The gRPC method every request goes through.
+pub(crate) const PATH: &str = "/interlaken.Replica/Call";
+/// The largest message either side accepts: snapshots travel whole.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 1 << 30;
+
+/// Node addresses, shared between the transport and whoever keeps them current.
+pub(crate) type AddressBook = Arc<RwLock<BTreeMap<NodeId, String>>>;
+
+/// Sends requests to other replicas over gRPC.
+///
+/// Each peer gets one HTTP/2 connection, made on first use and remade when
+/// its address changes. A request that fails because the connection was
+/// refused surely didn't arrive; any other failure might have.
+pub struct GrpcTransport {
+    /// Each node's address.
+    book: AddressBook,
+    /// Each peer's channel, with the address it connects to.
+    channels: Mutex<HashMap<NodeId, (String, Channel)>>,
+    /// The client side of mutual TLS.
+    tls: ClientTlsConfig,
+    /// The deadline for each request.
+    timeout: Duration,
+    /// Traffic counters.
+    counters: Arc<Counters>,
+}
+
+impl std::fmt::Debug for GrpcTransport {
+    /// Render the transport's address book.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrpcTransport")
+            .field(
+                "book",
+                &*self.book.read().unwrap_or_else(PoisonError::into_inner),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Return `true` if `status` came from a connection the peer refused, so
+/// the request surely wasn't delivered.
+fn refused(status: &tonic::Status) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(error) = source {
+        if let Some(io) = error.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return true;
+        }
+        source = error.source();
+    }
+    false
+}
+
+impl GrpcTransport {
+    /// Construct a transport resolving nodes through `book`.
+    pub(crate) fn new(
+        book: AddressBook,
+        tls: ClientTlsConfig,
+        timeout: Duration,
+        counters: Arc<Counters>,
+    ) -> Self {
+        Self {
+            book,
+            channels: Mutex::new(HashMap::new()),
+            tls,
+            timeout,
+            counters,
+        }
+    }
+
+    /// Return the channel to `target`, making one if its address is new.
+    fn channel(&self, target: NodeId) -> Result<Channel, TransportError> {
+        let addr = self
+            .book
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| TransportError::NotDelivered(format!("no address for node {target}")))?;
+        let mut channels = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((known, channel)) = channels.get(&target)
+            && *known == addr
+        {
+            return Ok(channel.clone());
+        }
+        let not_delivered =
+            |e: tonic::transport::Error| TransportError::NotDelivered(e.to_string());
+        let channel = Endpoint::from_shared(format!("https://{addr}"))
+            .map_err(not_delivered)?
+            .tls_config(self.tls.clone())
+            .map_err(not_delivered)?
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(self.timeout)
+            .connect_lazy();
+        channels.insert(target, (addr, channel.clone()));
+        Ok(channel)
+    }
+
+    /// Send `request` to `target` and decode its response.
+    async fn exchange(
+        &self,
+        target: NodeId,
+        request: &Request,
+    ) -> Result<Response, TransportError> {
+        let channel = self.channel(target)?;
+        let bytes = postcard::to_stdvec(request)
+            .map_err(|e| TransportError::NotDelivered(e.to_string()))?;
+        let mut grpc = tonic::client::Grpc::new(channel)
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        grpc.ready()
+            .await
+            .map_err(|e| TransportError::NotDelivered(e.to_string()))?;
+        let response = grpc
+            .unary(
+                tonic::Request::new(bytes),
+                PathAndQuery::from_static(PATH),
+                BytesCodec,
+            )
+            .await
+            .map_err(|status| {
+                if refused(&status) {
+                    TransportError::NotDelivered(status.to_string())
+                } else {
+                    TransportError::NoReply(status.to_string())
+                }
+            })?;
+        postcard::from_bytes(response.get_ref()).map_err(|e| TransportError::NoReply(e.to_string()))
+    }
+}
+
+impl Transport for GrpcTransport {
+    /// Send `request` to `target`, counting it.
+    async fn send(&self, target: NodeId, request: Request) -> Result<Response, TransportError> {
+        let result = self.exchange(target, &request).await;
+        self.counters.sent(target, result.is_err());
+        result
+    }
+}

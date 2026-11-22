@@ -4,6 +4,7 @@ members = [
     "crates/engine",
     "crates/exec",
     "crates/ir",
+    "crates/net",
     "crates/replication",
     "crates/storage",
     "crates/test-alloc",
@@ -18,6 +19,8 @@ license = "Apache-2.0"
 [workspace.dependencies]
 interlaken-exec = { path = "crates/exec" }
 interlaken-ir = { path = "crates/ir" }
+interlaken-net = { path = "crates/net" }
+interlaken-replication = { path = "crates/replication" }
 interlaken-storage = { path = "crates/storage" }
 interlaken-test-alloc = { path = "crates/test-alloc" }
 fjall = { version = "3.1", features = ["bytes_1"] }

@@ -62,7 +62,12 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MembershipChange {
     /// Add a non-voting replica, which catches up from the leader.
-    AddLearner(NodeId),
+    AddLearner {
+        /// The new replica.
+        id: NodeId,
+        /// Its address, as transports resolve it.
+        addr: String,
+    },
     /// Make exactly these nodes the voters, through joint consensus.
     /// Voters left out become learners if `retain`, else leave.
     SetVoters {

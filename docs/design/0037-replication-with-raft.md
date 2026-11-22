@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions. Phase 4 is built: snapshots, log compaction and membership changes.
+Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions. Phase 4 is built: snapshots, log compaction and membership changes. Phase 5 is built: `interlaken-net` carries replication over gRPC with mutual TLS, and `Engine::open_cluster` makes an engine a cluster member.
 
 ## Summary
 
@@ -377,11 +377,51 @@ These give ADR-0036's cost model and capacity planning their numbers:
 
       These, with the cluster and read tests, ran 10 times in a row, then 150 times as six parallel loops of the three test binaries, without failure.
     - **The simulation** builds snapshots every 30 entries. A new workload adds a fourth replica as a learner while faults continue, then replaces node 1 with it. The checks run over whichever nodes are voters at the end, and Elle finds the histories strictly serializable. All five simulations ran clean over 20 seeds.
-- [ ] **Phase 5: Production network.**
+- [x] **Phase 5: Production network.**
   - `interlaken-net` with tonic, mTLS and tower layers;
   - `Engine::open_cluster`;
   - cluster status and metrics.
   - *Testing:* a multi-process nightly job with real network faults, and power-loss tests of the log on every node (the LazyFS harness, ADR-0009).
+  - *As implemented:*
+    - **One gRPC method, no protobuf.** Every message travels through `/interlaken.Replica/Call` as the postcard bytes the in-memory and turmoil transports already use. A codec that passes bytes through replaces generated code, so the build needs no `protoc`. tonic 0.14.9, pinned, provides HTTP/2, deadlines, and TLS through rustls.
+    - **Mutual TLS is mandatory.** `TlsConfig` holds the cluster CA's certificate and the node's certificate and key, PEM-encoded.
+      - The server requires a client certificate the CA signed.
+      - The client trusts only the CA, and checks the peer's certificate against one DNS name, `interlaken` by default, which every node's certificate carries.
+      - Unknown and expired certificates are refused in both directions. Every node is trusted equally (see [Security](#security)), so certificates don't name nodes.
+    - **tower layers on the server:** a deadline on every request, a limit on concurrent requests per connection with load shedding beyond it, and counters of requests served. The client keeps one HTTP/2 connection per peer, remade when the peer's address changes, and counts requests sent and failed per peer (`NetMetrics`).
+      - A request that failed because the connection was refused surely didn't arrive. Any other failure might have, so a forwarded commit failing that way is `CommitOutcomeUnknown`.
+      - Snapshots travel whole, so messages up to 1 GiB are accepted. Streaming them is still future work.
+    - **`Cluster`** runs one member: its replica, its server, and an address book.
+      - Addresses configured in `ClusterConfig::peers` take precedence. Membership supplies the rest, since adding a learner now records its address (`MembershipChange::AddLearner { id, addr }`).
+      - A node can therefore reach peers through a proxy or another network, which is how the fault tests cut links.
+    - **Bootstrapping.** A node opened with `bootstrap` forms a cluster of itself, if openraft reports it isn't initialized. `Cluster::add_member` then adds each node as a learner and promotes it to voter.
+      - The leader's first addition snapshots and purges its log (`ReplicaNode::compact`), so new members start from a snapshot. A cluster bootstrapped from an existing single-node database holds data no log entry carries.
+      - Commit timestamps simply continue from the database's last commit, as phase 1 allowed, rather than from the `base` the ADR proposed.
+      - The first version checked for voters instead of asking openraft, before the stored membership had loaded. A restarted bootstrap node then tried to initialize again, failed, and left Raft holding the storage lock against its next attempt. A failed bootstrap now stops everything it started.
+    - **`Engine::open_cluster(path, options, config, admin)`**, behind the engine's `cluster` feature, so embedded builds never compile the network stack.
+      - With `bootstrap`, it keeps an existing database, or creates one with `admin` as its first administrator.
+      - `Engine::cluster` and `Engine::cluster_status` expose the member. `Session::add_member`, `remove_member` and `transfer_leadership` need the `admin` privilege, checked in an empty administrative step.
+      - The engine needed no other change: its catalog and policy caches key on versions read through each transaction, so replicated DDL and policy changes invalidate them as local ones do.
+      - Membership changes aren't written to an audit log: the engine has none yet.
+    - **Membership changes are bounded in time.** Adding a learner waits for it to catch up, and one that can't be reached never does. Each attempt now has the commit timeout as its deadline.
+  - *Testing:*
+    - **`crates/net/tests/cluster.rs`,** in one process over localhost TCP:
+      - three members replicate commits made on any of them;
+      - a cluster bootstrapped from an existing database gives joining members its data;
+      - members survive the leader stopping, and it rejoins from its directory;
+      - a node with a certificate from another CA, or an expired one, is refused in both directions, and neither side answers a request.
+    - **`crates/engine/tests/cluster.rs`:** DDL on one member, writes on another and reads on a third agree. Only administrators change membership, leadership transfers, and a single-node database reports no cluster.
+    - **`crates/net/tests/processes.rs`:** three member processes, every directed link through a proxy in the test, which needs no root, unlike `tc` or `iptables`.
+      - Under network faults, members are cut off, healed, and killed with `SIGKILL` and restarted at random.
+      - Under power loss, all members' directories share one LazyFS mount, and every member loses power at once.
+      - Afterwards the members converge, and opening each directory shows the same data, including every commit acknowledged under `Sync`.
+      - The nightly job runs 30 fault rounds and 10 power-loss cycles. Locally, 15 power-loss runs of 3 cycles each, with about 1,250 acknowledged commits per run, lost nothing.
+    - **Two harness bugs, not product bugs,** looked like lost commits at first. Keys like `n3/3/2/1` and `n3/3/2/12` broke storage's documented rule that no key may be a byte prefix of another (`Txn::put`), so a scan resuming at a batch boundary skipped them. Then a string formatted with zero padding was padded with spaces instead. Tracing applies and snapshots, and reading each kept directory's raw versions, showed every "lost" commit was stored. Keys now have fixed-width parts.
+  - *Measured* (`measure_commits_over_grpc`, release build, three members on localhost, `Sync`):
+    - from the leader: 430 commits a second from one client, 6,000 from 16, 16,000 from 64;
+    - through a follower: 240 from one client, 400 from 16, 3,200 from 64.
+
+    Commits through a follower forward each request and wait for the follower to apply it. They scale poorly at 16 clients, which needs investigating before production use.
 - [ ] **Phase 6: Layers above.**
   - provers watching replicated proposals (ADR-0030 phase 2);
   - per-replica statistics (ADR-0036);

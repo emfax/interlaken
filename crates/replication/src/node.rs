@@ -127,8 +127,8 @@ async fn change_here(
         _ => CommitError::Unavailable(e.to_string()),
     };
     match change {
-        MembershipChange::AddLearner(node) => raft
-            .add_learner(node, BasicNode::new(node.to_string()), true)
+        MembershipChange::AddLearner { id: node, addr } => raft
+            .add_learner(node, BasicNode::new(addr), true)
             .await
             .map(drop)
             .map_err(refused),
@@ -272,9 +272,22 @@ impl<T: Transport> ReplicaNode<T> {
     /// Returns [`Error::ReplicationUnavailable`] if this node already
     /// belongs to a cluster.
     pub async fn initialize(&self, members: &[NodeId]) -> Result<()> {
+        let members: BTreeMap<NodeId, String> =
+            members.iter().map(|&id| (id, id.to_string())).collect();
+        self.initialize_at(&members).await
+    }
+
+    /// Form a new cluster of `members`, each reachable at its address, from
+    /// this node. Call it on one node, once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ReplicationUnavailable`] if this node already
+    /// belongs to a cluster.
+    pub async fn initialize_at(&self, members: &BTreeMap<NodeId, String>) -> Result<()> {
         let members: BTreeMap<NodeId, BasicNode> = members
             .iter()
-            .map(|&id| (id, BasicNode::new(id.to_string())))
+            .map(|(&id, addr)| (id, BasicNode::new(addr.clone())))
             .collect();
         self.raft
             .initialize(members)
@@ -297,7 +310,20 @@ impl<T: Transport> ReplicaNode<T> {
             let leader = self.leader();
             let outcome = match leader {
                 Some(leader) if leader == self.id => {
-                    change_here(&self.raft, self.id, change.clone()).await
+                    // Adding a learner waits for it to catch up, which a
+                    // learner that can't be reached never does.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match tokio::time::timeout(
+                        remaining,
+                        change_here(&self.raft, self.id, change.clone()),
+                    )
+                    .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(_) => Err(CommitError::Unavailable(
+                            "the membership change didn't complete in time".into(),
+                        )),
+                    }
                 }
                 Some(leader) => match self
                     .commit
@@ -325,14 +351,74 @@ impl<T: Transport> ReplicaNode<T> {
         }
     }
 
-    /// Add node `id` as a learner, returning once it has caught up.
+    /// Add node `id` as a learner, returning once it has caught up. Its
+    /// address is its ID, as in-process transports resolve it.
     ///
     /// # Errors
     ///
     /// As [`ReplicaNode::change_membership`].
     pub async fn add_learner(&self, id: NodeId) -> Result<()> {
-        self.change_membership(MembershipChange::AddLearner(id))
+        self.add_learner_at(id, &id.to_string()).await
+    }
+
+    /// Add node `id`, reachable at `addr`, as a learner, returning once it
+    /// has caught up.
+    ///
+    /// # Errors
+    ///
+    /// As [`ReplicaNode::change_membership`].
+    pub async fn add_learner_at(&self, id: NodeId, addr: &str) -> Result<()> {
+        self.change_membership(MembershipChange::AddLearner {
+            id,
+            addr: addr.to_owned(),
+        })
+        .await
+    }
+
+    /// Return every member's address, from the latest membership.
+    #[must_use]
+    pub fn addresses(&self) -> BTreeMap<NodeId, String> {
+        self.raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .membership()
+            .nodes()
+            .map(|(id, node)| (*id, node.addr.clone()))
+            .collect()
+    }
+
+    /// Build a snapshot of everything applied here and purge the log it
+    /// covers, so replicas joining later start from the snapshot. A cluster
+    /// bootstrapped from an existing database needs this: its data predates
+    /// the log.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReplicationUnavailable`] if Raft has stopped or the
+    /// snapshot isn't built within the commit timeout.
+    pub async fn compact(&self) -> Result<()> {
+        let unavailable = |e: &dyn std::fmt::Display| Error::ReplicationUnavailable(e.to_string());
+        let applied = self.status().applied_index.unwrap_or(0);
+        self.raft
+            .trigger()
+            .snapshot()
             .await
+            .map_err(|e| unavailable(&e))?;
+        self.raft
+            .wait(Some(self.timeout))
+            .metrics(
+                |m| m.snapshot.as_ref().is_some_and(|s| s.index() >= applied),
+                "the snapshot covers everything applied",
+            )
+            .await
+            .map_err(|e| unavailable(&e))?;
+        let covered = self.status().snapshot_index.unwrap_or(0);
+        self.raft
+            .trigger()
+            .purge_log(covered)
+            .await
+            .map_err(|e| unavailable(&e))
     }
 
     /// Make exactly `voters` the voting members. Nodes added must be

@@ -80,6 +80,9 @@ pub(crate) struct Inner {
     pub(crate) pool: Option<Arc<MemoryPool>>,
     /// Each statement's memory budget.
     pub(crate) query_budget: usize,
+    /// The cluster this engine is a member of, if any (ADR-0037).
+    #[cfg(feature = "cluster")]
+    pub(crate) cluster: Option<Arc<interlaken_net::Cluster>>,
 }
 
 impl Inner {
@@ -144,8 +147,33 @@ impl Engine {
                 residuals: ResidualCache::new(options.residual_cache_capacity),
                 pool: options.node_memory_limit.map(MemoryPool::new),
                 query_budget: options.query_budget,
+                #[cfg(feature = "cluster")]
+                cluster: None,
             }),
         }
+    }
+
+    /// Create the catalog and policy tables in `storage`, with `admin` as
+    /// the first administrator, unless they exist.
+    async fn create_catalog(
+        storage: &FjallStorage,
+        options: &EngineOptions,
+        admin: &EntityUid,
+    ) -> Result<bool, EngineError> {
+        let txn = storage.begin(TxnOptions::default()).await?;
+        if interlaken_storage::catalog::tables(&txn)
+            .await?
+            .iter()
+            .any(|t| crate::catalog::is_engine_table(t.name()))
+        {
+            txn.abort();
+            return Ok(false);
+        }
+        create_catalog_tables(&txn).await?;
+        create_policy_tables(&txn, &options.policy_settings).await?;
+        grant(&txn, admin, Privilege::Admin).await?;
+        txn.commit().await?;
+        Ok(true)
     }
 
     /// Create a database at `path`, with `admin` as its first administrator.
@@ -163,19 +191,9 @@ impl Engine {
         admin: &EntityUid,
     ) -> Result<Self, EngineError> {
         let storage = FjallStorage::open(path, options.storage.clone())?;
-        let txn = storage.begin(TxnOptions::default()).await?;
-        if interlaken_storage::catalog::tables(&txn)
-            .await?
-            .iter()
-            .any(|t| crate::catalog::is_engine_table(t.name()))
-        {
-            txn.abort();
+        if !Self::create_catalog(&storage, &options, admin).await? {
             return Err(EngineError::Catalog("the database already exists".into()));
         }
-        create_catalog_tables(&txn).await?;
-        create_policy_tables(&txn, &options.policy_settings).await?;
-        grant(&txn, admin, Privilege::Admin).await?;
-        txn.commit().await?;
         Ok(Self::new(storage, &options))
     }
 
@@ -197,6 +215,76 @@ impl Engine {
         txn.abort();
         found.map_err(|_| EngineError::Catalog("no database was created here".into()))?;
         Ok(Self::new(storage, &options))
+    }
+
+    /// Open the database at `path` as a member of a replicated cluster
+    /// (ADR-0037): serve other members on `config.listen`, with mutual TLS,
+    /// and commit through Raft. Transactions read this replica; fresh ones
+    /// see everything committed anywhere first.
+    ///
+    /// With `config.bootstrap`, this node forms a new cluster alone if it
+    /// belongs to none. It keeps an existing single-node database's data,
+    /// or, given `admin`, creates a new database with `admin` as its first
+    /// administrator if there is none. Other nodes then open without
+    /// `bootstrap` and are added with [`Session::add_member`] on a member.
+    ///
+    /// # Errors
+    ///
+    /// A storage or network error, or [`EngineError::Catalog`] if
+    /// bootstrapping finds no database and no `admin` is given.
+    #[cfg(feature = "cluster")]
+    pub async fn open_cluster(
+        path: impl AsRef<Path>,
+        options: EngineOptions,
+        config: interlaken_net::ClusterConfig,
+        admin: Option<&EntityUid>,
+    ) -> Result<Self, EngineError> {
+        let bootstrap = config.bootstrap;
+        let wait = config.replica.commit.timeout;
+        let cluster = interlaken_net::Cluster::open(
+            path.as_ref().to_path_buf(),
+            options.storage.clone(),
+            config,
+        )
+        .await?;
+        if bootstrap {
+            cluster.wait_for_leader(wait).await?;
+            let txn = cluster
+                .storage()
+                .begin(TxnOptions::default().read_only())
+                .await?;
+            let exists = schema_version(&txn).await.is_ok();
+            txn.abort();
+            if !exists {
+                let admin = admin.ok_or_else(|| {
+                    EngineError::Catalog(
+                        "bootstrapping a cluster without a database needs an administrator".into(),
+                    )
+                })?;
+                Self::create_catalog(cluster.storage(), &options, admin).await?;
+            }
+        }
+        let mut engine = Self::new(cluster.storage().clone(), &options);
+        Arc::get_mut(&mut engine.inner)
+            .expect("a new engine isn't shared")
+            .cluster = Some(Arc::new(cluster));
+        Ok(engine)
+    }
+
+    /// Return the cluster this engine is a member of, if any.
+    #[cfg(feature = "cluster")]
+    #[must_use]
+    pub fn cluster(&self) -> Option<&interlaken_net::Cluster> {
+        self.inner.cluster.as_deref()
+    }
+
+    /// Return this member's view of its cluster: role, term, leader, log
+    /// indexes, members and, on the leader, each member's lag. `None` for
+    /// a single-node database.
+    #[cfg(feature = "cluster")]
+    #[must_use]
+    pub fn cluster_status(&self) -> Option<interlaken_replication::ClusterStatus> {
+        self.cluster().map(interlaken_net::Cluster::status)
     }
 
     /// Start a session for the principal and request facts in `context`.

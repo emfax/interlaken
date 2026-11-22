@@ -15,14 +15,19 @@ interlaken-ir.workspace = true
 interlaken-storage.workspace = true
 thiserror.workspace = true
 cedar-policy = { workspace = true, optional = true }
+interlaken-net = { workspace = true, optional = true }
+interlaken-replication = { workspace = true, optional = true }
 cedar-policy-symcc = { workspace = true, optional = true }
 tokio.workspace = true
 
 [features]
 # Prover nodes: prove policy changes with cvc5 (ADR-0030). Never needed by embedded builds.
 smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "tokio/process"]
+# Cluster members: replication over gRPC with mutual TLS (ADR-0037). Never needed by embedded builds.
+cluster = ["dep:interlaken-net", "dep:interlaken-replication"]
 
 [dev-dependencies]
+rcgen = "=0.14.5"
 interlaken-test-alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

@@ -54,6 +54,18 @@ Elle needs Java and `elle-cli`, as the storage crate's Elle tests do; without th
 
 Storage runs on real threads, so a seed usually reproduces a failure but isn't guaranteed to. Failures report their seed.
 
+## Cluster processes under faults and power loss
+
+`crates/net/tests/processes.rs` runs three cluster members as separate processes, talking gRPC with mutual TLS. Every link between them goes through a proxy in the test, so links can be cut without root. While the members commit, one test cuts them off, heals them, and kills and restarts them at random. Another puts all three directories on one LazyFS mount and cuts power to every member at once:
+
+```sh
+NET_ROUNDS=30 cargo test --release -p interlaken-net --test processes network
+LAZYFS_ROOT=~/.cache/interlaken/lazyfs POWER_CYCLES=10 \
+    cargo test --release -p interlaken-net --test processes power_loss
+```
+
+Afterwards the members converge, and the test opens each member's directory. All must hold the same data, including every commit acknowledged under `Sync`. `NET_SEED` picks the fault schedule. Without `LAZYFS_ROOT`, the power-loss test is skipped. The nightly workflow runs both.
+
 ## Disk space: `scripts/disk-space-soak.sh`
 
 ```sh

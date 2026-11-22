@@ -852,6 +852,58 @@ impl Session {
         .await
     }
 
+    /// Check this session's principal holds `admin`, in an empty
+    /// administrative step.
+    #[cfg(feature = "cluster")]
+    async fn require_admin(&mut self) -> Result<(), EngineError> {
+        self.run(Kind::Admin, async |_step: &Step<'_>| Ok(())).await
+    }
+
+    /// Return the engine's cluster, or an error for a single-node database.
+    #[cfg(feature = "cluster")]
+    fn cluster(&self) -> Result<std::sync::Arc<interlaken_net::Cluster>, EngineError> {
+        self.engine
+            .inner
+            .cluster
+            .clone()
+            .ok_or_else(|| EngineError::Catalog("this database isn't a cluster member".into()))
+    }
+
+    /// Add node `id`, reachable at `addr`, to the cluster: as a learner
+    /// until it catches up, then as a voter (ADR-0037).
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::PermissionDenied`] without `admin`, an error for a
+    /// single-node database, or the membership change's error.
+    #[cfg(feature = "cluster")]
+    pub async fn add_member(&mut self, id: u64, addr: &str) -> Result<(), EngineError> {
+        self.require_admin().await?;
+        Ok(self.cluster()?.add_member(id, addr).await?)
+    }
+
+    /// Remove node `id` from the cluster's voters.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::add_member`].
+    #[cfg(feature = "cluster")]
+    pub async fn remove_member(&mut self, id: u64) -> Result<(), EngineError> {
+        self.require_admin().await?;
+        Ok(self.cluster()?.remove_member(id).await?)
+    }
+
+    /// Hand the cluster's leadership to node `to`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::add_member`].
+    #[cfg(feature = "cluster")]
+    pub async fn transfer_leadership(&mut self, to: u64) -> Result<(), EngineError> {
+        self.require_admin().await?;
+        Ok(self.cluster()?.transfer_leadership(to).await?)
+    }
+
     /// Grant `privilege` to `principal`.
     ///
     /// # Errors

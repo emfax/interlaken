@@ -119,6 +119,15 @@ jobs:
         env:
           INTERLAKEN_COMMIT_LOG: "1"
         run: scripts/power-loss.sh
+      # Cluster members as processes over gRPC: network faults, and power
+      # loss on every member at once (ADR-0037 phase 5).
+      - name: Cluster processes under faults and power loss
+        env:
+          NET_ROUNDS: "30"
+          POWER_CYCLES: "10"
+        run: |
+          [ -x "$LAZYFS_ROOT/lazyfs/build/lazyfs" ] || scripts/build-lazyfs.sh "$LAZYFS_ROOT"
+          cargo test --release -p interlaken-net --test processes -- --nocapture --test-threads=1
 
   disk-space:
     name: Disk-space soak
