@@ -128,6 +128,7 @@ fn ranged_scans_match_filtering() {
                 table: "t".into(),
                 columns: vec![("a".into(), order)],
                 unique: false,
+                nulls_distinct: true,
             };
             catalog::create_index(&txn, spec).await.unwrap();
         }
@@ -146,6 +147,7 @@ fn ranged_scans_match_filtering() {
                     table: "t".into(),
                     columns,
                     unique,
+                    nulls_distinct: true,
                 },
             )
             .await

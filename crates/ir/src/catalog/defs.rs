@@ -56,6 +56,9 @@ pub struct IndexDef {
     pub columns: Vec<IndexColumn>,
     /// Whether the index is unique: at most one row per key with no NULLs.
     pub unique: bool,
+    /// For a unique index: `true` if keys containing a NULL never conflict,
+    /// `false` if NULLs count as equal (ADR-0034).
+    pub nones_distinct: bool,
 }
 
 /// A table's definition.
@@ -169,6 +172,7 @@ impl TableDef {
             name: name.into(),
             columns,
             unique,
+            nones_distinct: true,
         });
         self
     }

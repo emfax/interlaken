@@ -73,6 +73,7 @@ async fn storage(dir: &std::path::Path) -> FjallStorage {
                 table: "t".into(),
                 columns: vec![(column.into(), SortOrder::ASC)],
                 unique,
+                nulls_distinct: true,
             },
         )
         .await

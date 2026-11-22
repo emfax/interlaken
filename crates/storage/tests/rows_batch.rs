@@ -169,6 +169,7 @@ fn batched_writes_match_single_row_writes() {
                     table: "t".into(),
                     columns: vec![(column.into(), SortOrder::ASC)],
                     unique,
+                    nulls_distinct: true,
                 },
             )
             .await

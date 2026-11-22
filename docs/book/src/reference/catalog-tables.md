@@ -41,7 +41,7 @@ One row per column: its table, position, name, storage type and nullability.
 
 ### `sys_indexes`
 
-One row per secondary index: its table, name, key columns with their order, and whether it is unique.
+One row per secondary index: its table, name, key columns with their order, whether it is unique, and whether a unique index's NULLs are distinct.
 
 | Column | Type | Nullable | Primary key |
 | --- | --- | --- | --- |
@@ -50,6 +50,7 @@ One row per secondary index: its table, name, key columns with their order, and 
 | `name` | `text` | no |  |
 | `columns` | `bytea` | no |  |
 | `unique` | `bool` | no |  |
+| `nulls_distinct` | `bool` | no |  |
 
 Unique index `sys_indexes_name` on `name`.
 

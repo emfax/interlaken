@@ -78,6 +78,10 @@ pub struct IndexSpec {
     pub columns: Vec<IndexKey>,
     /// Reject rows whose key (all non-NULL) duplicates another row's.
     pub unique: bool,
+    /// For a unique index: `true` if keys containing a NULL never conflict,
+    /// as in SQL; `false` if NULLs count as equal, as Postgres's `NULLS NOT
+    /// DISTINCT` and option equality (ADR-0034).
+    pub nones_distinct: bool,
 }
 
 /// One attribute of a new entity type.

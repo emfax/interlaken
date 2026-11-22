@@ -368,7 +368,8 @@ impl<'a> Interp<'a> {
                 }
             }
         }
-        // Unique indexes: NULLs are distinct, so only rows with every indexed value set can collide.
+        // Unique indexes: unless NULLs are equal (ADR-0034), only rows with
+        // every indexed value set can collide.
         for index in table.indexes.iter().filter(|i| i.unique) {
             let mut keys = HashSet::new();
             for row in rows {
@@ -377,7 +378,8 @@ impl<'a> Interp<'a> {
                     .iter()
                     .map(|c| row[usize::try_from(c.column.get()).expect("column id")].clone())
                     .collect();
-                if !key.iter().any(Datum::is_null) && !keys.insert(RowKey(key)) {
+                let checked = !index.nones_distinct || !key.iter().any(Datum::is_null);
+                if checked && !keys.insert(RowKey(key)) {
                     return Err(EvalError::UniqueViolation(table.name.to_string()));
                 }
             }

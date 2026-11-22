@@ -406,6 +406,7 @@ fn storage(runtime: &tokio::runtime::Runtime, dir: &std::path::Path) -> FjallSto
                     table: "b".into(),
                     columns: vec![(column.into(), SortOrder::ASC)],
                     unique,
+                    nulls_distinct: true,
                 },
             )
             .await

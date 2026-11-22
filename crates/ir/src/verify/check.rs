@@ -892,7 +892,8 @@ impl Verifier<'_> {
                 if def.properties.strict && optional_args {
                     self.expect_lifted(lifted, &def.name.to_string())?;
                 }
-                let nullable = def.returns.optional || (def.properties.strict && optional_args);
+                let flags: Vec<bool> = types.iter().map(|t| t.optional).collect();
+                let nullable = crate::catalog::call_optional(&def, &flags);
                 def.returns.clone().with_optional(nullable)
             }
             Expr::Unary { op, expr: operand } => {

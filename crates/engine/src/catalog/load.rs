@@ -95,6 +95,7 @@ pub async fn load_catalog(txn: &Txn) -> Result<InMemoryCatalog, EngineError> {
                 name: index.name().into(),
                 columns,
                 unique: index.is_unique(),
+                nones_distinct: index.nulls_distinct(),
             });
         }
         ir.add_table(def).map_err(invalid)?;

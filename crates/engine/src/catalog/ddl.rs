@@ -250,6 +250,7 @@ pub async fn create_index(txn: &Txn, spec: &IndexSpec) -> Result<(), EngineError
             table: spec.table.clone(),
             columns,
             unique: spec.unique,
+            nulls_distinct: spec.nones_distinct,
         },
     )
     .await?;

@@ -82,7 +82,8 @@ pub(crate) struct IndexEntry {
     pub(crate) key: Key,
     pub(crate) value: Bytes,
     /// `true` if another row with equal values would map to the same key:
-    /// a unique index entry whose indexed values are all non-NULL.
+    /// a unique index entry whose indexed values are all non-NULL, or any
+    /// entry of a unique index whose NULLs aren't distinct.
     pub(crate) exclusive: bool,
 }
 
@@ -95,7 +96,8 @@ pub(crate) fn index_entry(table: &TableDef, index: &IndexDef, row: &[Datum]) -> 
         any_null |= value.is_null();
         builder.push(value, column.order);
     }
-    let exclusive = index.is_unique() && !any_null;
+    // A unique key with a NULL conflicts only if NULLs aren't distinct.
+    let exclusive = index.is_unique() && (!any_null || !index.nulls_distinct());
     for &c in table.primary_key() {
         let padding = if exclusive { &Datum::Null } else { &row[c] };
         builder.push(padding, SortOrder::ASC);

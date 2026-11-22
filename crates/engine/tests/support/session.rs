@@ -88,6 +88,7 @@ pub async fn install(admin: &mut Session, ir: &InMemoryCatalog) {
                         })
                         .collect(),
                     unique: index.unique,
+                    nones_distinct: true,
                 })
                 .await
                 .unwrap();

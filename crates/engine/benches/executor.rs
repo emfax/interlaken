@@ -157,6 +157,7 @@ async fn build(engine: &Engine, n: i64) {
             table: "t".into(),
             columns: vec![IndexKey::asc("r")],
             unique: false,
+            nones_distinct: true,
         })
         .await
         .unwrap();

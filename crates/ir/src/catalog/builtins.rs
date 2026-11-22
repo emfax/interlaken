@@ -316,6 +316,34 @@ pub fn builtin_description(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Return whether a call of `def` with arguments that are optional where
+/// `args_optional` says may be absent.
+///
+/// A function's result is optional if its declared result type is, or if
+/// it is strict and an argument is optional. `policy_mask(visible, value,
+/// masked)` is optional only if `value` or `masked` is, so a masked column
+/// keeps its type whoever runs the query (ADR-0034).
+///
+/// # Examples
+///
+/// ```
+/// use interlaken_ir::catalog::{builtin_functions, call_optional};
+///
+/// let functions = builtin_functions();
+/// let mask = functions.iter().find(|f| f.name.to_string() == "policy_mask").unwrap();
+/// // A plain column masked with a plain value stays plain.
+/// assert!(!call_optional(mask, &[false, false, false]));
+/// // Masking it with NULL would make it optional.
+/// assert!(call_optional(mask, &[false, false, true]));
+/// ```
+#[must_use]
+pub fn call_optional(def: &FunctionDef, args_optional: &[bool]) -> bool {
+    if def.name.to_string() == "policy_mask" && args_optional.len() == 3 {
+        return args_optional[1] || args_optional[2];
+    }
+    def.returns.optional || (def.properties.strict && args_optional.iter().any(|o| *o))
+}
+
 /// Add every built-in function to `catalog`.
 ///
 /// # Errors

@@ -39,6 +39,7 @@ for (name, column) in [("folders_owner", "owner"), ("folders_parent", "parent")]
             table: "folders".into(),
             columns: vec![IndexKey::asc(column)],
             unique: false,
+            nones_distinct: true,
         })
         .await?;
 }

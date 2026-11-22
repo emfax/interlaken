@@ -31,6 +31,7 @@ session
         table: "docs".into(),
         columns: vec![IndexKey::asc("owner"), IndexKey::desc("updated")],
         unique: false,
+        nones_distinct: true,
     })
     .await?;
 session
@@ -39,6 +40,7 @@ session
         table: "docs".into(),
         columns: vec![IndexKey::asc("slug")],
         unique: true,
+        nones_distinct: true,
     })
     .await?;
 # Ok(())
@@ -52,6 +54,7 @@ An `IndexSpec` has:
 - **`columns`:** one or more key columns, in key order. `IndexKey::asc` sorts ascending with NULLs last, and `IndexKey::desc` descending with NULLs first, as in Postgres. Both fields of `IndexKey` can be set directly for other combinations. Arrays and `jsonb` columns can't be indexed.
 - **`unique`:** reject a row whose key duplicates another row's, with `23505`.
   - As in Postgres, keys containing a NULL never conflict: any number of rows may have a NULL `slug`.
+- **`nones_distinct`:** for a unique index, `true` keeps that behaviour. `false` treats NULLs as equal to each other, as Postgres's `NULLS NOT DISTINCT` does, so a second row with a NULL `slug` fails with `23505`.
   - Creating a unique index over existing duplicates fails with `23505`.
 
 Creating an index fills it from the table's existing rows in the same statement. Indexes are maintained by every later insert, update and delete. `drop_index(name)` removes one. Index DDL needs `admin` and changes the schema version, like all DDL (see [Tables and column types](tables.md#transactions-and-concurrency)).

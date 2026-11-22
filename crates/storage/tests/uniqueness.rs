@@ -58,6 +58,7 @@ fn index(name: &str, column: &str, unique: bool) -> IndexSpec {
         table: "accounts".into(),
         columns: vec![(column.into(), SortOrder::ASC)],
         unique,
+        nulls_distinct: true,
     }
 }
 

@@ -6,7 +6,8 @@
 //!   (table NAME :id N [:system true]
 //!     (column NAME TYPE)...
 //!     [(primary-key NAME...)]
-//!     (index NAME (COLUMN | (asc COLUMN) | (desc COLUMN) [:nulls first|last])... [:unique true])...)
+//!     (index NAME (COLUMN | (asc COLUMN) | (desc COLUMN) [:nulls first|last])...
+//!       [:unique true] [:nones-distinct false])...)
 //!   (function NAME :id N [:aggregate true] (args DATATYPE...) (returns TYPE)
 //!     [:volatility immutable|stable|volatile] [:strict B] [:leakproof B]
 //!     [:deterministic B] [:cost F] [:selectivity F])
@@ -95,10 +96,11 @@ fn table(sexp: &Sexp) -> Result<TableDef> {
     Ok(def)
 }
 
-/// Read the rest of `(index NAME COLUMN... [:unique B])` on `def`.
+/// Read the rest of `(index NAME COLUMN... [:unique B] [:nones-distinct B])` on `def`.
 fn index(def: &TableDef, item: &Sexp, mut part: Form<'_>) -> Result<IndexDef> {
     let name = ident(part.next("the index name")?)?;
     let unique = part.keyword("unique").map(boolean).transpose()? == Some(true);
+    let nones_distinct = part.keyword("nones-distinct").map(boolean).transpose()? != Some(false);
     let mut columns = Vec::new();
     for column in part.rest() {
         let (name, mut key) = match column.as_word() {
@@ -149,6 +151,7 @@ fn index(def: &TableDef, item: &Sexp, mut part: Form<'_>) -> Result<IndexDef> {
         name,
         columns,
         unique,
+        nones_distinct,
     })
 }
 

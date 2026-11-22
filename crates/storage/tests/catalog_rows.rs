@@ -68,6 +68,7 @@ fn index(name: &str, column: &str, unique: bool) -> IndexSpec {
         table: "users".into(),
         columns: vec![(column.into(), SortOrder::ASC)],
         unique,
+        nulls_distinct: true,
     }
 }
 
@@ -639,6 +640,7 @@ async fn array_columns() {
                 table: "docs".into(),
                 columns: vec![("tags".into(), SortOrder::ASC)],
                 unique: false,
+                nulls_distinct: true,
             },
         )
         .await
@@ -717,6 +719,7 @@ async fn temporal_uuid_and_jsonb_columns() {
                     ("at".into(), SortOrder::ASC),
                 ],
                 unique: true,
+                nulls_distinct: true,
             },
         )
         .await

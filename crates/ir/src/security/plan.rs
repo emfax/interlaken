@@ -290,6 +290,15 @@ impl Lowering<'_> {
         let value = resource(column.id);
         let visible = self.lower_condition(table, visible, resource)?;
         let masked = match mask {
+            // A mask has the column's type, so a query's result types don't
+            // depend on who runs it (ADR-0034).
+            Mask::Null if !column.ty.optional => {
+                return Err(SecurityError::Unsupported(format!(
+                    "a NULL mask on column {}, whose type isn't optional; mask it with a \
+                     function of its type, or deny it",
+                    column.name
+                )));
+            }
             Mask::Null => Expr::Cast {
                 expr: Box::new(Expr::Literal(Value::Null)),
                 to: column.ty.data.clone(),

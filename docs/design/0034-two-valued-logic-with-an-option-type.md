@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 to 3 are built: the option type, two-valued expressions, and operators and aggregates. Phases 4 to 6 aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
+Accepted. Phases 1 to 3 and 5 are built: the option type, two-valued expressions, operators and aggregates, and storage and security. Phase 4 (optimizer) and phase 6 (SQL lowering, which waits for the SQL front end) aren't. Decomposition was considered as the alternative and rejected; [Alternative considered: decomposition](#alternative-considered-decomposition) records why.
 
 ## Summary
 
@@ -148,7 +148,12 @@ The optimizer simplifies the common shapes away. `(coalesce (lift = c (param 1 T
 - [x] **Phase 3: Operators and aggregates.** Outer joins and `Single` apply produce options; `sum` returns its identity; `min`, `max` and `avg` return options; inserts may omit only option columns.
   - *As implemented:* outer joins, left and single applies, `min`, `max` and `avg`, and inserts that omit columns already behaved as specified since phase 1. The change is `sum`: it returns `int8` or `float8`, plain, and 0 over no values, in the catalog, the interpreter and the executor's accumulators. The scalar-aggregate decorrelation now fills a padded group's `sum` with 0, as it did for `count`. Tested by `aggregates_over_nothing` and `correlated_sum_of_nothing_is_zero` (`crates/ir/tests/interp.rs`), which runs a correlated `sum` over a user with no posts before and after decorrelation.
 - [ ] **Phase 4: Optimizer.** Rewrites that are now valid in two-valued logic; simplification of lowered SQL patterns back to index keys; property tests that lowered and hand-written forms plan alike.
-- [ ] **Phase 5: Storage and security.** `IndexSpec::nones_distinct`; typed masks; the Cedar schema from option types.
+- [x] **Phase 5: Storage and security.** `IndexSpec::nones_distinct`; typed masks; the Cedar schema from option types.
+  - *As implemented:*
+    - **`nones_distinct`.** The flag is on the engine's `IndexSpec` and the IR's `IndexDef` (catalog text `:nones-distinct false`). In storage it's `IndexSpec::nulls_distinct` and a new `sys_indexes` column: storage knows NULL, not options. A unique index whose NULLs aren't distinct writes every entry under its exclusive key, so a second NULL key conflicts as a duplicate value does. The interpreter checks the same.
+    - **Typed masks.** A NULL mask on a plain column fails lowering with `42501`, naming the column, since the column's type would otherwise depend on who reads it. Masks aren't checked against the catalog when policies are activated, so the error comes from the query. `catalog::call_optional` types `policy_mask(visible, value, masked)` as optional only when `value` or `masked` is, so a plain column with a typed mask stays plain. The resolver, the verifier and `logic::normalize` share that rule.
+    - **Cedar schema.** Option columns already became optional attributes from their type after phase 1, so nothing changed.
+  - *Testing:* `unique_indexes_can_treat_nones_as_equal` (engine, through storage and a restart), `nones_can_be_equal_in_unique_indexes` (interpreter), and `null_masks_need_optional_columns`, which also checks that a `redact` mask keeps the column plain. The mask differential generators now give plain columns only typed masks.
 - [ ] **Phase 6: SQL lowering.** Written with the SQL front end: the lowering table above, and differential runs against Postgres through the lowering.
 
 ## Consequences

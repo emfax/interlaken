@@ -58,6 +58,7 @@ async fn open(dir: &std::path::Path) -> FjallStorage {
             table: "t".into(),
             columns: vec![(column.into(), SortOrder::ASC)],
             unique,
+            nulls_distinct: true,
         };
         catalog::create_index(&txn, spec).await.unwrap();
     }

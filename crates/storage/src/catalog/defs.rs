@@ -78,6 +78,7 @@ pub struct IndexDef {
     pub(crate) name: String,
     pub(crate) columns: Vec<IndexColumn>,
     pub(crate) unique: bool,
+    pub(crate) nulls_distinct: bool,
 }
 
 impl IndexDef {
@@ -103,6 +104,15 @@ impl IndexDef {
     #[must_use]
     pub fn is_unique(&self) -> bool {
         self.unique
+    }
+
+    /// Return `false` if a unique index treats NULLs as equal to each
+    /// other, as Postgres's `NULLS NOT DISTINCT`, so two keys that differ
+    /// only in being NULL conflict; `true` (the default) if keys with a
+    /// NULL never conflict.
+    #[must_use]
+    pub fn nulls_distinct(&self) -> bool {
+        self.nulls_distinct
     }
 }
 
@@ -200,4 +210,8 @@ pub struct IndexSpec {
     pub columns: Vec<(String, SortOrder)>,
     /// Reject rows whose indexed values (all non-NULL) duplicate another row's.
     pub unique: bool,
+    /// For a unique index: `true` if keys containing a NULL never conflict
+    /// (the SQL default), `false` if NULLs count as equal, as Postgres's
+    /// `NULLS NOT DISTINCT`.
+    pub nulls_distinct: bool,
 }

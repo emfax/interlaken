@@ -48,9 +48,11 @@ type Maskable = (
 /// The columns the generator masks.
 const MASKABLE: [Maskable; 4] = [
     ("Doc", DOCS, "secret", 4, &["null"]),
-    ("Doc", DOCS, "title", 3, &["null", "redact", "mask_last4"]),
+    // `title` is plain text: only masks of its own type (ADR-0034).
+    ("Doc", DOCS, "title", 3, &["redact", "mask_last4"]),
     ("User", USERS, "level", 3, &["null"]),
-    ("User", USERS, "name", 1, &["null", "redact", "mask_last4"]),
+    // `name` is plain text: only masks of its own type (ADR-0034).
+    ("User", USERS, "name", 1, &["redact", "mask_last4"]),
 ];
 
 /// Generate the column policies of one maskable column, all with one mask, or none.
@@ -941,4 +943,50 @@ fn masked_writes_differential() {
     );
     assert!(changed * 5 >= compared, "writes rarely changed rows");
     assert!(masked_returns * 40 >= compared, "RETURNING rarely masked");
+}
+
+#[test]
+/// Assert a NULL mask is refused on a column whose type isn't optional
+/// (ADR-0034): it would make the column's type depend on who reads it.
+/// Masks of the column's type are accepted, and the column stays plain.
+fn null_masks_need_optional_columns() {
+    let (runtime, engine, _dir) = fixture();
+    runtime.block_on(async {
+        store(&engine, &catalog(), &sample().database()).await;
+        let mut root = session(&engine, admin());
+        let query = "(plan (project (get users :as u) u.id u.name))";
+        activate_rls(
+            &mut root,
+            "(policies (permit (read) User true)
+               (permit (read) User (== resource principal) :column name :mask null))",
+        )
+        .await
+        .unwrap();
+        let err = session(&engine, EntityUid::long("User", 1))
+            .query(query, Vec::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.sqlstate(), "42501", "{err}");
+        assert!(
+            err.to_string()
+                .contains("a NULL mask on column name, whose type isn't optional"),
+            "{err}"
+        );
+        activate_rls(
+            &mut root,
+            "(policies (permit (read) User true)
+               (permit (read) User (== resource principal) :column name :mask redact))",
+        )
+        .await
+        .unwrap();
+        let mut ann = session(&engine, EntityUid::long("User", 1));
+        let plan = ann.explain(query, false).await.unwrap();
+        let result = ann.query(query, Vec::new()).await.unwrap();
+        assert!(!result.types[1].optional, "{plan}");
+        assert!(
+            result.rows().iter().any(|r| r[1] == text("****")),
+            "{:?}",
+            result.rows()
+        );
+    });
 }

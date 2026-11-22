@@ -38,7 +38,7 @@ Without a mask, a principal can still run queries that don't read the column; on
 | `mask_last4` | `:mask mask_last4` | `@mask("mask_last4")` | every character but the last four replaced by `*` |
 | any function | `:mask NAME` | `@mask("NAME")` | the function applied to the real value |
 
-A masking function is any scalar function of the column's type that returns that type. Conflicting masks on one column are an error. NULL works on any column. Masks on array columns aren't supported, and fail with `42501`.
+A masking function is any scalar function of the column's type that returns that type. Conflicting masks on one column are an error. A NULL mask works only on a column whose type is optional, `(option T)`: on a plain column it would make the column's type depend on who reads it, so reading the column fails with `42501`. Mask plain columns with a function of their type, or deny them. Masks on array columns aren't supported, and fail with `42501`.
 
 ```rls
 (policies

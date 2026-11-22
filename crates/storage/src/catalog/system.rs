@@ -7,7 +7,7 @@
 //! | --- | --- | --- | --- | --- |
 //! | `sys_tables` | 1 | table_id, name, schema_version, primary_key | table_id | `sys_tables_name` (name) |
 //! | `sys_columns` | 2 | table_id, column_id, name, type, nullable | table_id, column_id | |
-//! | `sys_indexes` | 3 | table_id, index_id, name, columns, unique | table_id, index_id | `sys_indexes_name` (name) |
+//! | `sys_indexes` | 3 | table_id, index_id, name, columns, unique, nulls_distinct | table_id, index_id | `sys_indexes_name` (name) |
 //! | `sys_counters` | 4 | name, value | name | |
 //!
 //! Column lists are stored as `bytea`: a primary key as `u16` LE column
@@ -43,6 +43,7 @@ pub(crate) mod indexes {
     pub(crate) const NAME: usize = 2;
     pub(crate) const COLUMNS: usize = 3;
     pub(crate) const UNIQUE: usize = 4;
+    pub(crate) const NULLS_DISTINCT: usize = 5;
 }
 
 /// The counter row in `sys_counters` that hands out table and index IDs.
@@ -94,6 +95,7 @@ pub(crate) fn system() -> &'static SystemTables {
                 ("name", ColumnType::Text),
                 ("columns", ColumnType::Bytea),
                 ("unique", ColumnType::Bool),
+                ("nulls_distinct", ColumnType::Bool),
             ],
             &[indexes::TABLE_ID, indexes::INDEX_ID],
             Some(("sys_indexes_name", indexes::NAME)),
@@ -134,6 +136,7 @@ fn system_table(
                     order: SortOrder::ASC,
                 }],
                 unique: true,
+                nulls_distinct: true,
             })
             .into_iter()
             .collect(),

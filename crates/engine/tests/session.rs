@@ -161,6 +161,7 @@ async fn every_column_type_survives_restart() {
             table: "events".into(),
             columns: vec![IndexKey::desc("day")],
             unique: false,
+            nones_distinct: true,
         })
         .await
         .unwrap();
@@ -193,6 +194,67 @@ async fn every_column_type_survives_restart() {
     assert!(events.indexes[0].columns[0].descending);
     // Two DDL statements, each bumping the version from 1.
     assert_eq!(catalog.schema_version().get(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a unique index's NULLs are distinct by default, as in SQL, and
+/// equal with `nones_distinct: false` (ADR-0034), through storage, after
+/// a restart too.
+async fn unique_indexes_can_treat_nones_as_equal() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let engine = create(dir.path()).await;
+        let mut root = session(&engine, admin());
+        root.create_table(&table(
+            "t",
+            &[
+                ("id", "int8"),
+                ("a", "(option text)"),
+                ("b", "(option text)"),
+            ],
+            &["id"],
+        ))
+        .await
+        .unwrap();
+        for (name, column, nones_distinct) in [("t_a", "a", true), ("t_b", "b", false)] {
+            root.create_index(&IndexSpec {
+                name: name.into(),
+                table: "t".into(),
+                columns: vec![IndexKey::asc(column)],
+                unique: true,
+                nones_distinct,
+            })
+            .await
+            .unwrap();
+        }
+        root.query(
+            "(plan (insert t (values (columns id a b) (row 1 null null) (row 2 null \"x\"))
+               (columns id a b)))",
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+    let engine = Engine::open(dir.path(), options()).await.unwrap();
+    let mut root = session(&engine, admin());
+    let err = root
+        .query(
+            "(plan (insert t (values (columns id a b) (row 3 \"y\" (cast null text))) (columns id a b)))",
+            vec![],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.sqlstate(), "23505", "{err}");
+    let txn = engine.storage().begin(TxnOptions::default()).await.unwrap();
+    let catalog = load_catalog(&txn).await.unwrap();
+    let t = catalog.table_by_name(&"t".into()).unwrap();
+    assert_eq!(
+        t.indexes
+            .iter()
+            .map(|i| i.nones_distinct)
+            .collect::<Vec<_>>(),
+        [true, false]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

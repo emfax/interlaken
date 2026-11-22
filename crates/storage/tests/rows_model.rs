@@ -226,6 +226,7 @@ async fn apply(txn: &Txn, def: &mut TableDef, model: &mut BTreeMap<u8, ModelRow>
                         table: "t".into(),
                         columns: vec![("team".into(), SortOrder::DESC)],
                         unique: false,
+                        nulls_distinct: true,
                     },
                 )
                 .await
@@ -268,6 +269,7 @@ async fn run(scripts: Vec<Script>) {
             table: "t".into(),
             columns: vec![("email".into(), SortOrder::ASC)],
             unique: true,
+            nulls_distinct: true,
         },
     )
     .await

@@ -143,6 +143,7 @@ pub(crate) async fn load(txn: &Txn, row: &[Datum]) -> Result<TableDef> {
             name: text(&index, indexes::NAME)?.to_owned(),
             columns,
             unique: boolean(&index, indexes::UNIQUE)?,
+            nulls_distinct: boolean(&index, indexes::NULLS_DISTINCT)?,
         });
     }
 

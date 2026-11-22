@@ -193,6 +193,7 @@ pub async fn create_index(txn: &Txn, spec: IndexSpec) -> Result<TableDef> {
             Datum::Text(spec.name.clone()),
             Datum::Bytea(encode_index_columns(&columns)),
             Datum::Bool(spec.unique),
+            Datum::Bool(spec.nulls_distinct || !spec.unique),
         ],
     )
     .await

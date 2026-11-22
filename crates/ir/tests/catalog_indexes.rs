@@ -84,3 +84,38 @@ fn interpreter_enforces_unique_indexes() {
             .all(|r| r[2] != Datum::Text("y".into()))
     );
 }
+
+#[test]
+/// Assert a unique index declared `:nones-distinct false` treats NULLs as
+/// equal (ADR-0034): a second NULL key is a duplicate.
+fn nones_can_be_equal_in_unique_indexes() {
+    let catalog = parse_catalog(&CATALOG.replace(
+        "(index t_b b :unique true)",
+        "(index t_b b :unique true :nones-distinct false)",
+    ))
+    .unwrap();
+    let t = catalog.table_by_id(TableId::new(100)).unwrap();
+    assert!(!t.indexes[2].nones_distinct && t.indexes[0].nones_distinct);
+    let insert = |rows: &str| {
+        let text = format!("(plan (insert t (values (columns x y z) {rows}) (columns id a b)))");
+        resolve(&parse_plan(&text).unwrap(), &catalog).unwrap().plan
+    };
+    let mut db = Database::new();
+    execute(
+        &insert("(row 1 1 (cast null text)) (row 2 2 \"x\")"),
+        &catalog,
+        &mut db,
+        &[],
+        ExecOptions::default(),
+    )
+    .unwrap();
+    let err = execute(
+        &insert("(row 3 3 (cast null text))"),
+        &catalog,
+        &mut db,
+        &[],
+        ExecOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(err.sqlstate(), "23505", "{err}");
+}

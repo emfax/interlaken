@@ -339,6 +339,7 @@ fn agree_counting(catalog_text: &str, setup: &[&str]) -> (u32, u32) {
                 table: table.into(),
                 columns: vec![(column.into(), order)],
                 unique,
+                nulls_distinct: true,
             };
             catalog::create_index(&txn, spec).await.unwrap();
         }

@@ -281,11 +281,12 @@ impl Resolver<'_> {
             }
             Expr::Call { func, args } => {
                 let args = self.exprs(args, cx)?;
-                let any_nullable = args
+                let optional: Vec<bool> = args
                     .iter()
-                    .any(|a| a.ty.as_ref().is_none_or(|t| t.optional));
+                    .map(|a| a.ty.as_ref().is_none_or(|t| t.optional))
+                    .collect();
                 let (def, args) = self.pick_function(func, args, FunctionKind::Scalar)?;
-                let nullable = def.returns.optional || (def.properties.strict && any_nullable);
+                let nullable = crate::catalog::call_optional(&def, &optional);
                 Typed {
                     expr: Expr::Call {
                         func: FunctionRef::Id(def.id),

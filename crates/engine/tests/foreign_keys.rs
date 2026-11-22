@@ -49,6 +49,7 @@ fn index(name: &str, table: &str, columns: &[&str], unique: bool) -> IndexSpec {
         table: table.into(),
         columns: columns.iter().map(|c| IndexKey::asc(*c)).collect(),
         unique,
+        nones_distinct: true,
     }
 }
 

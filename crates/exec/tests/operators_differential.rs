@@ -1117,6 +1117,7 @@ fn operators_agree_with_interpreter() {
                     table: table.into(),
                     columns,
                     unique: false,
+                    nulls_distinct: true,
                 },
             )
             .await

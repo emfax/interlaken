@@ -86,8 +86,8 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
             "One row per column: its table, position, name, storage type and nullability."
         }
         "sys_indexes" => {
-            "One row per secondary index: its table, name, key columns with their order, and \
-             whether it is unique."
+            "One row per secondary index: its table, name, key columns with their order, \
+             whether it is unique, and whether a unique index's NULLs are distinct."
         }
         "sys_counters" => "Named counters; `object_id` hands out table and index IDs.",
         "engine_catalog" => {

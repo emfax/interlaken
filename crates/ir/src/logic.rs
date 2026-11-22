@@ -275,7 +275,8 @@ impl<'a> Normalizer<'a> {
                     return true;
                 };
                 self.catalog.function_by_id(*id).is_none_or(|def| {
-                    def.returns.optional || (def.properties.strict && args.iter().any(&optional))
+                    let flags: Vec<bool> = args.iter().map(&optional).collect();
+                    crate::catalog::call_optional(&def, &flags)
                 })
             }
             Expr::Lift(inner) => optional(inner),
