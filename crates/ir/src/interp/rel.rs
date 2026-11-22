@@ -398,13 +398,22 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    /// Replace the rows of `table`, restoring them if a foreign key from or to it fails.
+    /// Replace the rows of `table`, carry out the cascades that sets off, and
+    /// restore the database if a foreign key then fails.
     fn replace_rows(&mut self, table: TableId, rows: Vec<Vec<Datum>>) -> Result<(), EvalError> {
+        let snapshot = self.db.clone();
         let before = self.db.rows(table).to_vec();
         self.db.set_rows(table, rows);
-        let checked = super::references::check(self.catalog, self.db, table);
+        super::references::cascade(self.catalog, self.db, table, &before);
+        let mut checked = super::references::check(self.catalog, self.db, table);
+        // Cascades change other tables, whose foreign keys must hold too.
+        for fk in self.catalog.foreign_keys() {
+            if checked.is_ok() && fk.table != table && fk.referenced != table {
+                checked = super::references::check(self.catalog, self.db, fk.table);
+            }
+        }
         if checked.is_err() {
-            self.db.set_rows(table, before);
+            *self.db = snapshot;
         }
         checked
     }

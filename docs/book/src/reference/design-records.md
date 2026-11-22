@@ -67,7 +67,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | ADR | Title | Status |
 | --- | --- | --- |
 | 0031 | Engine sessions and the storage-backed catalog | implemented |
-| 0035 | Enforced foreign keys | accepted: declarations and checks on writes are built; cascades are not |
+| 0035 | Enforced foreign keys | accepted: declarations, checks and cascades are built; the optimizer's use of them is not |
 
 ## Design documents
 

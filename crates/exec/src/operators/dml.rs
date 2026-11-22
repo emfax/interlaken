@@ -32,7 +32,7 @@ use crate::exec::{BatchStream, ExecContext, compile_over, execute};
 use crate::kernels::CompiledExpr;
 use crate::memory::{Reservation, key_bytes};
 use crate::physical::{Dml, Physical};
-use crate::references::Checker;
+use crate::references::{Recorded, ReferencePlan};
 
 /// What a DML operator does to each target row.
 enum Write {
@@ -68,8 +68,12 @@ struct DmlState {
     schema: SchemaRef,
     /// For an edges table, keeps its closure tables up to date.
     closure: Option<Maintainer>,
-    /// Checks the writes against the foreign keys involving the table.
-    references: Option<Checker>,
+    /// The foreign keys involving the table, which the writes must satisfy.
+    references: Option<std::sync::Arc<ReferencePlan>>,
+    /// The keys this batch's writes must be checked for.
+    recorded: Recorded,
+    /// Whether this operator has told the statement's checks it finished.
+    finished: bool,
 }
 
 /// Convert a row to its stored form.
@@ -199,9 +203,9 @@ impl DmlState {
                         c.record(None, Some(row))?;
                     }
                 }
-                if let Some(r) = &mut self.references {
+                if let Some(r) = &self.references {
                     for row in &rows {
-                        r.record(None, Some(row))?;
+                        r.record(None, Some(row), &mut self.recorded)?;
                     }
                 }
                 written = rows;
@@ -218,8 +222,8 @@ impl DmlState {
                         if let Some(c) = &mut self.closure {
                             c.record(Some(&targets[i]), None)?;
                         }
-                        if let Some(r) = &mut self.references {
-                            r.record(Some(&targets[i]), None)?;
+                        if let Some(r) = &self.references {
+                            r.record(Some(&targets[i]), None, &mut self.recorded)?;
                         }
                         written.push(targets[i].clone());
                     }
@@ -259,8 +263,8 @@ impl DmlState {
                         if let Some(c) = &mut self.closure {
                             c.record(Some(&targets[i]), Some(&new))?;
                         }
-                        if let Some(r) = &mut self.references {
-                            r.record(Some(&targets[i]), Some(&new))?;
+                        if let Some(r) = &self.references {
+                            r.record(Some(&targets[i]), Some(&new), &mut self.recorded)?;
                         }
                         written.push(new);
                     }
@@ -270,8 +274,9 @@ impl DmlState {
         if let Some(c) = &mut self.closure {
             c.apply(txn).await?;
         }
-        if let Some(r) = &mut self.references {
-            r.check_batch(txn).await?;
+        if self.references.is_some() {
+            let recorded = std::mem::take(&mut self.recorded);
+            self.ctx.constraints.check_batch(txn, recorded).await?;
         }
         Ok(written)
     }
@@ -313,9 +318,12 @@ impl Pull for DmlState {
             );
         }
         let Some(b) = self.input.next().await else {
-            // The statement's rows are all written: recheck what failed on the way.
-            if let Some(mut r) = self.references.take() {
-                r.finish(&self.ctx.txn).await?;
+            // This operator's rows are all written. The statement's last DML
+            // operator runs the cascades and rechecks what failed on the way.
+            if !self.finished {
+                self.finished = true;
+                let constraints = self.ctx.constraints.clone();
+                constraints.finish(&self.ctx).await?;
             }
             return Ok(None);
         };
@@ -363,6 +371,10 @@ pub(crate) fn dml(
         ),
         DmlKind::Delete(key) => Write::Delete(key.to_vec()),
     };
+    let references = dml.references.clone();
+    ctx.constraints.enter(references.as_deref(), || {
+        ctx.reserve(node, "ForeignKeyChecks")
+    });
     Ok(into_stream(DmlState {
         write,
         input: execute(&dml.input, ctx),
@@ -378,9 +390,8 @@ pub(crate) fn dml(
             .closure
             .clone()
             .map(|plan| Maintainer::new(plan, ctx.reserve(node, "ClosureMaintenance"))),
-        references: dml
-            .references
-            .clone()
-            .map(|plan| Checker::new(plan, ctx.reserve(node, "ForeignKeyChecks"))),
+        references,
+        recorded: Recorded::default(),
+        finished: false,
     }))
 }

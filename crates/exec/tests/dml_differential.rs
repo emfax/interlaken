@@ -244,6 +244,31 @@ fn statements_agree_with_interpreter_under_a_foreign_key() {
 /// Run random statement sequences against `catalog_text` through both, and
 /// return how many failed in both with a foreign key violation.
 fn agree(catalog_text: &str) -> u32 {
+    agree_counting(catalog_text, &[]).0
+}
+
+#[test]
+/// Assert the same with the foreign key cascading (ADR-0035): deleting a
+/// user deletes their posts, in both.
+fn statements_agree_with_interpreter_under_a_cascading_foreign_key() {
+    let catalog = CATALOG.strip_suffix(')').unwrap().to_owned()
+        + "\n  (foreign-key posts_author_fk :table posts (columns author) (references users id)\n    :on-delete cascade))";
+    // Users 0 to 5 exist from the start, so posts by them are accepted and
+    // deleting a user often cascades.
+    let users = "(insert users (values (columns i n a k) (row 0 \"a\" (int4 1) 1) \
+                 (row 1 \"b\" (int4 2) 1) (row 2 \"c\" (int4 3) 1) (row 3 \"d\" (int4 4) 1) \
+                 (row 4 \"e\" (cast null int4) 1) (row 5 \"f\" (int4 0) 1)) \
+                 (columns id name age karma))";
+    let (_, cascaded) = agree_counting(&catalog, &[users]);
+    // Over seven runs, 49 to 73 of 600 cases cascaded (mean 63, sd 10); 20
+    // is over four standard deviations below, so it guards the generator,
+    // not chance.
+    assert!(cascaded >= 20, "only {cascaded} deletes cascaded");
+}
+
+/// Run as [`agree`], with `setup` run first in each case; also return how
+/// many statements deleted users with posts.
+fn agree_counting(catalog_text: &str, setup: &[&str]) -> (u32, u32) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -323,8 +348,21 @@ fn agree(catalog_text: &str) -> u32 {
     let catalog = Arc::new(parse_catalog(catalog_text).unwrap());
     let shared: Arc<dyn Catalog> = catalog.clone();
     let cases = 600;
-    let counters: [AtomicU32; 4] = Default::default();
-    let [statements, failures, index_scans, violations] = &counters;
+    let counters: [AtomicU32; 5] = Default::default();
+    let [statements, failures, index_scans, violations, cascaded] = &counters;
+    // Cascades run unsecured here, as there are no policies.
+    let cascades = Arc::new(
+        interlaken_exec::cascade_plans(
+            &resolve(
+                &parse_plan("(plan (delete users (get users)))").unwrap(),
+                catalog.as_ref(),
+            )
+            .unwrap()
+            .plan,
+            catalog.as_ref(),
+        )
+        .unwrap(),
+    );
     let parse = |text: &str, catalog: &InMemoryCatalog| {
         resolve(&parse_plan(&format!("(plan {text})")).unwrap(), catalog)
             .unwrap_or_else(|e| panic!("{e}: {text}"))
@@ -343,10 +381,13 @@ fn agree(catalog_text: &str) -> u32 {
                 shared.clone(),
                 ExecOptions::default(),
             )
+            .with_cascades(cascades.clone())
         });
         let mut history = Vec::new();
-        for _ in 0..8 {
-            let text = g.statement();
+        for i in 0..setup.len() + 8 {
+            let text = setup
+                .get(i)
+                .map_or_else(|| g.statement(), |s| (*s).to_owned());
             history.push(text.clone());
             let ir = parse(&text, &catalog);
             let physical =
@@ -354,7 +395,14 @@ fn agree(catalog_text: &str) -> u32 {
             if format!("{physical:?}").contains("Index {") {
                 index_scans.fetch_add(1, Ordering::Relaxed);
             }
+            let posts_before = db.rows(TableId::new(101)).len();
             let expected = interpret(&ir, catalog.as_ref(), &mut db, &[], ExecOptions::default());
+            if text.starts_with("(delete users")
+                && expected.is_ok()
+                && db.rows(TableId::new(101)).len() < posts_before
+            {
+                cascaded.fetch_add(1, Ordering::Relaxed);
+            }
             let actual = runtime.block_on(async {
                 let savepoint = txn.savepoint().unwrap();
                 let result = txn.execute(&physical, Vec::new()).await;
@@ -439,10 +487,11 @@ fn agree(catalog_text: &str) -> u32 {
         Ok(())
     })
     .unwrap();
-    let [statements, failures, index_scans, violations] = counters.map(|c| c.into_inner());
+    let [statements, failures, index_scans, violations, cascaded] =
+        counters.map(|c| c.into_inner());
     eprintln!(
         "{statements} statements, {failures} failed in both ({violations} on a foreign key), \
-         {index_scans} used an index"
+         {index_scans} used an index, {cascaded} deletes cascaded"
     );
     assert!(
         failures * 20 >= statements,
@@ -452,5 +501,5 @@ fn agree(catalog_text: &str) -> u32 {
         index_scans * 10 >= statements,
         "too few index scans: {index_scans}"
     );
-    violations
+    (violations, cascaded)
 }

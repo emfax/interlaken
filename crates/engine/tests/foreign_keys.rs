@@ -667,9 +667,10 @@ async fn checks_hold_at_statement_end() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-/// Assert MATCH FULL rejects partly NULL keys on write, and that
-/// `on delete cascade` acts as `no-action` until cascades are built.
-async fn match_full_and_pending_cascades() {
+/// Assert MATCH FULL rejects partly NULL keys on write, and that a
+/// cascade through a composite key deletes exactly the rows referring to
+/// the deleted key.
+async fn match_full_and_composite_cascades() {
     let dir = tempfile::tempdir().unwrap();
     let engine = create(dir.path()).await;
     let mut root = schema(&engine).await;
@@ -704,24 +705,28 @@ async fn match_full_and_pending_cascades() {
     run(
         &mut root,
         &[
-            "(plan (insert pairs (values (columns a b) (row 1 2)) (columns a b)))",
-            "(plan (insert refs (values (columns id a b) (row 1 1 2) (row 2 null null)) \
-             (columns id a b)))",
+            "(plan (insert pairs (values (columns a b) (row 1 2) (row 1 3)) (columns a b)))",
+            "(plan (insert refs (values (columns id a b) (row 1 1 2) (row 2 null null) \
+             (row 3 1 3)) (columns id a b)))",
         ],
     )
     .await;
     let (state, message) = fails(
         &mut root,
-        "(plan (insert refs (values (columns id a b) (row 3 1 (cast null int8))) (columns id a b)))",
+        "(plan (insert refs (values (columns id a b) (row 4 1 (cast null int8))) (columns id a b)))",
     )
     .await;
     assert_eq!(state, "23503", "{message}");
     assert!(message.contains("matches FULL"), "{message}");
-    let (state, message) = fails(&mut root, "(plan (delete pairs (get pairs)))").await;
-    assert_eq!(state, "23503", "{message}");
-    assert!(
-        message.contains("with a = Int8(1), b = Int8(2) (on delete cascade isn't carried out yet)"),
-        "{message}"
+    run(
+        &mut root,
+        &["(plan (delete pairs (filter (get pairs) (= b 2))))"],
+    )
+    .await;
+    let ids = rows(&mut root, "(plan (sort (project (get refs) id) (asc id)))").await;
+    assert_eq!(
+        ids,
+        [2, 3].map(|i| vec![interlaken_ir::interp::Datum::Int8(i)])
     );
 }
 
@@ -816,5 +821,348 @@ async fn concurrent_writes_conflict() {
             .iter()
             .all(|r| r[1] == interlaken_ir::interp::Datum::Null),
         "{dangling:?}"
+    );
+}
+
+/// Return the rows of `text` as `Debug` strings, for compact comparisons.
+async fn shown(session: &mut Session, text: &str) -> Vec<String> {
+    rows(session, text)
+        .await
+        .iter()
+        .map(|r| format!("{r:?}"))
+        .collect()
+}
+
+/// Create `users(id)`, `docs(id, owner, parent)` and `comments(id, doc)`,
+/// with docs' owner and parent cascading and comments' doc set to NULL on delete.
+async fn cascading_schema(engine: &Engine) -> Session {
+    let mut root = session(engine, admin());
+    root.create_table(&table("users", &[("id", "int8")], &["id"]))
+        .await
+        .unwrap();
+    root.create_table(&table(
+        "docs",
+        &[
+            ("id", "int8"),
+            ("owner", "int8"),
+            ("parent", "(option int8)"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_table(&table(
+        "comments",
+        &[("id", "int8"), ("doc", "(option int8)")],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    for (name, table, column) in [
+        ("docs_owner", "docs", "owner"),
+        ("docs_parent", "docs", "parent"),
+        ("comments_doc", "comments", "doc"),
+    ] {
+        root.create_index(&index(name, table, &[column], false))
+            .await
+            .unwrap();
+    }
+    for spec in [
+        ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"])
+            .on_delete(ReferentialAction::Cascade),
+        ForeignKeySpec::new("docs_parent_fk", "docs", ["parent"], "docs", ["id"])
+            .on_delete(ReferentialAction::Cascade),
+        ForeignKeySpec::new("comments_doc_fk", "comments", ["doc"], "docs", ["id"])
+            .on_delete(ReferentialAction::SetNull),
+    ] {
+        root.create_foreign_key(&spec).await.unwrap();
+    }
+    run(
+        &mut root,
+        &[
+            "(plan (insert users (values (columns id) (row 1) (row 2)) (columns id)))",
+            "(plan (insert docs (values (columns id owner parent) (row 10 1 null) (row 11 2 10) \
+             (row 12 2 null)) (columns id owner parent)))",
+            "(plan (insert comments (values (columns id doc) (row 100 11) (row 101 12)) \
+             (columns id doc)))",
+        ],
+    )
+    .await;
+    root
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert deletes cascade transitively through foreign keys: deleting a
+/// user deletes their documents and those documents' children (owned by
+/// anyone), and sets comments on deleted documents to NULL.
+async fn deletes_cascade() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = cascading_schema(&engine).await;
+    let plan = root
+        .explain("(plan (delete docs (filter (get docs) (= id 99))))", false)
+        .await
+        .unwrap();
+    assert!(
+        plan.contains("cascading to: comments_doc_fk (set-null), docs_parent_fk (cascade)"),
+        "{plan}"
+    );
+    run(
+        &mut root,
+        &["(plan (delete users (filter (get users) (= id 1))))"],
+    )
+    .await;
+    assert_eq!(doc_ids(&mut root).await, [12]);
+    assert_eq!(
+        shown(&mut root, "(plan (sort (get comments) (asc id)))").await,
+        ["[Int8(100), Null]", "[Int8(101), Int8(12)]"]
+    );
+    // A deep self-referencing tree cascades without recursing per level.
+    let chain: String = (0..2000)
+        .map(|i| {
+            let parent = if i == 0 {
+                "null".to_owned()
+            } else {
+                (1000 + i - 1).to_string()
+            };
+            format!(" (row {} 2 {parent})", 1000 + i)
+        })
+        .collect();
+    run(
+        &mut root,
+        &[&format!(
+            "(plan (insert docs (values (columns id owner parent){chain}) (columns id owner parent)))"
+        )],
+    )
+    .await;
+    assert_eq!(doc_ids(&mut root).await.len(), 2001);
+    run(
+        &mut root,
+        &["(plan (delete docs (filter (get docs) (= id 1000))))"],
+    )
+    .await;
+    assert_eq!(doc_ids(&mut root).await, [12]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a cascade that removes a row a `NO ACTION` foreign key still
+/// refers to fails the whole statement with 23503, changing nothing.
+async fn cascades_meet_no_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = cascading_schema(&engine).await;
+    root.create_table(&table("notes", &[("id", "int8"), ("doc", "int8")], &["id"]))
+        .await
+        .unwrap();
+    root.create_index(&index("notes_doc", "notes", &["doc"], false))
+        .await
+        .unwrap();
+    root.create_foreign_key(&ForeignKeySpec::new(
+        "notes_doc_fk",
+        "notes",
+        ["doc"],
+        "docs",
+        ["id"],
+    ))
+    .await
+    .unwrap();
+    run(
+        &mut root,
+        &["(plan (insert notes (values (columns id doc) (row 1 11)) (columns id doc)))"],
+    )
+    .await;
+    let (state, message) = fails(
+        &mut root,
+        "(plan (delete users (filter (get users) (= id 1))))",
+    )
+    .await;
+    assert_eq!(state, "23503", "{message}");
+    assert!(message.contains("notes_doc_fk"), "{message}");
+    assert_eq!(doc_ids(&mut root).await, [10, 11, 12]);
+    assert_eq!(
+        shown(&mut root, "(plan (sort (get comments) (asc id)))").await,
+        ["[Int8(100), Int8(11)]", "[Int8(101), Int8(12)]"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert a cascade changes every referring row or fails: a principal
+/// whose policies let them delete their user row, but not a document
+/// someone else owns that refers to it, can't delete the user (42501).
+async fn cascades_obey_write_policies() {
+    use interlaken_engine::catalog::AttributeSpec;
+    use interlaken_ir::interp::Datum;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = session(&engine, admin());
+    root.create_table(&table("users", &[("id", "int8")], &["id"]))
+        .await
+        .unwrap();
+    root.create_table(&table(
+        "docs",
+        &[
+            ("id", "int8"),
+            ("owner_id", "int8"),
+            ("editor_id", "(option int8)"),
+        ],
+        &["id"],
+    ))
+    .await
+    .unwrap();
+    root.create_index(&index("docs_editor", "docs", &["editor_id"], false))
+        .await
+        .unwrap();
+    root.create_foreign_key(
+        &ForeignKeySpec::new("docs_editor_fk", "docs", ["editor_id"], "users", ["id"])
+            .on_delete(ReferentialAction::Cascade),
+    )
+    .await
+    .unwrap();
+    root.declare_entity(&EntitySpec {
+        name: "User".into(),
+        table: "users".into(),
+        key: "id".into(),
+        attributes: vec![],
+    })
+    .await
+    .unwrap();
+    root.declare_entity(&EntitySpec {
+        name: "Doc".into(),
+        table: "docs".into(),
+        key: "id".into(),
+        attributes: vec![AttributeSpec::reference("owner", "owner_id", "User")],
+    })
+    .await
+    .unwrap();
+    let users = vec![vec![Datum::Int8(1)], vec![Datum::Int8(2)]];
+    let docs = |editor_of_11: i64| {
+        vec![
+            vec![Datum::Int8(10), Datum::Int8(1), Datum::Int8(1)],
+            vec![Datum::Int8(11), Datum::Int8(2), Datum::Int8(editor_of_11)],
+        ]
+    };
+    support::session::replace_rows(&engine, &[("users", users.clone()), ("docs", docs(1))]).await;
+    support::session::activate_rls(
+        &mut root,
+        "(policies
+           (permit (read delete) User true)
+           (permit (read delete) Doc (== resource.owner principal)))",
+    )
+    .await
+    .unwrap();
+    let mut alice = session(&engine, EntityUid::long("User", 1));
+    let delete_self = "(plan (delete users (filter (get users) (= id 1))))";
+    let (state, message) = fails(&mut alice, delete_self).await;
+    assert_eq!(state, "42501", "{message}");
+    assert!(message.contains("docs"), "{message}");
+    assert_eq!(
+        shown(&mut alice, "(plan (project (get users) id))").await,
+        ["[Int8(1)]", "[Int8(2)]"]
+    );
+    // With doc 11 edited by someone else, only alice's own doc cascades.
+    support::session::replace_rows(&engine, &[("users", users), ("docs", docs(2))]).await;
+    run(&mut alice, &[delete_self]).await;
+    assert_eq!(
+        shown(&mut alice, "(plan (project (get users) id))").await,
+        ["[Int8(2)]"]
+    );
+    let mut bob = session(&engine, EntityUid::long("User", 2));
+    assert_eq!(
+        shown(&mut bob, "(plan (project (get docs) id))").await,
+        ["[Int8(11)]"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+/// Assert deleting an entity cascades to its membership edges, and the
+/// closure loses the pairs those edges made, as for any edge delete.
+async fn cascades_maintain_closures() {
+    use interlaken_engine::catalog::MembershipSpec;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = create(dir.path()).await;
+    let mut root = session(&engine, admin());
+    for (name, columns, key) in [
+        ("users", vec![("id", "int8")], vec!["id"]),
+        ("groups", vec![("id", "int8")], vec!["id"]),
+        (
+            "edges",
+            vec![("member", "int8"), ("grp", "int8")],
+            vec!["member", "grp"],
+        ),
+        (
+            "closure",
+            vec![
+                ("descendant", "int8"),
+                ("ancestor", "int8"),
+                ("paths", "int8"),
+            ],
+            vec!["descendant", "ancestor"],
+        ),
+    ] {
+        root.create_table(&table(name, &columns, &key))
+            .await
+            .unwrap();
+    }
+    for (name, table_name) in [("User", "users"), ("Group", "groups")] {
+        root.declare_entity(&EntitySpec {
+            name: name.into(),
+            table: table_name.into(),
+            key: "id".into(),
+            attributes: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    root.declare_membership(&MembershipSpec {
+        member: "User".into(),
+        group: "Group".into(),
+        edges: "edges".into(),
+        edge_columns: ("member".into(), "grp".into()),
+        closure: "closure".into(),
+        closure_columns: ("descendant".into(), "ancestor".into(), "paths".into()),
+    })
+    .await
+    .unwrap();
+    root.create_foreign_key(
+        &ForeignKeySpec::new("edges_member_fk", "edges", ["member"], "users", ["id"])
+            .on_delete(ReferentialAction::Cascade),
+    )
+    .await
+    .unwrap();
+    support::session::activate_rls(
+        &mut root,
+        "(policies
+           (permit (read insert update delete) User (is principal Admin))
+           (permit (read insert update delete) Group (is principal Admin)))",
+    )
+    .await
+    .unwrap();
+    run(
+        &mut root,
+        &[
+            "(plan (insert users (values (columns id) (row 1) (row 2)) (columns id)))",
+            "(plan (insert groups (values (columns id) (row 7)) (columns id)))",
+            "(plan (insert edges (values (columns member grp) (row 1 7) (row 2 7)) \
+             (columns member grp)))",
+        ],
+    )
+    .await;
+    let closure = "(plan (sort (get closure) (asc descendant)))";
+    assert_eq!(
+        shown(&mut root, closure).await,
+        ["[Int8(1), Int8(7), Int8(1)]", "[Int8(2), Int8(7), Int8(1)]"]
+    );
+    run(
+        &mut root,
+        &["(plan (delete users (filter (get users) (= id 1))))"],
+    )
+    .await;
+    assert_eq!(
+        shown(&mut root, closure).await,
+        ["[Int8(2), Int8(7), Int8(1)]"]
+    );
+    assert_eq!(
+        shown(&mut root, "(plan (get edges))").await,
+        ["[Int8(2), Int8(7)]"]
     );
 }

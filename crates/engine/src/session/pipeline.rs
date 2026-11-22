@@ -19,9 +19,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use interlaken_exec::{ExecContext, Physical, PlanOptions, QueryMemory, plan_with};
+use interlaken_exec::{CascadePlans, ExecContext, Physical, PlanOptions, QueryMemory, plan_with};
 use interlaken_ir::Plan;
-use interlaken_ir::catalog::{Catalog, InMemoryCatalog};
+use interlaken_ir::catalog::{Catalog, InMemoryCatalog, cascade_plan, reachable_cascades};
 use interlaken_ir::interp::{Datum, ExecOptions, declared_params};
 use interlaken_ir::optimize::optimize;
 use interlaken_ir::resolve::resolve;
@@ -68,6 +68,9 @@ pub(crate) struct Prepared {
     pub(crate) types: Vec<Type>,
     /// The type each parameter is declared with, by number.
     pub(crate) params: BTreeMap<u32, Type>,
+    /// The secured cascade of each foreign key the statement's deletes can
+    /// set off, by name (ADR-0035).
+    pub(crate) cascades: Arc<CascadePlans>,
 }
 
 /// Parse a plan's text.
@@ -106,23 +109,30 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
         &provider.entity_paths(),
     )
     .await?;
-    let secured = if step.use_caches {
-        let cached = step
-            .engine
-            .residuals
-            .provider(provider.as_ref(), policies.version);
-        secure(&resolved, catalog, &cached, step.context, &entities)?
+    let cached = step
+        .engine
+        .residuals
+        .provider(provider.as_ref(), policies.version);
+    let provider: &dyn interlaken_ir::security::PolicyProvider = if step.use_caches {
+        &cached
     } else {
-        secure(
-            &resolved,
-            catalog,
-            provider.as_ref(),
-            step.context,
-            &entities,
-        )?
+        provider.as_ref()
     };
-    let optimized = optimize(&secured, catalog);
-    let physical = plan_with(&optimized, catalog, PlanOptions::default())?;
+    let physical = |resolved: &Plan| -> Result<Physical, EngineError> {
+        let secured = secure(resolved, catalog, provider, step.context, &entities)?;
+        let optimized = optimize(&secured, catalog);
+        Ok(plan_with(&optimized, catalog, PlanOptions::default())?)
+    };
+    // Each cascade is an ordinary statement, secured for the same principal,
+    // so policies decide which rows it may change.
+    let mut cascades = CascadePlans::new();
+    for fk in reachable_cascades(catalog, &resolved.root) {
+        if let Some(cascade) = cascade_plan(catalog, &fk) {
+            let (cascade, _) = pin(&cascade, catalog)?;
+            cascades.insert(fk.name.to_string(), Arc::new(physical(&cascade)?));
+        }
+    }
+    let physical = physical(&resolved)?;
     let columns = schema
         .columns
         .iter()
@@ -138,15 +148,23 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
         columns,
         types,
         params,
+        cascades: Arc::new(cascades),
     })
 }
 
-/// Return the context a statement's plan runs in, with `params`.
-pub(crate) fn exec_context(step: &Step<'_>, params: Vec<Datum>) -> ExecContext {
+/// Return the context `prepared` runs in, with `params`.
+pub(crate) fn exec_context(
+    step: &Step<'_>,
+    prepared: &Prepared,
+    params: Vec<Datum>,
+) -> ExecContext {
     let catalog: Arc<dyn Catalog> = step.catalog.clone();
-    let ctx = ExecContext::new(step.txn.clone(), catalog, params, step.options).with_memory(
-        QueryMemory::new(step.engine.query_budget, step.engine.pool.clone()),
-    );
+    let ctx = ExecContext::new(step.txn.clone(), catalog, params, step.options)
+        .with_memory(QueryMemory::new(
+            step.engine.query_budget,
+            step.engine.pool.clone(),
+        ))
+        .with_cascades(prepared.cascades.clone());
     match step.deadline {
         Some(deadline) => ctx.with_deadline(deadline),
         None => ctx,

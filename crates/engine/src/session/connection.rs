@@ -555,7 +555,7 @@ impl Session {
             let prepared = prepare(&step, plan?).await?;
             check_params(&prepared.params, &params)?;
             let writes = prepared.physical.writes();
-            let batches = execute(&prepared.physical, &exec_context(&step, params));
+            let batches = execute(&prepared.physical, &exec_context(&step, &prepared, params));
             Ok::<_, EngineError>(Execution {
                 columns: prepared.columns,
                 types: prepared.types,
@@ -674,7 +674,7 @@ impl Session {
             };
             if analyze {
                 check_params(&prepared.params, &[])?;
-                let ctx = exec_context(step, Vec::new());
+                let ctx = exec_context(step, &prepared, Vec::new());
                 Ok(explain_analyze(&prepared.physical, &ctx, options).await?)
             } else {
                 Ok(explain(&prepared.physical, options))
@@ -808,9 +808,8 @@ impl Session {
 
     /// Create a foreign key, after checking every existing row satisfies it (ADR-0035).
     ///
-    /// Later writes are checked against it when each statement ends.
-    /// `on delete cascade` and `set-null` aren't carried out yet (phase 3
-    /// of ADR-0035); until then they act as `no-action`.
+    /// Later writes are checked against it when each statement ends, and
+    /// deletes carry out its `on_delete` action.
     ///
     /// # Errors
     ///

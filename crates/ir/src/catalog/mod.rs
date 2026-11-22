@@ -21,6 +21,8 @@ pub use defs::{
     Volatility,
 };
 pub use entities::{AttributeDef, EntityDef, MembershipDef};
-pub use foreign_keys::{ForeignKeyDef, ReferentialAction, referencing_index};
+pub use foreign_keys::{
+    ForeignKeyDef, ReferentialAction, cascade_plan, reachable_cascades, referencing_index,
+};
 pub use lookup::Catalog;
 pub use memory::{CatalogError, InMemoryCatalog};

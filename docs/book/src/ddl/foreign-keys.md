@@ -2,8 +2,6 @@
 
 A foreign key says that some columns of one table hold a key of another table, or of the same table. A document's `owner` holds a user's `id`; a folder's `parent` holds another folder's `id`. Declaring it lets Interlaken check that every reference leads somewhere.
 
-> **Cascades aren't built yet.** `on_delete` actions other than `NoAction` aren't carried out: a delete that `Cascade` or `SetNull` should handle fails as `NoAction` would, and its message says so. That is phase 3 of [ADR-0035](../reference/design-records.md).
-
 ## Creating a foreign key
 
 ```rust
@@ -106,6 +104,20 @@ foreign key violation: foreign key folders_parent_fk: rows of folders still refe
 Checks aren't deferred to commit. Two tables that refer to each other need one side to start NULL, filled in by a later statement.
 
 The checks run as each batch of rows is written, using the index described above to find referring rows. A key that fails is rechecked when the statement ends, so in the usual case nothing is held in memory. Keys waiting for a recheck count against the query's memory limit (see [Memory](../operations/memory.md)). `EXPLAIN` lists the foreign keys a write checks: `checking foreign keys: folders_owner_fk, folders_parent_fk`.
+
+### Cascades
+
+With `on_delete` set to `Cascade`, deleting a row also deletes the rows that refer to it. With `SetNull`, it sets their referencing columns to NULL. Cascades are transitive: deleting a user can delete their folders, then those folders' subfolders through a self-referencing foreign key, then set comments on any of them to NULL. They run when the statement's own rows are written, before the `NoAction` checks, so a cascade may delete rows that would otherwise violate one. Each row is changed at most once, so cycles end, and a deep tree doesn't nest one statement per level.
+
+```text
+ModifyTable docs checking foreign keys: comments_doc_fk, docs_owner_fk, docs_parent_fk cascading to: comments_doc_fk (set-null), docs_parent_fk (cascade)
+```
+
+A cascade is an ordinary delete or update of the referencing table, secured with the same principal's policies, as if the principal had written it:
+
+- **It changes every referring row or fails.** If the principal's policies stop it deleting or updating one of the rows that refer to the removed key, the statement fails with `42501`, naming the referencing table, and nothing is changed. A cascade never quietly leaves a row behind, and never lets a principal change a row their policies forbid.
+- **It maintains hierarchies.** A cascade into a membership edges table deletes the edges, and the closure loses the pairs they made, as for any edge delete (see [Entities and memberships](entities.md)).
+- **It checks its own foreign keys**, and sets off its own cascades.
 
 ### Concurrency
 

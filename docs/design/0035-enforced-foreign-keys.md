@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 and 2, declarations and checks on writes, are built; cascades (phase 3) and the optimizer (phase 4) aren't.
+Accepted. Phases 1 to 3 are built: declarations, checks on writes and cascades. The optimizer (phase 4) isn't.
 
 ## Summary
 
@@ -215,7 +215,21 @@ These facts allow:
     - The oracle is the existing DML differential test run with a foreign key from `posts.author` to `users.id` (`statements_agree_with_interpreter_under_a_foreign_key` in `crates/exec/tests/dml_differential.rs`). Random inserts, updates and deletes, some with subqueries, joins and `RETURNING`, must give the same results, the same table contents and the same failures, with `23503` exactly when the interpreter raises it. One run had 4,800 statements, 413 of them violations. The model is the interpreter, not a separate integrity model, and the test runs through the executor's statement runner rather than `Session`.
     - `crates/engine/tests/foreign_keys.rs` covers every direction and key kind, statement atomicity, a 3,000-row self-referencing tree inserted children first and deleted in one statement, `MATCH FULL`, pending cascades and `EXPLAIN`.
     - The concurrency test races "insert a child" against "delete its parent" in both commit orders at all three isolation levels; the second committer always fails with `40001`. With dependency registration removed, the test fails.
-- [ ] **Phase 3: Cascades.** `Cascade` and `SetNull`: prepared cascade plans, the work list, write checks, closure maintenance through cascades, `42501` for denied cascaded rows. The oracle gains cascading foreign keys and an entity whose deletion cascades to its membership edges.
+- [x] **Phase 3: Cascades.** `Cascade` and `SetNull`: prepared cascade plans, the work list, write checks, closure maintenance through cascades, `42501` for denied cascaded rows. The oracle gains cascading foreign keys and an entity whose deletion cascades to its membership edges.
+  - *As implemented:*
+    - **Cascade statements.** `catalog::cascade_plan` builds each cascading foreign key's statement: a `delete` (or, for `SetNull`, an `update` setting the referencing columns to NULL) of the referencing table. Its input is an inner join of the removed keys, the array of records in `$1`, unnested, to the table. `catalog::reachable_cascades` finds every cascading foreign key a statement's deletes can reach. The engine resolves, secures, optimizes and plans each one in `prepare`, for the statement's principal, and passes them to the executor in `ExecContext::cascades`. `exec::cascade_plans` builds them without security, for embedders and tests.
+    - **Authorization by count.** Security lowering skips rows the principal may not delete, as for any delete (Postgres `USING`, here with `read` and `delete`). So before running a cascade the executor counts the referring rows with a probe that ignores policies, and fails with `42501` if the cascade changed fewer.
+    - **One coordinator per statement.** The foreign key checks moved from each DML operator into a `Constraints` shared through the `ExecContext`. Every DML operator registers when its stream is built. The last to finish runs the queued cascades, as a work list, then rechecks every kept `NoAction` key. So nested DML, cascades and their own cascades all share one statement end, and `NoAction` is checked after every cascade, as in SQL. A cascade's own DML operator queues further cascades rather than running them, so depth doesn't nest calls. Before each cascade the coordinator calls `next_statement`, so the cascade reads everything the statement has written so far; its own reads still hide its own writes.
+    - **Interpreter.** After each write, the reference interpreter computes the referenced keys the write removed, deletes or sets to NULL the rows referring to them, transitively, ignoring policies, then checks every foreign key, restoring the whole database if one fails.
+    - `EXPLAIN` adds `cascading to: NAME (action), ...` to a DML operator whose table cascading foreign keys refer to.
+  - *Testing:*
+    - The DML differential test also runs with the foreign key set to cascade, through `cascade_plans`, seeded with users so deletes cascade often: in seven runs, 49 to 73 of 600 cases cascaded, and executor and interpreter agreed throughout.
+    - `crates/engine/tests/foreign_keys.rs` covers:
+      - transitive cascades and `SetNull`, including a 2,000-deep self-referencing chain;
+      - a cascade into a `NoAction` violation, which changes nothing;
+      - composite keys;
+      - policies that forbid a cascaded delete (`42501`), which then succeed once the row is the principal's own. With the count check removed, this test fails;
+      - a cascade into a membership edges table, which keeps the closure exact.
 - [ ] **Phase 4: Optimizer.** Join elimination for ungoverned parents, and foreign-key cardinality estimates, with property tests that eliminated and original plans agree.
 
 ## Consequences

@@ -231,3 +231,161 @@ fn column(t: &TableDef, id: ColumnId) -> Result<&ColumnDef, String> {
 fn set(columns: &[ColumnId]) -> BTreeSet<ColumnId> {
     columns.iter().copied().collect()
 }
+
+/// The name of the `k`th key column of a cascade's key parameter.
+fn key_name(k: usize) -> Ident {
+    Ident::new(format!("fk_key_{k}"))
+}
+
+/// Return the statement that carries out `fk`'s action on delete, or
+/// `None` for `NoAction` (ADR-0035).
+///
+/// The statement deletes (`Cascade`) or sets to NULL (`SetNull`) the rows
+/// of `fk`'s referencing table whose referencing columns hold one of the
+/// removed keys. The keys are its one parameter, `$1`, an array of records
+/// with one field per referencing column, in `fk.columns` order. It is an
+/// ordinary unresolved statement: the engine resolves and secures it like
+/// any other, so the principal's policies decide which rows it may change.
+/// Also `None` if a table or column `fk` names is missing.
+#[must_use]
+pub fn cascade_plan(catalog: &dyn super::Catalog, fk: &ForeignKeyDef) -> Option<crate::rel::Plan> {
+    use crate::expr::{BinaryOp, Expr, NamedExpr};
+    use crate::names::{ColumnRef, TableRef, TargetColumn};
+    use crate::rel::{Assignment, DmlTarget, JoinKind, Plan, Rel};
+    use crate::types::{DataType, Field};
+    use crate::value::Value;
+
+    if fk.on_delete == ReferentialAction::NoAction {
+        return None;
+    }
+    let table = catalog.table_by_id(fk.table)?;
+    let referenced = catalog.table_by_id(fk.referenced)?;
+    let alias = Ident::new("c");
+    let mut fields = Vec::new();
+    let mut matches = Vec::new();
+    let mut assignments = Vec::new();
+    for (k, (&from, &to)) in fk.columns.iter().zip(&fk.referenced_columns).enumerate() {
+        let column = table.column_by_id(from)?;
+        let key_type = referenced.column_by_id(to)?.ty.data.clone();
+        fields.push(Field::new(key_name(k), key_type.clone().plain()));
+        matches.push(Expr::Binary {
+            op: BinaryOp::Eq,
+            left: Box::new(Expr::Column(ColumnRef::Named {
+                qualifier: Some(alias.clone()),
+                name: column.name.clone(),
+            })),
+            right: Box::new(Expr::Column(ColumnRef::Named {
+                qualifier: None,
+                name: key_name(k),
+            })),
+        });
+        assignments.push(Assignment {
+            column: TargetColumn::Named(column.name.clone()),
+            value: Expr::Cast {
+                expr: Box::new(Expr::Literal(Value::Null)),
+                to: column.ty.data.clone(),
+            },
+        });
+    }
+    let keys = Rel::Unnest {
+        input: Box::new(Rel::Values {
+            columns: vec![Ident::new("fk_keys")],
+            rows: vec![vec![Expr::Literal(Value::Int8(1))]],
+            binding: None,
+        }),
+        expr: Expr::Param {
+            index: 1,
+            ty: DataType::Array(Box::new(DataType::Record(fields).plain())).plain(),
+        },
+        columns: (0..fk.columns.len()).map(key_name).collect(),
+        binding: None,
+    };
+    let input = Box::new(Rel::Join {
+        kind: JoinKind::Inner,
+        left: Box::new(keys),
+        right: Box::new(Rel::Get {
+            table: TableRef::Id(fk.table),
+            alias: Some(alias.clone()),
+            binding: None,
+        }),
+        on: Expr::And(matches),
+    });
+    let target = DmlTarget {
+        table: TableRef::Id(fk.table),
+        alias: Some(alias),
+        binding: None,
+    };
+    let root = match fk.on_delete {
+        ReferentialAction::Cascade => Rel::Delete {
+            target,
+            input,
+            returning: Vec::<NamedExpr>::new(),
+            binding: None,
+        },
+        _ => Rel::Update {
+            target,
+            input,
+            assignments,
+            returning: Vec::new(),
+            binding: None,
+        },
+    };
+    Some(Plan::new(root))
+}
+
+/// Return every foreign key whose action on delete a statement with root
+/// `root` can set off, directly or through other cascades, by name.
+///
+/// Deletes of a table set off its incoming `Cascade` and `SetNull`
+/// foreign keys; a `Cascade` deletes rows of its referencing table, which
+/// sets off that table's in turn. `SetNull` writes only referencing
+/// columns, and updates of referenced columns are `NoAction`, so it sets
+/// off nothing further.
+#[must_use]
+pub fn reachable_cascades(
+    catalog: &dyn super::Catalog,
+    root: &crate::rel::Rel,
+) -> Vec<std::sync::Arc<ForeignKeyDef>> {
+    use crate::names::TableRef;
+    use crate::rel::Rel;
+
+    /// Collect the tables `rel` and its inputs delete from.
+    fn deletes(rel: &Rel, out: &mut Vec<TableId>) {
+        if let Rel::Delete {
+            target:
+                crate::rel::DmlTarget {
+                    table: TableRef::Id(t),
+                    ..
+                },
+            ..
+        } = rel
+        {
+            out.push(*t);
+        }
+        for input in rel.inputs() {
+            deletes(input, out);
+        }
+    }
+    let mut work = Vec::new();
+    deletes(root, &mut work);
+    let mut seen_tables = BTreeSet::new();
+    let mut found: Vec<std::sync::Arc<ForeignKeyDef>> = Vec::new();
+    while let Some(table) = work.pop() {
+        if !seen_tables.insert(table) {
+            continue;
+        }
+        for fk in catalog.foreign_keys_referencing(table) {
+            if fk.on_delete == ReferentialAction::NoAction
+                || found.iter().any(|f| f.name == fk.name)
+            {
+                continue;
+            }
+            if fk.on_delete == ReferentialAction::Cascade {
+                work.push(fk.table);
+            }
+            found.push(fk);
+        }
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}

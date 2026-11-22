@@ -59,6 +59,13 @@ pub struct ExecContext {
     /// When the statement times out, if it has a timeout: every operator
     /// fails with [`ExecError::QueryCanceled`] at its next batch after it.
     pub deadline: Option<Instant>,
+    /// The prepared cascade of each foreign key the statement's deletes
+    /// can set off (ADR-0035); without one, a cascade that has rows to
+    /// change fails.
+    pub cascades: Option<Arc<crate::references::CascadePlans>>,
+    /// The statement's foreign key checks, shared by its DML operators and
+    /// the cascades they set off.
+    pub(crate) constraints: Arc<crate::references::Constraints>,
 }
 
 impl ExecContext {
@@ -79,6 +86,17 @@ impl ExecContext {
             memory: QueryMemory::new(DEFAULT_QUERY_BUDGET, None),
             metrics: None,
             deadline: None,
+            cascades: None,
+            constraints: Arc::default(),
+        }
+    }
+
+    /// Return this context with `cascades` for the foreign keys its deletes can set off.
+    #[must_use]
+    pub fn with_cascades(self, cascades: Arc<crate::references::CascadePlans>) -> Self {
+        Self {
+            cascades: Some(cascades),
+            ..self
         }
     }
 

@@ -56,6 +56,8 @@ pub struct Transaction {
     query_budget: usize,
     /// The node-wide pool statements draw on, if any.
     pool: Option<Arc<MemoryPool>>,
+    /// The cascades statements' deletes can set off (ADR-0035).
+    cascades: Option<Arc<crate::references::CascadePlans>>,
 }
 
 impl Transaction {
@@ -69,6 +71,17 @@ impl Transaction {
             aborted: false,
             query_budget: DEFAULT_QUERY_BUDGET,
             pool: None,
+            cascades: None,
+        }
+    }
+
+    /// Run every statement with `cascades` for the foreign keys its deletes
+    /// can set off (see [`crate::cascade_plans`]).
+    #[must_use]
+    pub fn with_cascades(self, cascades: Arc<crate::references::CascadePlans>) -> Self {
+        Self {
+            cascades: Some(cascades),
+            ..self
         }
     }
 
@@ -110,8 +123,12 @@ impl Transaction {
     /// this transaction's catalog, settings and memory budget.
     #[must_use]
     pub fn context(&self, params: Vec<Datum>) -> ExecContext {
-        ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options)
-            .with_memory(QueryMemory::new(self.query_budget, self.pool.clone()))
+        let ctx = ExecContext::new(self.txn.clone(), self.catalog.clone(), params, self.options)
+            .with_memory(QueryMemory::new(self.query_budget, self.pool.clone()));
+        match &self.cascades {
+            Some(cascades) => ctx.with_cascades(cascades.clone()),
+            None => ctx,
+        }
     }
 
     /// Run one statement and return its result rows (or `RETURNING` rows).

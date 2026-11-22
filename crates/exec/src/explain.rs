@@ -540,7 +540,16 @@ fn maintains(dml: &crate::physical::Dml) -> String {
         format!(" maintaining closures: {}", plan.table_names().join(", "))
     });
     let references = dml.references.as_ref().map_or_else(String::new, |plan| {
-        format!(" checking foreign keys: {}", plan.names().join(", "))
+        let cascades = plan.cascades();
+        let cascading = if cascades.is_empty() {
+            String::new()
+        } else {
+            format!(" cascading to: {}", cascades.join(", "))
+        };
+        format!(
+            " checking foreign keys: {}{cascading}",
+            plan.names().join(", ")
+        )
     });
     closures + &references
 }
