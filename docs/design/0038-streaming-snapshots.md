@@ -1,11 +1,11 @@
 ---
 id: 0038
 title: Streaming Snapshots
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [storage, replication, network]
 feature-flag:
 created: 2026-11-23
-accepted:
+accepted: 2026-11-23
 implemented:
 spec-sections: []
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Accepted. Phase 1 is built: snapshots carry current data only.
 
 ## Summary
 
@@ -151,10 +151,20 @@ Raft still needs snapshots, for new and far-behind replicas. The log is still pu
 
 ## Implementation Phases
 
-- [ ] **Phase 1: Current data only.**
+- [x] **Phase 1: Current data only.**
   - Export version 2, with the newest version per key and no deleted keys.
   - Pin expiry and the GC watermark on install.
   - *Testing:* unit and storage tests; the cluster tests unchanged.
+  - *As implemented:*
+    - **The export** walks the view's `data` keyspace in order. Versions of a key sort together, newest first, so it keeps the first version at or below the last commit and skips the rest; a deletion marker drops the key. Each entry carries the key, its commit timestamp and the value. The GC watermark is no longer exported.
+    - **A trailer.** The encoding gains an end marker and the entry count after the entries. Without it, a snapshot cut short exactly at an entry boundary decoded as a valid, shorter snapshot, which an install would have accepted as the whole database. Version 1 had the same flaw at its own boundaries, missed because the old test only tried a few prefixes. The trailer also suits streaming, where the count is known only at the end.
+    - **Installing** decodes and checks the whole snapshot before changing anything. It then writes each version at its original timestamp, raises the GC watermark to at least the snapshot's last commit, and revokes every local pin older than it (`CommitClock::revoke_before`). Those transactions fail at their next operation with `25P04`, as expired ones do.
+  - *Testing:*
+    - an engine test exports several versions of a key, a deleted key and a live one, and the receiver holds exactly the newest live versions at their timestamps, with the watermark raised;
+    - every prefix of a snapshot is refused, with the receiver's data untouched;
+    - a transaction open on the receiver across an install fails with `25P04`;
+    - the clock revokes exactly the older pins;
+    - the replication tests and five simulation seeds pass unchanged.
 - [ ] **Phase 2: Snapshots on demand.**
   - The builder records a position.
   - `get_current_snapshot` captures a view.

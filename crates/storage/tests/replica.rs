@@ -178,7 +178,7 @@ async fn snapshots_carry_a_replica() {
         get(&other_storage, "k49").await.as_deref(),
         Some(&b"49"[..])
     );
-    // The old version is there too, for snapshots that predate the overwrite.
+    // Only current data arrived: a request from before the snapshot can't be validated.
     let mut proposer = other.proposer();
     let (_, outcomes) = proposer.propose(&[stale]);
     assert_eq!(outcomes[0].as_ref().unwrap_err().sqlstate(), "40001");
@@ -246,10 +246,44 @@ async fn damaged_snapshots_are_refused() {
         .export(Vec::new())
         .await
         .unwrap();
-    for len in [0, 7, 12, 20, snapshot.len() - 1] {
+    for len in 0..snapshot.len() {
         let error = replica.import(snapshot[..len].to_vec()).await.unwrap_err();
         assert_eq!(error.sqlstate(), "XX000", "prefix of {len}: {error}");
         assert!(!replica.import_pending().await.unwrap());
         assert_eq!(get(&storage, "k").await.as_deref(), Some(&b"v"[..]));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert a transaction whose snapshot predates an installed snapshot fails
+/// at its next operation, since the versions it read are gone.
+async fn installs_end_older_transactions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    for i in 0..3 {
+        let r = request(&storage, &captured, &format!("k{i}"), "v").await;
+        let (batch, _) = replica.proposer().propose(&[r]);
+        replica.apply(batch, Vec::new()).await.unwrap();
+    }
+    let snapshot = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(Vec::new())
+        .await
+        .unwrap();
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let (other_storage, other, _) = open(other_dir.path());
+    let old = other_storage
+        .begin(TxnOptions::default().read_only())
+        .await
+        .unwrap();
+    other.import(snapshot).await.unwrap();
+    let error = old
+        .get_many(vec![Bytes::from_static(b"k0")])
+        .await
+        .unwrap_err();
+    assert_eq!(error.sqlstate(), "25P04", "{error}");
+    assert_eq!(get(&other_storage, "k2").await.as_deref(), Some(&b"v"[..]));
 }

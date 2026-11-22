@@ -113,6 +113,26 @@ impl CommitClock {
             .map_or(visible, |&(oldest, _)| oldest.min(visible))
     }
 
+    /// Revoke every pin whose snapshot is older than `ts`: a replica that
+    /// installed a snapshot taken at `ts` no longer holds the versions they
+    /// read (ADR-0038). Their transactions fail at their next operation, as
+    /// expired ones do.
+    pub(crate) fn revoke_before(&self, ts: Timestamp) {
+        let mut pins = self.pins();
+        let older: Vec<(Timestamp, u64)> = pins
+            .by_snapshot
+            .keys()
+            .take_while(|(snapshot, _)| *snapshot < ts)
+            .copied()
+            .collect();
+        for key in older {
+            if let Some(state) = pins.by_snapshot.remove(&key) {
+                state.revoked.store(true, Ordering::Release);
+                self.expired.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     /// Return the number of open, unexpired pins and the oldest pinned snapshot.
     pub(crate) fn active(&self) -> (usize, Option<Timestamp>) {
         let pins = self.pins();
@@ -220,5 +240,19 @@ mod tests {
         assert_eq!(clock.active().0, 1);
         drop(old);
         assert_eq!(clock.active().0, 1);
+    }
+
+    #[test]
+    /// Assert revoking before a timestamp revokes exactly the older pins.
+    fn revoking_before_a_timestamp() {
+        let clock = Arc::new(CommitClock::new(Timestamp::from_raw(3)));
+        let old = clock.pin(LONG);
+        clock.publish(Timestamp::from_raw(9));
+        let new = clock.pin(LONG);
+        clock.revoke_before(Timestamp::from_raw(9));
+        assert!(old.is_expired());
+        assert!(!new.is_expired());
+        assert_eq!(clock.active(), (1, Some(Timestamp::from_raw(9))));
+        assert_eq!(clock.expired_count(), 1);
     }
 }

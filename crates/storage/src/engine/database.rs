@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 
 use super::meta::{
@@ -9,9 +10,9 @@ use super::meta::{
     LAST_COMMIT_TS_KEY, decode_format_version, decode_timestamp, encode_format_version,
     encode_timestamp,
 };
-use super::stored::encode_stored;
+use super::stored::{StoredValue, decode_stored, encode_stored};
 use crate::commit::LogEntry;
-use crate::encoding::versioned_key;
+use crate::encoding::{split_versioned_key, versioned_key};
 use crate::{Durability, Error, Result, Timestamp};
 
 /// Default cap on fjall's journals: fjall's own default, 512 MiB.
@@ -42,7 +43,9 @@ const SNAPSHOT_GENERATION_KEY: &[u8] = b"replica_snapshot_generation";
 /// The `meta` key present while a snapshot import is incomplete.
 const IMPORTING_KEY: &[u8] = b"replica_importing";
 /// The first bytes of an exported snapshot.
-const SNAPSHOT_MAGIC: &[u8] = b"ILSNAP1\0";
+const SNAPSHOT_MAGIC: &[u8] = b"ILSNAP2\0";
+/// The marker before an exported snapshot's entry count.
+const SNAPSHOT_END: &[u8] = b"ILSNEND\0";
 
 /// The fjall database with its `data`, `meta` and `raftlog` keyspaces.
 ///
@@ -424,27 +427,30 @@ impl Engine {
         self.db.snapshot()
     }
 
-    /// Encode `view`'s `data` keyspace, last commit timestamp, GC watermark
-    /// and the `meta` entries at `meta_keys` as one snapshot.
+    /// Encode the current data in `view` as one snapshot (ADR-0038): the
+    /// newest version of each key at or below the view's last commit, with
+    /// its commit timestamp, leaving out keys whose newest version is a
+    /// deletion, plus the last commit timestamp and the `meta` entries at
+    /// `meta_keys`.
     ///
-    /// Encoding, integers big-endian: `magic last_commit_ts:u64
-    /// gc_watermark:u64 meta_count:u32 (bytes bytes)* (bytes bytes)*`,
-    /// where `bytes := len:u32 byte*` and the trailing pairs are `data`'s.
+    /// Encoding (version 2), integers big-endian: `magic last_commit_ts:u64
+    /// meta_count:u32 (bytes bytes)* (bytes commit_ts:u64 bytes)* end
+    /// entry_count:u64`, where `bytes := len:u32 byte*`, the entries are
+    /// keys, commit timestamps and values in key order, and `end` is a fixed
+    /// marker. The trailer makes a snapshot cut short at an entry boundary
+    /// detectable.
     pub(crate) fn export(&self, view: &fjall::Snapshot, meta_keys: &[Vec<u8>]) -> Result<Vec<u8>> {
         use fjall::Readable as _;
         let meta = |key: &[u8]| -> Result<Option<Vec<u8>>> {
             Ok(view.get(&self.meta, key)?.map(|v| v.to_vec()))
         };
-        let timestamp = |key: &[u8]| -> Result<Timestamp> {
-            meta(key)?
-                .as_deref()
-                .map(|v| decode_timestamp(v, "snapshot timestamp"))
-                .transpose()?
-                .ok_or(Error::CorruptMeta("snapshot view lacks a timestamp"))
-        };
+        let last = meta(LAST_COMMIT_TS_KEY)?
+            .as_deref()
+            .map(|v| decode_timestamp(v, "snapshot timestamp"))
+            .transpose()?
+            .ok_or(Error::CorruptMeta("snapshot view lacks a timestamp"))?;
         let mut out = SNAPSHOT_MAGIC.to_vec();
-        out.extend_from_slice(&timestamp(LAST_COMMIT_TS_KEY)?.into_raw().to_be_bytes());
-        out.extend_from_slice(&timestamp(GC_WATERMARK_KEY)?.into_raw().to_be_bytes());
+        out.extend_from_slice(&last.into_raw().to_be_bytes());
         let present: Vec<(&Vec<u8>, Vec<u8>)> = meta_keys
             .iter()
             .filter_map(|key| meta(key).transpose().map(|v| v.map(|v| (key, v))))
@@ -466,20 +472,38 @@ impl Engine {
             put(&mut out, key);
             put(&mut out, value);
         }
+        // Versions of a key sort together, newest first: keep the first one
+        // at or below the snapshot, and skip the rest of the key's versions.
+        let mut decided: Option<Vec<u8>> = None;
+        let mut entries: u64 = 0;
         for item in view.iter(&self.data) {
-            let (key, value) = item.into_inner()?;
-            put(&mut out, &key);
-            put(&mut out, &value);
+            let (versioned, value) = item.into_inner()?;
+            let (key, ts) = split_versioned_key(&versioned)?;
+            if decided.as_deref() == Some(key) || ts > last {
+                continue;
+            }
+            decided = Some(key.to_vec());
+            if let StoredValue::Put(value) = decode_stored(Bytes::copy_from_slice(&value))? {
+                put(&mut out, key);
+                out.extend_from_slice(&ts.into_raw().to_be_bytes());
+                put(&mut out, &value);
+                entries += 1;
+            }
         }
+        out.extend_from_slice(SNAPSHOT_END);
+        out.extend_from_slice(&entries.to_be_bytes());
         Ok(out)
     }
 
-    /// Replace `data` with a snapshot's, and set its last commit timestamp,
-    /// its `meta` entries and a GC watermark no lower than either side's.
-    /// Return the snapshot's last commit timestamp.
+    /// Replace `data` with a snapshot's current data, writing each version
+    /// at its original commit timestamp, and set the snapshot's last commit
+    /// timestamp, its `meta` entries, and a GC watermark of at least its last
+    /// commit: no older versions exist here any more. Return the snapshot's
+    /// last commit timestamp.
     ///
-    /// A marker in `meta`, synced first and removed in the last batch, shows
-    /// an import a crash interrupted ([`Engine::import_pending`]).
+    /// The whole snapshot is decoded before anything changes. A marker in
+    /// `meta`, synced first and removed in the last batch, shows an import
+    /// a crash interrupted ([`Engine::import_pending`]).
     pub(crate) fn import(&self, snapshot: &[u8]) -> Result<Timestamp> {
         let mut reader = SnapshotReader(
             snapshot
@@ -487,37 +511,45 @@ impl Engine {
                 .ok_or_else(malformed_snapshot)?,
         );
         let last = Timestamp::from_raw(reader.u64()?);
-        let watermark = Timestamp::from_raw(reader.u64()?);
         let meta_count = reader.u32()?;
         let mut meta = Vec::with_capacity(meta_count);
         for _ in 0..meta_count {
             let key = reader.bytes()?.to_vec();
             meta.push((key, reader.bytes()?.to_vec()));
         }
-        let mut pairs = Vec::new();
-        while !reader.0.is_empty() {
+        let mut versions = Vec::new();
+        let trailer = SNAPSHOT_END.len() + 8;
+        loop {
+            if reader.0.len() == trailer && reader.0.starts_with(SNAPSHOT_END) {
+                reader.take(SNAPSHOT_END.len())?;
+                let count = usize::try_from(reader.u64()?).map_err(|_| malformed_snapshot())?;
+                if count != versions.len() {
+                    return Err(malformed_snapshot());
+                }
+                break;
+            }
             let key = reader.bytes()?;
-            pairs.push((key, reader.bytes()?));
+            let ts = Timestamp::from_raw(reader.u64()?);
+            if ts > last {
+                return Err(malformed_snapshot());
+            }
+            versions.push((versioned_key(key, ts), reader.bytes()?));
         }
         let mut marker = self.db.batch().durability(Some(PersistMode::SyncAll));
         marker.insert(&self.meta, IMPORTING_KEY, b"1");
         marker.commit()?;
         self.data.clear()?;
-        for chunk in pairs.chunks(IMPORT_BATCH) {
+        for chunk in versions.chunks(IMPORT_BATCH) {
             let mut batch = self.db.batch();
             for (key, value) in chunk {
-                batch.insert(&self.data, *key, *value);
+                batch.insert(&self.data, key.as_slice(), encode_stored(Some(value)));
             }
             batch.commit()?;
         }
-        let local = self.gc_watermark()?;
+        let watermark = self.gc_watermark()?.max(last);
         let mut batch = self.db.batch();
         batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
-        batch.insert(
-            &self.meta,
-            GC_WATERMARK_KEY,
-            encode_timestamp(local.max(watermark)),
-        );
+        batch.insert(&self.meta, GC_WATERMARK_KEY, encode_timestamp(watermark));
         for (key, value) in &meta {
             batch.insert(&self.meta, key.as_slice(), value.as_slice());
         }
@@ -920,5 +952,64 @@ mod tests {
             err,
             Error::CorruptMeta("gc_watermark is not 8 bytes")
         ));
+    }
+
+    #[test]
+    /// Assert a snapshot carries only current data: the newest version of
+    /// each key, at its commit timestamp, without deleted keys, and the
+    /// receiver's GC watermark rises to the snapshot's last commit.
+    fn snapshots_carry_current_data_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(dir.path()).unwrap();
+        let ts = Timestamp::from_raw;
+        /// A version to write: its timestamp, key and value, or `None` to delete.
+        type Version<'a> = (Timestamp, &'a [u8], Option<&'a [u8]>);
+        let writes: [Version<'_>; 5] = [
+            (ts(1), b"k", Some(b"old")),
+            (ts(2), b"k", Some(b"new")),
+            (ts(3), b"gone", Some(b"x")),
+            (ts(4), b"gone", None),
+            (ts(5), b"e", Some(b"y")),
+        ];
+        for (at, key, value) in writes {
+            engine
+                .apply_versions([(at, key, value)], Some(at), &[])
+                .unwrap();
+        }
+        engine
+            .set_meta(&[(b"raft_applied".to_vec(), b"5".to_vec())], false)
+            .unwrap();
+        let snapshot = engine
+            .export(&engine.view(), &[b"raft_applied".to_vec()])
+            .unwrap();
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = Engine::open(other_dir.path()).unwrap();
+        other
+            .apply_versions([(ts(1), &b"stale"[..], Some(&b"z"[..]))], Some(ts(1)), &[])
+            .unwrap();
+        assert_eq!(other.import(&snapshot).unwrap(), ts(5));
+        let versions: Vec<(Vec<u8>, u64, Vec<u8>)> = other
+            .data()
+            .iter()
+            .map(|item| {
+                let (key, value) = item.into_inner().unwrap();
+                let (user, at) = split_versioned_key(&key).unwrap();
+                (user.to_vec(), at.into_raw(), value.to_vec())
+            })
+            .collect();
+        assert_eq!(
+            versions,
+            vec![
+                (b"e".to_vec(), 5, encode_stored(Some(b"y"))),
+                (b"k".to_vec(), 2, encode_stored(Some(b"new"))),
+            ]
+        );
+        assert_eq!(other.last_commit_ts().unwrap(), ts(5));
+        assert_eq!(other.gc_watermark().unwrap(), ts(5));
+        assert_eq!(
+            other.get_meta(b"raft_applied").unwrap(),
+            Some(b"5".to_vec())
+        );
     }
 }

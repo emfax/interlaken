@@ -352,8 +352,9 @@ impl Replica {
 
     /// Replace this replica's data with `snapshot`'s, made by
     /// [`SnapshotView::export`] on another replica, and continue from its
-    /// last commit. Validation history restarts there, so transactions
-    /// whose snapshots are older fail with `40001`.
+    /// last commit. A snapshot holds only current data, so transactions
+    /// here whose snapshots are older fail at their next operation with
+    /// `25P04`, and validation history restarts at its last commit.
     ///
     /// Store the snapshot durably first ([`Replica::store_snapshot`]): an
     /// import a crash interrupts is redone from it on restart
@@ -376,6 +377,8 @@ impl Replica {
         validation.retention = retention;
         validation.next_id = next_id;
         drop(validation);
+        // Only current data arrived: older snapshots can't be served here.
+        self.state.clock.revoke_before(last);
         self.state.clock.publish(last);
         Ok(())
     }
@@ -428,9 +431,10 @@ impl std::fmt::Debug for SnapshotView {
 }
 
 impl SnapshotView {
-    /// Encode the captured data, last commit timestamp and GC watermark,
-    /// with the `meta` entries at `meta_keys`, as one snapshot for
-    /// [`Replica::import`].
+    /// Encode the captured current data, the newest version of each key
+    /// with its commit timestamp, and the last commit timestamp, with the
+    /// `meta` entries at `meta_keys`, as one snapshot for [`Replica::import`]
+    /// (ADR-0038).
     ///
     /// # Errors
     ///
