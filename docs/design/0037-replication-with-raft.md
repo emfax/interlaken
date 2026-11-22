@@ -1,12 +1,12 @@
 ---
 id: 0037
 title: Replication with Raft
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, replication, network, security]
 feature-flag:
 created: 2026-11-22
-accepted:
-implemented:
+accepted: 2026-11-22
+implemented: 2026-11-23
 spec-sections: ["mvp-fjall-storage-design.md#hooks-for-later-layers", "mvp-completion.md#beyond-the-mvp"]
 superseded-by:
 ---
@@ -15,7 +15,11 @@ superseded-by:
 
 ## Status
 
-Proposal. Phase 1, the commit log on one node, is built: it changes no behaviour, and readies the commit path for the rest. Phase 2, replication in process, is built: `interlaken-replication` replicates storage with openraft, tested in simulated clusters. Phase 3, reads, is built: fresh snapshots are linearizable, and local ones are available for read-only transactions. Phase 4 is built: snapshots, log compaction and membership changes. Phase 5 is built: `interlaken-net` carries replication over gRPC with mutual TLS, and `Engine::open_cluster` makes an engine a cluster member.
+Implemented. All six phases are built: a commit log on one node, replication in process with openraft, fresh and local reads, snapshots and membership changes, gRPC with mutual TLS and `Engine::open_cluster`, and the layers above. The phases' *As implemented* notes record where the result differs from this design, chiefly:
+- timestamps carried in log entries instead of computed from indexes;
+- logical snapshots held in memory instead of streamed checkpoints;
+- history retention as its own setting;
+- per-replica statistics, which wait on ADR-0036.
 
 ## Summary
 
@@ -148,7 +152,7 @@ The question was whether the network layer should be a `Service`-style abstracti
 - **Nodes authenticate each other with mutual TLS.** Certificates come from a cluster CA in the node configuration, and messages from unknown or unauthenticated peers are refused.
 - **Every node is trusted with all data.** It holds a full replica, and policies are enforced where sessions run (ADR-0015), so replication doesn't weaken them.
 - **Client authorization is unchanged.** A session on any node runs the same pipeline against the same replicated catalog and policies, and transactional authorization (ADR-0019) holds because policy rows are validated like any other read.
-- **Membership changes need `admin`**, and are logged.
+- **Membership changes need `admin`**, and are logged. (As built, the privilege is checked but nothing is logged: the engine has no audit log yet.)
 
 ### Engine API
 
@@ -422,10 +426,23 @@ These give ADR-0036's cost model and capacity planning their numbers:
     - through a follower: 240 from one client, 400 from 16, 3,200 from 64.
 
     Commits through a follower forward each request and wait for the follower to apply it. They scale poorly at 16 clients, which needs investigating before production use.
-- [ ] **Phase 6: Layers above.**
+- [x] **Phase 6: Layers above.**
   - provers watching replicated proposals (ADR-0030 phase 2);
   - per-replica statistics (ADR-0036);
   - the book's operations chapters on running a cluster.
+  - *As implemented:*
+    - **Provers.** `policy::watch_proposals(engine, prover, poll, stop)` runs a prover on its member's pending proposals whenever the member has applied commits it hasn't seen. It checks the visible timestamp every `poll`, so a quiet check costs nothing. Proposals submitted anywhere arrive by replication, and the results commit through the leader, so one prover node serves the cluster. Conflicts, a missing leader and unknown outcomes are retried at the next check, which is safe because a prover skips proposals it has already verified. It works on a single node too.
+    - **Statistics wait on ADR-0036,** which is still a proposal, so there are no statistics to keep per replica. ADR-0036 keeps them in a catalog table, which replication would share between replicas, while this ADR said each replica analyzes its own copy. Since every replica holds the same data, shared statistics would be valid everywhere; the cost is deciding which replica analyzes. ADR-0036 records the choice as an open question, for its phase 1.
+    - **The book** gains *Running a cluster* (operations): building with the `cluster` feature, certificates, bootstrapping and adding members, status, the errors a cluster adds, freshness, durability, settings, provers and limits. *Testing durability* covers the simulations and the process tests.
+  - *Testing:*
+    - **Layer 5, a cluster answers as one node does.** With the `cluster` feature and `INTERLAKEN_TEST_CLUSTER` set, the engine tests' `create` builds a three-member cluster and returns a follower, so every statement commits through the leader and reads through a read index. The whole engine suite passes this way: the security and membership oracles, the foreign-key and cascade tests, masks, streaming, closure maintenance and the policy tests. The three tests that restart a single-node database now always create one. The nightly job runs the suite in this mode.
+    - **Layer 6, the layers above on followers,** in `crates/engine/tests/cluster.rs`:
+      - a policy activated through one member governs queries on the others at once, their residual caches invalidated;
+      - a write authorized under policies that another member then replaces fails at commit with `40001`, as on one node;
+      - a prover on a follower proves a proposal submitted on another member, so a third can activate it in `proof-required` mode;
+      - a cluster bootstrapped from a single-node database keeps its data and its schema version on every member.
+
+      These passed 10 consecutive runs.
 
 ## Consequences
 

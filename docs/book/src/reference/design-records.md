@@ -22,7 +22,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0007 | Minimal catalog and row layer | implemented |
 | 0008 | Version garbage collection | implemented |
 | 0009 | Storage correctness testing strategy | implemented |
-| 0037 | Replication with Raft | proposal: phases 1 (the commit log on one node), 2 (replication in process), 3 (reads), 4 (snapshots and membership) and 5 (the production network) are built |
+| 0037 | Replication with Raft | implemented |
 
 ## IR and optimizer
 
@@ -47,7 +47,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0018 | PolicyFilter barrier and WriteCheck plan constructs | implemented |
 | 0019 | Transactional authorization and residual cache | implemented |
 | 0020 | Cedar policy provider and deployment gates | implemented |
-| 0030 | Policy change proposals and distributed verification | accepted: proposals and every gate are built; provers watching replicated proposals wait on replication |
+| 0030 | Policy change proposals and distributed verification | implemented |
 | 0032 | Authorization completeness: closure maintenance, entity loading, column masks and impact at scale | implemented |
 
 ## Executor

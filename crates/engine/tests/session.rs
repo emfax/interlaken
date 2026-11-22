@@ -17,7 +17,9 @@ use interlaken_ir::security::EntityUid;
 use interlaken_ir::{DataType, ScalarType};
 use interlaken_storage::{Isolation, Storage, TxnOptions};
 
-use support::session::{activate_rls, admin, create, options, replace_rows, session, table, ty};
+use support::session::{
+    activate_rls, admin, create, create_single, options, replace_rows, session, table, ty,
+};
 
 /// Return the SQLSTATE of a failed result.
 fn state<T: std::fmt::Debug>(result: Result<T, EngineError>) -> &'static str {
@@ -140,7 +142,7 @@ async fn every_column_type_survives_restart() {
         Datum::Float8(1.5),
     ]];
     {
-        let engine = create(dir.path()).await;
+        let engine = create_single(dir.path()).await;
         let mut root = session(&engine, admin());
         root.create_table(&table(
             "events",
@@ -203,7 +205,7 @@ async fn every_column_type_survives_restart() {
 async fn unique_indexes_can_treat_nones_as_equal() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let engine = create(dir.path()).await;
+        let engine = create_single(dir.path()).await;
         let mut root = session(&engine, admin());
         root.create_table(&table(
             "t",

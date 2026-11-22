@@ -22,7 +22,7 @@ pub use document::{ActivePolicies, PolicyDocument, PolicyLanguage, build_provide
 pub use proposals::{
     Proposal, ProposalState, activate, pending_proposals, proposal, submit_proposal,
 };
-pub use prover::{Prover, prove_pending};
+pub use prover::{Prover, prove_pending, watch_proposals};
 #[cfg(feature = "smt-prover")]
 pub use smt::SmtProver;
 pub use snapshot::entity_snapshot;

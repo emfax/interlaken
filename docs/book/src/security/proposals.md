@@ -75,7 +75,7 @@ Impact: passed=false  405 decisions compared; 6 newly allowed [User::"2" read Do
 
 It looks only at what the change touches: the actions and resource types of the policies that differ. Above a million decisions, it samples principals and rows, and says so in its result. A sampled analysis can miss changes.
 
-The prover gates need Cedar policies and a node built with the `smt-prover` feature and configured with the cvc5 solver. They prove their property for every possible request and entity, not just today's data, or record a counterexample.
+The prover gates need Cedar policies and a node built with the `smt-prover` feature and configured with the cvc5 solver. They prove their property for every possible request and entity, not just today's data, or record a counterexample. A prover node runs `policy::watch_proposals`, which proves pending proposals whenever the node applies new commits. On a cluster, proposals submitted on any member reach it by replication, so one prover node serves them all ([Running a cluster](../operations/clusters.md)).
 
 ## Activation rules
 

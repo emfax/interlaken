@@ -187,6 +187,7 @@ The estimator lives in the IR crate, beside the optimizer that uses it: `ir::est
 
 ## Open Questions
 
+- **Replicas** ([ADR-0037](0037-replication-with-raft.md)). On a cluster, `engine_statistics` would replicate like any catalog table, though ADR-0037 expected each replica to analyze its own copy. Every replica holds the same data, so shared statistics are valid everywhere, and only the leader, or one designated replica, need analyze. Per-replica statistics would need an unreplicated keyspace. Phase 1 should choose.
 - Should automatic analysis also run on open for tables never analyzed, or wait for the change threshold?
 - Is 30,000 rows the right sample size? Postgres uses 300 × the statistics target (30,000 at its default).
 - Should the change counters be exact per table, by counting distinct row keys, or count every row write, as proposed, which overcounts rows updated twice in one transaction?

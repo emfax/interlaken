@@ -29,8 +29,20 @@ pub fn options() -> EngineOptions {
     }
 }
 
-/// Create a database in `dir` administered by [`admin`].
+/// Create a database in `dir` administered by [`admin`]: on one node, or,
+/// with the `cluster` feature and `INTERLAKEN_TEST_CLUSTER` set, on a
+/// three-member cluster, returning a follower ([`super::cluster`]).
 pub async fn create(dir: &std::path::Path) -> Engine {
+    #[cfg(feature = "cluster")]
+    if std::env::var_os("INTERLAKEN_TEST_CLUSTER").is_some() {
+        return super::cluster::create(dir).await;
+    }
+    Engine::create(dir, options(), &admin()).await.unwrap()
+}
+
+/// Create a single-node database in `dir`, even in cluster mode: for tests
+/// that restart it with [`Engine::open`].
+pub async fn create_single(dir: &std::path::Path) -> Engine {
     Engine::create(dir, options(), &admin()).await.unwrap()
 }
 

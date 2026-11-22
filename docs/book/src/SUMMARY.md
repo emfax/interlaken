@@ -57,6 +57,7 @@
 - [Memory](operations/memory.md)
 - [Garbage collection and disk space](operations/gc.md)
 - [Metrics and observability](operations/metrics.md)
+- [Running a cluster](operations/clusters.md)
 - [Testing durability](operations/durability-testing.md)
 
 # Reference

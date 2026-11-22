@@ -120,4 +120,6 @@ pub async fn setup(dir: &std::path::Path, mode: VerificationMode) -> FjallStorag
     storage
 }
 
+#[cfg(feature = "cluster")]
+pub mod cluster;
 pub mod session;

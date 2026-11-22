@@ -1,12 +1,12 @@
 ---
 id: 0030
 title: Policy Change Proposals and Distributed Verification
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [security, policies, cedar]
 feature-flag: smt-prover
 created: 2026-11-19
 accepted: 2026-11-19
-implemented:
+implemented: 2026-11-23
 spec-sections: ["ir-design.md#policy-deployment-and-analysis"]
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted
+Implemented
 
 ## Summary
 
@@ -88,7 +88,8 @@ A prover implements `Prover::prove(current, proposal)` and records its results w
     - **Activation:** `activate` enforces the rules above and supersedes the other pending proposals.
     - **Provers:** they implement `Prover` and record results with `prove_pending`. The cvc5-backed `SmtProver` builds only with the `smt-prover` feature.
     - *Testing:* `policy_proposals.rs` covers activation in both modes, superseding and waiting for a prover. `smt_prover.rs` covers proofs and counterexamples, and that RLS policies can't be proved; it skips if cvc5 is absent.
-- [ ] **Phase 2: Provers subscribing to replicated proposal tables** - with Raft
+- [x] **Phase 2: Provers subscribing to replicated proposal tables** - with Raft
+  - *As implemented:* `watch_proposals` runs a prover whenever its node applies commits it hasn't seen, checking the visible timestamp at an interval rather than subscribing to row changes. Proposals submitted on any member reach it by replication, and its results commit through the leader ([ADR-0037](0037-replication-with-raft.md) phase 6). A test proves on a follower a proposal submitted on another member, and a third member activates it in `proof-required` mode.
 
 ## Consequences
 
@@ -109,7 +110,7 @@ A prover implements `Prover::prove(current, proposal)` and records its results w
 
 ## Future Work
 
-- Prover nodes that subscribe to proposal changes once replication exists.
+- ~~Prover nodes that subscribe to proposal changes once replication exists.~~ Done: `watch_proposals` (ADR-0037 phase 6).
 - ~~Sampling and incremental impact analysis for large datasets.~~ Done in F2: [ADR-0032](0032-authorization-completeness.md).
 - Checking impact under several representative contexts, such as different times and tenants.
 

@@ -12,7 +12,7 @@ use interlaken_ir::catalog::{Catalog, ForeignKeyDef};
 use interlaken_ir::security::EntityUid;
 use interlaken_storage::{Isolation, Storage, TxnOptions};
 
-use support::session::{admin, create, options, session, table};
+use support::session::{admin, create, create_single, options, session, table};
 
 /// Return the SQLSTATE and message of a failed result.
 fn failure<T: std::fmt::Debug>(result: Result<T, EngineError>) -> (&'static str, String) {
@@ -97,7 +97,7 @@ async fn schema(engine: &Engine) -> Session {
 async fn declarations_are_recorded() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let engine = create(dir.path()).await;
+        let engine = create_single(dir.path()).await;
         let mut root = schema(&engine).await;
         root.create_foreign_key(
             &ForeignKeySpec::new("docs_owner_fk", "docs", ["owner"], "users", ["id"])
