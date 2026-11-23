@@ -80,6 +80,8 @@ pub struct ReplicaNode<T: Transport> {
     raft: Raft,
     /// The replica's storage, which commits through Raft.
     storage: FjallStorage,
+    /// Storage's side of the replica.
+    replica: Replica,
     /// The commit path.
     commit: Arc<RaftCommit<T>>,
     /// How long a membership change may wait for a leader.
@@ -228,11 +230,12 @@ impl<T: Transport> ReplicaNode<T> {
         )
         .await
         .map_err(|e| Error::ReplicationUnavailable(e.to_string()))?;
-        commit.start(raft.clone(), replica, applied, transport);
+        commit.start(raft.clone(), replica.clone(), applied, transport);
         Ok(Self {
             id: config.id,
             raft,
             storage,
+            replica,
             commit,
             timeout: config.commit.timeout,
             retry: config.commit.retry,
@@ -445,6 +448,20 @@ impl<T: Transport> ReplicaNode<T> {
             .await
     }
 
+    /// Return the bytes of snapshot data this replica stores: none, except
+    /// while it installs a snapshot it received (ADR-0038).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn stored_snapshot_bytes(&self) -> Result<usize> {
+        Ok(self
+            .replica
+            .stored_snapshot()
+            .await?
+            .map_or(0, |blob| blob.len()))
+    }
+
     /// Return this replica's view of the cluster.
     #[must_use]
     pub fn status(&self) -> ClusterStatus {
@@ -537,7 +554,7 @@ impl<T: Transport> Handler for NodeHandler<T> {
                 Request::Snapshot { vote, meta, data } => {
                     let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
                         meta,
-                        snapshot: std::io::Cursor::new(data),
+                        snapshot: crate::state_machine::SnapshotData::Received(data),
                     };
                     match raft.install_full_snapshot(vote, snapshot).await {
                         Ok(response) => Response::Snapshot(response),

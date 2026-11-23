@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phase 1 is built: snapshots carry current data only.
+Accepted. Phases 1 and 2 are built: snapshots carry current data only, and are made on demand.
 
 ## Summary
 
@@ -165,11 +165,21 @@ Raft still needs snapshots, for new and far-behind replicas. The log is still pu
     - a transaction open on the receiver across an install fails with `25P04`;
     - the clock revokes exactly the older pins;
     - the replication tests and five simulation seeds pass unchanged.
-- [ ] **Phase 2: Snapshots on demand.**
+- [x] **Phase 2: Snapshots on demand.**
   - The builder records a position.
   - `get_current_snapshot` captures a view.
   - The `replica_snapshot` keyspace is removed.
   - *Testing:* openraft's suite; the writes-saved test.
+  - *As implemented:*
+    - **A snapshot's data is a handle,** `SnapshotData::View` or `SnapshotData::Received`. A view is exported only when the network sends it. openraft calls `get_current_snapshot` at every startup, as well as when sending, so exporting there would have copied the database on every restart.
+    - **Building** syncs the applied data and returns the position, with the view the builder captured. openraft keeps only the position and drops the view.
+    - **`get_current_snapshot`** captures a view and reads the applied log ID and membership from it (`SnapshotView::meta`). With nothing applied, there is no snapshot.
+    - **The `replica_snapshot` keyspace stays until phase 4.** A received snapshot is still stored before it is imported, so an interrupted import can be redone. The stored copy is now removed once the import completes, so it exists only during an install. Phase 4's atomic switch removes the need for it.
+    - **`ReplicaNode::stored_snapshot_bytes`** reports the snapshot data a replica holds, which is none outside an install.
+  - *Testing:*
+    - openraft's storage suite passes, with snapshots built on demand;
+    - three replicas pass six snapshot thresholds each, compacting their logs, while storing no snapshot data, and a new replica built from a snapshot keeps no copy afterwards;
+    - the membership, simulation (five seeds), network and LazyFS power-loss tests pass unchanged.
 - [ ] **Phase 3: Streaming.**
   - Chunked export.
   - `SnapshotChunk` in the `Transport`, the in-memory and turmoil transports, and the gRPC streaming method.

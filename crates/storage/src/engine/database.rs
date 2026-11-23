@@ -615,6 +615,23 @@ impl Engine {
             .transpose()
     }
 
+    /// Return the `meta` entry at `key` as `view` sees it.
+    pub(crate) fn view_meta(&self, view: &fjall::Snapshot, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        use fjall::Readable as _;
+        Ok(view.get(&self.meta, key)?.map(|v| v.to_vec()))
+    }
+
+    /// Remove the stored snapshot, if any.
+    pub(crate) fn clear_stored_snapshot(&self) -> Result<()> {
+        let mut batch = self.db.batch();
+        batch.remove(&self.meta, SNAPSHOT_GENERATION_KEY);
+        for item in self.replica_snapshot.iter() {
+            batch.remove(&self.replica_snapshot, item.key()?);
+        }
+        batch.commit()?;
+        Ok(())
+    }
+
     /// Return the stored snapshot, if any.
     pub(crate) fn stored_snapshot(&self) -> Result<Option<Vec<u8>>> {
         use fjall::Readable as _;

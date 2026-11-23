@@ -8,16 +8,20 @@
 //! path waits on so a transaction's node answers only once it has applied
 //! the commit itself.
 //!
-//! **Snapshots** are the replica's whole `data` keyspace with its applied
-//! log ID and membership, captured between applies and exported by storage
-//! ([`Replica::capture`]). Every built or received snapshot is stored
-//! durably, with its Raft metadata, before anything relies on it: the
-//! leader sends the stored one to replicas too far behind its log, and a
-//! replica installing one redoes the import from it if a crash interrupts.
-//! A snapshot travels and is held in memory whole; streaming it is future
-//! work.
-
-use std::io::Cursor;
+//! **Snapshots are made on demand** (ADR-0038). A replica's data is its
+//! durable, current state, so any consistent view of it, with the applied
+//! log ID and membership read from the same view, is a snapshot covering
+//! everything applied:
+//!
+//! - building one, when openraft compacts the log, syncs the applied data
+//!   and records its position; nothing is copied or stored;
+//! - the current snapshot is a fresh view ([`Replica::capture`]), exported
+//!   with only current data when it is sent ([`SnapshotData`]);
+//! - a received snapshot is stored durably before it is imported, so a
+//!   replica redoes an import a crash interrupts, and the stored copy is
+//!   removed once the import completes.
+//!
+//! A snapshot still travels whole; streaming it is ADR-0038 phase 3.
 
 use futures::StreamExt;
 use interlaken_storage::replica::{Replica, SnapshotView};
@@ -33,8 +37,39 @@ const APPLIED: &[u8] = b"raft_applied";
 /// The `meta` key of the last applied membership.
 const MEMBERSHIP: &[u8] = b"raft_membership";
 
-/// Snapshot data: storage's export, whole.
-pub type SnapshotData = Cursor<Vec<u8>>;
+/// A snapshot's data: a view of this replica, exported only when it is
+/// sent, or the export received from another replica.
+pub enum SnapshotData {
+    /// A consistent view of this replica's data.
+    View(SnapshotView),
+    /// An export received from another replica.
+    Received(Vec<u8>),
+}
+
+impl std::fmt::Debug for SnapshotData {
+    /// Render the variant, and a received export's size.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::View(_) => f.write_str("SnapshotData::View"),
+            Self::Received(bytes) => write!(f, "SnapshotData::Received({} bytes)", bytes.len()),
+        }
+    }
+}
+
+impl SnapshotData {
+    /// Return the export: the view's current data, exported now, or the
+    /// export received.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the export fails.
+    pub async fn into_bytes(self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::View(view) => view.export(snapshot_meta_keys()).await.map_err(io),
+            Self::Received(bytes) => Ok(bytes),
+        }
+    }
+}
 
 /// A snapshot with its Raft metadata.
 type Snapshot = SnapshotOf<TypeConfig, SnapshotData>;
@@ -113,19 +148,21 @@ impl StateMachine {
                 })?;
             let (_, data) = unwrap(&blob)?;
             self.replica.import(data).await.map_err(io)?;
+            self.replica.clear_stored_snapshot().await.map_err(io)?;
         }
         self.recovered = true;
         Ok(())
     }
 
-    /// Install `data` as this replica's state, as `meta` describes, after
-    /// storing it durably.
+    /// Install `data` as this replica's state, as `meta` describes: store
+    /// it durably, import it, then remove the stored copy.
     async fn install(&mut self, meta: &SnapshotMeta, data: Vec<u8>) -> std::io::Result<()> {
         self.replica
             .store_snapshot(wrap(meta, &data)?)
             .await
             .map_err(io)?;
         self.replica.import(data).await.map_err(io)?;
+        self.replica.clear_stored_snapshot().await.map_err(io)?;
         self.last_applied = meta.last_log_id;
         self.membership = meta.last_membership.clone();
         self.applied
@@ -134,10 +171,10 @@ impl StateMachine {
     }
 }
 
-/// Builds a snapshot from a view captured between applies.
+/// Records a snapshot's position, with a view captured between applies.
 #[derive(Debug)]
 pub struct SnapshotBuilder {
-    /// The replica's storage, where the snapshot is stored.
+    /// The replica's storage, synced when the snapshot is built.
     replica: Replica,
     /// The captured view, until the snapshot is built.
     view: Option<SnapshotView>,
@@ -148,20 +185,17 @@ pub struct SnapshotBuilder {
 impl RaftSnapshotBuilder<TypeConfig> for SnapshotBuilder {
     type SnapshotData = SnapshotData;
 
-    /// Export the captured view, store it with its metadata and return it.
+    /// Sync the applied data, so the log can be purged up to the snapshot,
+    /// and return the snapshot's position with its view. Nothing is copied.
     async fn build_snapshot(&mut self) -> Result<Snapshot, std::io::Error> {
         let view = self
             .view
             .take()
             .ok_or_else(|| std::io::Error::other("a snapshot builder builds once"))?;
-        let data = view.export(snapshot_meta_keys()).await.map_err(io)?;
-        self.replica
-            .store_snapshot(wrap(&self.meta, &data)?)
-            .await
-            .map_err(io)?;
+        self.replica.persist().await.map_err(io)?;
         Ok(Snapshot {
             meta: self.meta.clone(),
-            snapshot: Cursor::new(data),
+            snapshot: SnapshotData::View(view),
         })
     }
 }
@@ -240,18 +274,33 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         meta: &SnapshotMeta,
         snapshot: SnapshotData,
     ) -> Result<(), std::io::Error> {
-        self.install(meta, snapshot.into_inner()).await
+        let data = snapshot.into_bytes().await?;
+        self.install(meta, data).await
     }
 
-    /// Return the stored snapshot, if any.
+    /// Return a snapshot of the data as it is now: a fresh view, with the
+    /// applied log ID and membership read from that same view, so the
+    /// snapshot claims exactly what it holds. `None` before anything is
+    /// applied.
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot>, std::io::Error> {
-        let Some(blob) = self.replica.stored_snapshot().await.map_err(io)? else {
-            return Ok(None);
+        let view = self.replica.capture().await.map_err(io)?;
+        let applied: Option<LogId> = match view.meta(APPLIED.to_vec()).await.map_err(io)? {
+            Some(bytes) => decode(&bytes)?,
+            None => None,
         };
-        let (meta, data) = unwrap(&blob)?;
+        if applied.is_none() {
+            return Ok(None);
+        }
+        let membership = match view.meta(MEMBERSHIP.to_vec()).await.map_err(io)? {
+            Some(bytes) => decode(&bytes)?,
+            None => StoredMembership::default(),
+        };
         Ok(Some(Snapshot {
-            meta,
-            snapshot: Cursor::new(data),
+            meta: SnapshotMeta {
+                last_log_id: applied,
+                last_membership: membership,
+            },
+            snapshot: SnapshotData::View(view),
         }))
     }
 }

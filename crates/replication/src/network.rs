@@ -133,10 +133,16 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
         cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+        // Exported now, from the view: only current data, as of the snapshot.
+        let data = snapshot
+            .snapshot
+            .into_bytes()
+            .await
+            .map_err(|e| StreamingError::Network(NetworkError::from_string(e)))?;
         let request = Request::Snapshot {
             vote,
             meta: snapshot.meta,
-            data: snapshot.snapshot.into_inner(),
+            data,
         };
         let response = tokio::select! {
             response = self.transport.send(self.target, request) => response,

@@ -405,6 +405,15 @@ impl Replica {
             .await?
     }
 
+    /// Remove the stored snapshot, once an import from it has completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn clear_stored_snapshot(&self) -> Result<()> {
+        self.state.pool.run(Engine::clear_stored_snapshot).await?
+    }
+
     /// Return the stored snapshot, if one was stored completely.
     ///
     /// # Errors
@@ -431,6 +440,19 @@ impl std::fmt::Debug for SnapshotView {
 }
 
 impl SnapshotView {
+    /// Return the `meta` entry at `key` as the view sees it, consistent
+    /// with the data it would export.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn meta(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let view = self.view.clone();
+        self.pool
+            .run(move |engine: &Engine| engine.view_meta(&view, &key))
+            .await?
+    }
+
     /// Encode the captured current data, the newest version of each key
     /// with its commit timestamp, and the last commit timestamp, with the
     /// `meta` entries at `meta_keys`, as one snapshot for [`Replica::import`]
