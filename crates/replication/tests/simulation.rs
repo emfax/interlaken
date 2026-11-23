@@ -427,6 +427,8 @@ fn config(id: u64) -> ReplicaConfig {
     // Frequent snapshots, so lagging and new replicas catch up from them.
     config.snapshot_every = 30;
     config.logs_kept = 10;
+    // Small chunks, so every snapshot transfer spans many under the faults.
+    config.snapshot_chunk_bytes = 256;
     config
 }
 

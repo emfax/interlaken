@@ -104,6 +104,7 @@ Under `Durability::Sync`, each member syncs its log and its Raft vote before ack
 | `commit.lease_reads` | on | serve read indexes from the leader's lease; assumes clock drift is small against the election timeout |
 | `history_retention` | 60 s | how long applied commits stay available for validating transactions begun on other members; older ones fail with `40001` |
 | `snapshot_every`, `logs_kept` | 10,000, 1,000 | compact the log every so many entries, keeping the most recent; snapshots themselves are made only when a member needs one, from current data |
+| `snapshot_chunk_bytes` | 1 MiB | the size of the chunks snapshots are sent in; memory used for a snapshot stays near this, whatever the database's size |
 
 `ClusterConfig` itself sets the request deadline between members (5 s), the concurrent requests served per connection (256), and `peers`: addresses that take precedence over the ones membership records, for members reached through a proxy or another network.
 
@@ -113,7 +114,7 @@ In `proof-required` mode ([Changing policies](../security/proposals.md)), a memb
 
 ## Limits
 
-- Snapshots are made when a member needs one and hold only current data, but are still sent whole, in memory; very large databases need streaming snapshots, which aren't built yet.
+- A member installing a snapshot writes its data twice: once as received, then into place.
 - Commits made through a follower are slower than through the leader under moderate concurrency.
 - Membership changes aren't written to an audit log.
 

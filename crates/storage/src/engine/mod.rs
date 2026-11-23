@@ -4,8 +4,10 @@ mod database;
 pub(crate) mod gc;
 mod meta;
 pub(crate) mod mvcc;
+pub(crate) mod snapshot;
 mod stored;
 
 pub use database::Engine;
 pub(crate) use database::{DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES};
 pub use meta::FORMAT_VERSION;
+pub use snapshot::ExportCursor;

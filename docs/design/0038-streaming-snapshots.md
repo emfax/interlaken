@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 and 2 are built: snapshots carry current data only, and are made on demand.
+Accepted. Phases 1 to 3 are built: snapshots carry current data only, are made on demand, and stream in chunks in bounded memory.
 
 ## Summary
 
@@ -180,10 +180,26 @@ Raft still needs snapshots, for new and far-behind replicas. The log is still pu
     - openraft's storage suite passes, with snapshots built on demand;
     - three replicas pass six snapshot thresholds each, compacting their logs, while storing no snapshot data, and a new replica built from a snapshot keeps no copy afterwards;
     - the membership, simulation (five seeds), network and LazyFS power-loss tests pass unchanged.
-- [ ] **Phase 3: Streaming.**
+- [x] **Phase 3: Streaming.**
   - Chunked export.
   - `SnapshotChunk` in the `Transport`, the in-memory and turmoil transports, and the gRPC streaming method.
   - *Testing:* the memory bound; interrupted transfers; the simulation with large snapshots.
+  - *As implemented:*
+    - **Chunked export.** `SnapshotView::chunks` exports a chunk at a time, each a separate call on a storage thread. Each call resumes the view's scan after the last key it finished, so no iterator is held between calls. A chunk ends after the key that takes it past `ReplicaConfig::snapshot_chunk_bytes` (1 MiB by default). The chunks concatenate to exactly the whole export, and a streaming decoder accepts them split anywhere.
+    - **Chunks over the existing `Transport`,** not a gRPC streaming method. `Request::SnapshotChunk { id, seq, bytes, end }` travels like any other request, and the last chunk carries the vote and Raft metadata. The sender waits for each acknowledgement before sending the next chunk: stop-and-wait, which costs one round trip per megabyte. That works identically on every transport and needed no new gRPC method. A streaming method remains possible if transfers over slow links need the throughput. The gRPC message limit drops from 1 GiB to 64 MiB, since a chunk always holds at least one whole key and value.
+    - **Receiving.** Each node keeps the transfer in progress. A first chunk starts a new one, replacing any other, and a chunk out of order is refused, so the sender's attempt fails and openraft retries from the start. Chunks are stored as they arrive (`SnapshotSink`) under a new generation, which becomes current when the last chunk arrives. Installing then imports from storage in two passes, checking the whole snapshot, then writing it. Until phase 4, the receiver therefore writes the data twice.
+    - **openraft's `purge_batch_size` is now 1.** Its default of 256 meant a short log was never purged, so a new replica caught up through AppendEntries carrying every entry, in requests of up to 300 entries. Purging is cheap now that snapshots copy nothing.
+    - **What the memory test found.** The first measurements showed heap growth of 1.3 to 2.5 times the snapshot. Four causes, each fixed:
+      - the import committed its write batch every 4,096 *entries*, which with 16 KiB values was the whole snapshot; batches are now bounded at 1 MiB;
+      - fjall doesn't bound memtables waiting to be flushed, so writing chunks faster than fjall flushes queued up to the whole snapshot in memory. Bulk snapshot writes now wait, for up to two seconds at a time, while memtables hold over 16 MiB;
+      - the import read the stored chunks through a fjall view held open while it wrote `data`, which left memory proportional to the snapshot held after the import. Stored chunks are now read by key, since a committed generation never changes;
+      - removing the stored chunks iterated the keyspace, and iterating its large values did the same. Chunks are now removed by key, probing from index 0.
+  - *Testing:*
+    - **The memory bound** (`crates/replication/tests/snapshot_memory.rs`, with the counting allocator): a replica holding 256 MiB of live data compacts its log, and a new replica catches up from a snapshot. The process's heap grew by 62–65 MiB over five runs, and by 63 MiB with 512 MiB of data: fjall's block caches, memtables and table metadata, not the snapshot. The test requires under half the snapshot's size.
+    - **An interrupted transfer:** the reply to one chunk is lost, the transfer is retried from the start, and the new replica holds every key.
+    - chunks concatenate to the whole export; the decoder accepts every split and refuses every truncation, an extra byte and a wrong count;
+    - the simulation sends snapshots in 256-byte chunks, so every install under its faults spans many; 10 seeds of all five simulations pass;
+    - the membership, cluster, read, network and LazyFS power-loss tests pass unchanged.
 - [ ] **Phase 4: Install by generation.**
   - Data keyspace generations and the swappable handle.
   - Receiving into a new generation and the atomic switch.

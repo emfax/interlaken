@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::commit::{CommitClock, CommitHistory, CommitRequest, LogEntry, LogWrite};
-use crate::engine::Engine;
+use crate::engine::{Engine, ExportCursor};
 use crate::pool::StoragePool;
 use crate::{Error, Result, Timestamp};
 
@@ -370,6 +370,25 @@ impl Replica {
             .pool
             .run(move |engine: &Engine| engine.import(&snapshot))
             .await??;
+        self.imported(last);
+        Ok(())
+    }
+
+    /// Import the stored snapshot ([`Replica::import`]), reading it chunk by
+    /// chunk, so a snapshot of any size is imported in bounded memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptMeta`] if no snapshot is stored or it is
+    /// malformed, or a storage error.
+    pub async fn import_stored(&self) -> Result<()> {
+        let last = self.state.pool.run(Engine::import_stored).await??;
+        self.imported(last);
+        Ok(())
+    }
+
+    /// Continue from an imported snapshot whose last commit is `last`.
+    fn imported(&self, last: Timestamp) {
         let mut validation = lock(&self.state.validation);
         let retention = validation.retention;
         let next_id = validation.next_id;
@@ -380,7 +399,21 @@ impl Replica {
         // Only current data arrived: older snapshots can't be served here.
         self.state.clock.revoke_before(last);
         self.state.clock.publish(last);
-        Ok(())
+    }
+
+    /// Begin storing a snapshot received in chunks; the stored snapshot
+    /// stays as it was until [`SnapshotSink::finish`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn begin_receiving(&self) -> Result<SnapshotSink> {
+        let generation = self.state.pool.run(Engine::begin_stored_snapshot).await??;
+        Ok(SnapshotSink {
+            pool: Arc::clone(&self.state.pool),
+            generation,
+            next: 0,
+        })
     }
 
     /// Return `true` if a crash interrupted a snapshot import, which must be
@@ -424,6 +457,54 @@ impl Replica {
     }
 }
 
+/// Stores a snapshot as its chunks arrive ([`Replica::begin_receiving`]).
+pub struct SnapshotSink {
+    /// Runs the writes off the async threads.
+    pool: Arc<StoragePool>,
+    /// The generation the snapshot is stored under.
+    generation: u64,
+    /// The next chunk's index.
+    next: u32,
+}
+
+impl std::fmt::Debug for SnapshotSink {
+    /// Render the generation and chunks stored so far.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotSink")
+            .field("generation", &self.generation)
+            .field("chunks", &self.next)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotSink {
+    /// Store the next chunk, unsynced.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn push(&mut self, chunk: Vec<u8>) -> Result<()> {
+        let (generation, index) = (self.generation, self.next);
+        self.pool
+            .run(move |engine: &Engine| engine.store_snapshot_chunk(generation, index, &chunk))
+            .await??;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Make the stored chunks the stored snapshot, durably.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn finish(self) -> Result<()> {
+        let generation = self.generation;
+        self.pool
+            .run(move |engine: &Engine| engine.commit_stored_snapshot(generation))
+            .await?
+    }
+}
+
 /// A replica's state at one moment, from [`Replica::capture`].
 pub struct SnapshotView {
     /// Runs the export off the async threads.
@@ -439,7 +520,65 @@ impl std::fmt::Debug for SnapshotView {
     }
 }
 
+/// A view's current data, exported a chunk at a time ([`SnapshotView::chunks`]).
+pub struct SnapshotChunks {
+    /// The view.
+    view: SnapshotView,
+    /// The `meta` entries the snapshot carries.
+    meta_keys: Vec<Vec<u8>>,
+    /// Roughly how many bytes each chunk holds.
+    budget: usize,
+    /// Where the next chunk resumes, or `None` once the last was returned.
+    cursor: Option<ExportCursor>,
+}
+
+impl std::fmt::Debug for SnapshotChunks {
+    /// Render the chunk size and whether chunks remain.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotChunks")
+            .field("budget", &self.budget)
+            .field("done", &self.cursor.is_none())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotChunks {
+    /// Return the next chunk, or `None` after the last.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn next(&mut self) -> Result<Option<Vec<u8>>> {
+        let Some(cursor) = self.cursor.take() else {
+            return Ok(None);
+        };
+        let view = self.view.view.clone();
+        let (meta_keys, budget) = (self.meta_keys.clone(), self.budget);
+        let (chunk, rest) = self
+            .view
+            .pool
+            .run(move |engine: &Engine| engine.export_chunk(&view, &meta_keys, cursor, budget))
+            .await??;
+        self.cursor = rest;
+        Ok(Some(chunk))
+    }
+}
+
 impl SnapshotView {
+    /// Return the view's current data as a sequence of chunks of about
+    /// `budget` bytes, each exported when asked for, with the `meta`
+    /// entries at `meta_keys` (ADR-0038). Their concatenation is what
+    /// [`SnapshotView::export`] returns.
+    #[must_use]
+    pub fn chunks(self, meta_keys: Vec<Vec<u8>>, budget: usize) -> SnapshotChunks {
+        SnapshotChunks {
+            view: self,
+            meta_keys,
+            budget,
+            cursor: Some(ExportCursor::default()),
+        }
+    }
+
     /// Return the `meta` entry at `key` as the view sees it, consistent
     /// with the data it would export.
     ///

@@ -1326,6 +1326,7 @@ dependencies = [
  "bytes",
  "futures",
  "interlaken-storage",
+ "interlaken-test-alloc",
  "openraft",
  "postcard",
  "serde",

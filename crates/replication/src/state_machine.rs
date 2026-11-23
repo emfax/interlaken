@@ -17,11 +17,12 @@
 //!   and records its position; nothing is copied or stored;
 //! - the current snapshot is a fresh view ([`Replica::capture`]), exported
 //!   with only current data when it is sent ([`SnapshotData`]);
-//! - a received snapshot is stored durably before it is imported, so a
-//!   replica redoes an import a crash interrupts, and the stored copy is
-//!   removed once the import completes.
+//! - a received snapshot is stored durably, chunk by chunk as it arrives,
+//!   before it is imported from storage, so a replica redoes an import a
+//!   crash interrupts; the stored copy is removed once the import completes.
 //!
-//! A snapshot still travels whole; streaming it is ADR-0038 phase 3.
+//! Snapshots travel in chunks of [`SNAPSHOT_CHUNK_BYTES`], so neither side
+//! holds a whole snapshot in memory.
 
 use futures::StreamExt;
 use interlaken_storage::replica::{Replica, SnapshotView};
@@ -37,36 +38,24 @@ const APPLIED: &[u8] = b"raft_applied";
 /// The `meta` key of the last applied membership.
 const MEMBERSHIP: &[u8] = b"raft_membership";
 
-/// A snapshot's data: a view of this replica, exported only when it is
-/// sent, or the export received from another replica.
+/// Roughly how many bytes each snapshot chunk holds.
+pub const SNAPSHOT_CHUNK_BYTES: usize = 1024 * 1024;
+
+/// A snapshot's data: a view of this replica, exported a chunk at a time
+/// when it is sent, or a snapshot received and stored here.
 pub enum SnapshotData {
     /// A consistent view of this replica's data.
     View(SnapshotView),
-    /// An export received from another replica.
-    Received(Vec<u8>),
+    /// The snapshot this replica received and stored.
+    Stored,
 }
 
 impl std::fmt::Debug for SnapshotData {
-    /// Render the variant, and a received export's size.
+    /// Render the variant.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::View(_) => f.write_str("SnapshotData::View"),
-            Self::Received(bytes) => write!(f, "SnapshotData::Received({} bytes)", bytes.len()),
-        }
-    }
-}
-
-impl SnapshotData {
-    /// Return the export: the view's current data, exported now, or the
-    /// export received.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error if the export fails.
-    pub async fn into_bytes(self) -> std::io::Result<Vec<u8>> {
-        match self {
-            Self::View(view) => view.export(snapshot_meta_keys()).await.map_err(io),
-            Self::Received(bytes) => Ok(bytes),
+            Self::Stored => f.write_str("SnapshotData::Stored"),
         }
     }
 }
@@ -76,31 +65,8 @@ type Snapshot = SnapshotOf<TypeConfig, SnapshotData>;
 /// A snapshot's Raft metadata.
 type SnapshotMeta = SnapshotMetaOf<TypeConfig>;
 
-/// Encode a snapshot for storing: its metadata's length, the metadata, then the data.
-fn wrap(meta: &SnapshotMeta, data: &[u8]) -> std::io::Result<Vec<u8>> {
-    let header = encode(meta)?;
-    let mut blob = Vec::with_capacity(4 + header.len() + data.len());
-    blob.extend_from_slice(
-        &u32::try_from(header.len())
-            .map_err(std::io::Error::other)?
-            .to_be_bytes(),
-    );
-    blob.extend_from_slice(&header);
-    blob.extend_from_slice(data);
-    Ok(blob)
-}
-
-/// Decode a stored snapshot into its metadata and data.
-fn unwrap(blob: &[u8]) -> std::io::Result<(SnapshotMeta, Vec<u8>)> {
-    let malformed = || std::io::Error::other("malformed stored snapshot");
-    let len = blob.get(..4).ok_or_else(malformed)?;
-    let len = u32::from_be_bytes(len.try_into().map_err(|_| malformed())?) as usize;
-    let header = blob.get(4..4 + len).ok_or_else(malformed)?;
-    Ok((decode(header)?, blob[4 + len..].to_vec()))
-}
-
-/// The meta entries a snapshot carries with the data.
-fn snapshot_meta_keys() -> Vec<Vec<u8>> {
+/// Return the `meta` keys a snapshot carries with the data.
+pub(crate) fn snapshot_meta_keys() -> Vec<Vec<u8>> {
     vec![APPLIED.to_vec(), MEMBERSHIP.to_vec()]
 }
 
@@ -138,30 +104,27 @@ impl StateMachine {
             return Ok(());
         }
         if self.replica.import_pending().await.map_err(io)? {
-            let blob = self
-                .replica
-                .stored_snapshot()
-                .await
-                .map_err(io)?
-                .ok_or_else(|| {
-                    std::io::Error::other("an import is pending but no snapshot is stored")
-                })?;
-            let (_, data) = unwrap(&blob)?;
-            self.replica.import(data).await.map_err(io)?;
+            self.replica.import_stored().await.map_err(io)?;
             self.replica.clear_stored_snapshot().await.map_err(io)?;
         }
         self.recovered = true;
         Ok(())
     }
 
-    /// Install `data` as this replica's state, as `meta` describes: store
-    /// it durably, import it, then remove the stored copy.
-    async fn install(&mut self, meta: &SnapshotMeta, data: Vec<u8>) -> std::io::Result<()> {
-        self.replica
-            .store_snapshot(wrap(meta, &data)?)
-            .await
-            .map_err(io)?;
-        self.replica.import(data).await.map_err(io)?;
+    /// Install `data` as this replica's state, as `meta` describes. A
+    /// snapshot received from the network is already stored; another
+    /// replica's view is stored here first, a chunk at a time. Then the
+    /// stored snapshot is imported, and removed.
+    async fn install(&mut self, meta: &SnapshotMeta, data: SnapshotData) -> std::io::Result<()> {
+        if let SnapshotData::View(view) = data {
+            let mut chunks = view.chunks(snapshot_meta_keys(), SNAPSHOT_CHUNK_BYTES);
+            let mut sink = self.replica.begin_receiving().await.map_err(io)?;
+            while let Some(chunk) = chunks.next().await.map_err(io)? {
+                sink.push(chunk).await.map_err(io)?;
+            }
+            sink.finish().await.map_err(io)?;
+        }
+        self.replica.import_stored().await.map_err(io)?;
         self.replica.clear_stored_snapshot().await.map_err(io)?;
         self.last_applied = meta.last_log_id;
         self.membership = meta.last_membership.clone();
@@ -274,8 +237,7 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         meta: &SnapshotMeta,
         snapshot: SnapshotData,
     ) -> Result<(), std::io::Error> {
-        let data = snapshot.into_bytes().await?;
-        self.install(meta, data).await
+        self.install(meta, snapshot).await
     }
 
     /// Return a snapshot of the data as it is now: a fresh view, with the

@@ -11,8 +11,8 @@ use openraft::raft::{
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 
-use crate::state_machine::SnapshotData;
-use crate::transport::{Request, Response, Transport, TransportError};
+use crate::state_machine::{SnapshotData, snapshot_meta_keys};
+use crate::transport::{Request, Response, SnapshotEnd, Transport, TransportError};
 use crate::types::{NodeId, TypeConfig};
 
 /// Makes a [`Connection`] to each peer over one transport.
@@ -20,12 +20,18 @@ use crate::types::{NodeId, TypeConfig};
 pub struct NetworkFactory<T> {
     /// The transport every connection shares.
     transport: Arc<T>,
+    /// Roughly how many bytes each snapshot chunk holds.
+    chunk_bytes: usize,
 }
 
 impl<T> NetworkFactory<T> {
-    /// Connect peers over `transport`.
-    pub fn new(transport: Arc<T>) -> Self {
-        Self { transport }
+    /// Connect peers over `transport`, sending snapshots in chunks of
+    /// about `chunk_bytes`.
+    pub fn new(transport: Arc<T>, chunk_bytes: usize) -> Self {
+        Self {
+            transport,
+            chunk_bytes: chunk_bytes.max(1),
+        }
     }
 }
 
@@ -37,6 +43,7 @@ impl<T: Transport> RaftNetworkFactory<TypeConfig> for NetworkFactory<T> {
         Connection {
             transport: Arc::clone(&self.transport),
             target,
+            chunk_bytes: self.chunk_bytes,
         }
     }
 }
@@ -48,6 +55,16 @@ pub struct Connection<T> {
     transport: Arc<T>,
     /// The peer.
     target: NodeId,
+    /// Roughly how many bytes each snapshot chunk holds.
+    chunk_bytes: usize,
+}
+
+/// Return an identifier for a new snapshot transfer, unique in practice.
+fn transfer_id() -> u64 {
+    use std::hash::{BuildHasher, RandomState};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    RandomState::new().hash_one(NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Convert a transport error to openraft's: a request that surely didn't
@@ -133,33 +150,49 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
         cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
-        // Exported now, from the view: only current data, as of the snapshot.
-        let data = snapshot
-            .snapshot
-            .into_bytes()
-            .await
-            .map_err(|e| StreamingError::Network(NetworkError::from_string(e)))?;
-        let request = Request::Snapshot {
+        let SnapshotData::View(view) = snapshot.snapshot else {
+            return Err(StreamingError::Network(NetworkError::from_string(
+                "only a view of this replica can be sent",
+            )));
+        };
+        let failed =
+            |e: &dyn std::fmt::Display| StreamingError::Network(NetworkError::from_string(e));
+        let id = transfer_id();
+        let mut chunks = view.chunks(snapshot_meta_keys(), self.chunk_bytes);
+        let mut cancel = std::pin::pin!(cancel);
+        // Each chunk is exported when it is about to be sent, so the next is
+        // read ahead to know which chunk is last.
+        let mut next = chunks.next().await.map_err(|e| failed(&e))?;
+        let mut end = Some(SnapshotEnd {
             vote,
             meta: snapshot.meta,
-            data,
-        };
-        let response = tokio::select! {
-            response = self.transport.send(self.target, request) => response,
-            closed = cancel => return Err(StreamingError::Closed(closed)),
-        };
-        match response {
-            Ok(Response::Snapshot(response)) => Ok(response),
-            Ok(other) => Err(StreamingError::Network(NetworkError::from_string(format!(
-                "unexpected response {other:?}"
-            )))),
-            Err(TransportError::NotDelivered(m)) => {
-                Err(StreamingError::Unreachable(Unreachable::from_string(m)))
-            }
-            Err(TransportError::NoReply(m)) => {
-                Err(StreamingError::Network(NetworkError::from_string(m)))
+        });
+        for seq in 0.. {
+            let bytes = next.take().expect("a chunk is ready");
+            next = chunks.next().await.map_err(|e| failed(&e))?;
+            let last = next.is_none();
+            let request = Request::SnapshotChunk {
+                id,
+                seq,
+                bytes,
+                end: if last { end.take() } else { None },
+            };
+            let response = tokio::select! {
+                response = self.transport.send(self.target, request) => response,
+                closed = &mut cancel => return Err(StreamingError::Closed(closed)),
+            };
+            match response {
+                Ok(Response::SnapshotChunk(Ok(()))) if !last => {}
+                Ok(Response::Snapshot(response)) if last => return Ok(response),
+                Ok(Response::SnapshotChunk(Err(m))) => return Err(failed(&m)),
+                Ok(other) => return Err(failed(&format!("unexpected response {other:?}"))),
+                Err(TransportError::NotDelivered(m)) => {
+                    return Err(StreamingError::Unreachable(Unreachable::from_string(m)));
+                }
+                Err(TransportError::NoReply(m)) => return Err(failed(&m)),
             }
         }
+        unreachable!("the chunk loop returns")
     }
 
     /// Ask the peer to take over leadership.

@@ -287,3 +287,45 @@ async fn installs_end_older_transactions() {
     assert_eq!(error.sqlstate(), "25P04", "{error}");
     assert_eq!(get(&other_storage, "k2").await.as_deref(), Some(&b"v"[..]));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert a snapshot exported in small chunks concatenates to the whole
+/// export, and chunks stored as they arrive import from storage.
+async fn snapshots_stream_in_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    for i in 0..40 {
+        let r = request(&storage, &captured, &format!("k{i:02}"), &"v".repeat(i)).await;
+        let (batch, _) = replica.proposer().propose(&[r]);
+        replica.apply(batch, Vec::new()).await.unwrap();
+    }
+    let whole = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(Vec::new())
+        .await
+        .unwrap();
+    let mut chunks = replica.capture().await.unwrap().chunks(Vec::new(), 64);
+    let mut parts = Vec::new();
+    while let Some(chunk) = chunks.next().await.unwrap() {
+        parts.push(chunk);
+    }
+    assert!(parts.len() > 10, "{} chunks", parts.len());
+    assert_eq!(parts.concat(), whole);
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let (other_storage, other, _) = open(other_dir.path());
+    let mut sink = other.begin_receiving().await.unwrap();
+    for part in parts {
+        sink.push(part).await.unwrap();
+    }
+    sink.finish().await.unwrap();
+    other.import_stored().await.unwrap();
+    assert_eq!(other.visible_ts(), replica.visible_ts());
+    assert_eq!(
+        get(&other_storage, "k39").await,
+        Some(Bytes::from("v".repeat(39)))
+    );
+    assert_eq!(get(&other_storage, "k00").await, Some(Bytes::new()));
+}

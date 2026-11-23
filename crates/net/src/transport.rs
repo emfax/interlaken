@@ -14,8 +14,10 @@ use crate::metrics::Counters;
 
 /// The gRPC method every request goes through.
 pub(crate) const PATH: &str = "/interlaken.Replica/Call";
-/// The largest message either side accepts: snapshots travel whole.
-pub(crate) const MAX_MESSAGE_BYTES: usize = 1 << 30;
+/// The largest message either side accepts. Snapshots travel in chunks of
+/// about 1 MiB; a chunk holds at least one whole key and value, which can
+/// be larger.
+pub(crate) const MAX_MESSAGE_BYTES: usize = 64 << 20;
 
 /// Node addresses, shared between the transport and whoever keeps them current.
 pub(crate) type AddressBook = Arc<RwLock<BTreeMap<NodeId, String>>>;

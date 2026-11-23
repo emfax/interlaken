@@ -43,19 +43,32 @@ pub enum Request {
     Commit(Vec<u8>),
     /// A read index, for a fresh snapshot on the sender.
     ReadIndex,
-    /// A whole snapshot from the leader, for a replica too far behind its log.
-    Snapshot {
-        /// The sending leader's vote.
-        vote: VoteOf<TypeConfig>,
-        /// The snapshot's Raft metadata.
-        meta: SnapshotMetaOf<TypeConfig>,
-        /// The snapshot's data.
-        data: Vec<u8>,
+    /// One chunk of a snapshot from the leader, for a replica too far
+    /// behind its log (ADR-0038). The receiver stores chunks in order, and
+    /// installs the snapshot once the last arrives.
+    SnapshotChunk {
+        /// The transfer the chunk belongs to.
+        id: u64,
+        /// The chunk's place in the transfer, from 0.
+        seq: u64,
+        /// The chunk.
+        bytes: Vec<u8>,
+        /// On the last chunk, what installing needs.
+        end: Option<SnapshotEnd>,
     },
     /// Raft's request that the receiver take over leadership.
     TransferLeader(TransferLeaderRequest<TypeConfig>),
     /// A membership change, forwarded to the leader.
     Membership(MembershipChange),
+}
+
+/// What a snapshot transfer's last chunk carries.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SnapshotEnd {
+    /// The sending leader's vote.
+    pub vote: VoteOf<TypeConfig>,
+    /// The snapshot's Raft metadata.
+    pub meta: SnapshotMetaOf<TypeConfig>,
 }
 
 /// A change to the cluster's membership (ADR-0037 phase 4).
@@ -95,7 +108,9 @@ pub enum Response {
     /// The answer to [`Request::ReadIndex`]: the log index the sender must
     /// apply before its snapshot is fresh.
     ReadIndex(Result<u64, CommitError>),
-    /// The answer to [`Request::Snapshot`].
+    /// The answer to a snapshot chunk other than the last: stored, or why not.
+    SnapshotChunk(Result<(), String>),
+    /// The answer to a snapshot transfer's last chunk.
     Snapshot(SnapshotResponse<TypeConfig>),
     /// The answer to [`Request::TransferLeader`].
     TransferLeader(TransferLeaderResponse<TypeConfig>),

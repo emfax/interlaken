@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use interlaken_storage::replica::{CommitPath, Replica};
+use interlaken_storage::replica::{CommitPath, Replica, SnapshotSink};
 use interlaken_storage::{CommitRequest, Durability, Error, FjallStorage, Result, StorageOptions};
 use openraft::async_runtime::WatchReceiver;
 use openraft::error::ClientWriteError;
@@ -17,10 +17,10 @@ use tokio::time::{Instant, sleep};
 use crate::commit::{CommitConfig, Outcome, RaftCommit};
 use crate::log_store::LogStore;
 use crate::network::NetworkFactory;
-use crate::state_machine::StateMachine;
+use crate::state_machine::{SNAPSHOT_CHUNK_BYTES, SnapshotData, StateMachine};
 use crate::transport::{
-    CommitError, Committed, Handler, HandlerFuture, MembershipChange, Request, Response, Transport,
-    TransportError,
+    CommitError, Committed, Handler, HandlerFuture, MembershipChange, Request, Response,
+    SnapshotEnd, Transport, TransportError,
 };
 use crate::types::{NodeId, Raft};
 
@@ -46,12 +46,15 @@ pub struct ReplicaConfig {
     /// Log entries kept after a snapshot, so replicas slightly behind catch
     /// up from the log rather than from a snapshot.
     pub logs_kept: u64,
+    /// Roughly how many bytes each snapshot chunk sent to another replica holds.
+    pub snapshot_chunk_bytes: usize,
 }
 
 impl ReplicaConfig {
     /// Return the settings for node `id`: 50 ms heartbeats, elections after
     /// 150 to 300 ms, the default commit settings, a minute's history, and a
-    /// snapshot every 10,000 entries keeping the last 1,000.
+    /// snapshot every 10,000 entries keeping the last 1,000, and 1 MiB
+    /// snapshot chunks.
     #[must_use]
     pub fn new(id: NodeId) -> Self {
         Self {
@@ -63,6 +66,7 @@ impl ReplicaConfig {
             history_retention: Duration::from_secs(60),
             snapshot_every: 10_000,
             logs_kept: 1_000,
+            snapshot_chunk_bytes: SNAPSHOT_CHUNK_BYTES,
         }
     }
 }
@@ -82,6 +86,8 @@ pub struct ReplicaNode<T: Transport> {
     storage: FjallStorage,
     /// Storage's side of the replica.
     replica: Replica,
+    /// The snapshot transfer being received, if any.
+    receiving: Arc<tokio::sync::Mutex<Option<Receiving>>>,
     /// The commit path.
     commit: Arc<RaftCommit<T>>,
     /// How long a membership change may wait for a leader.
@@ -214,6 +220,9 @@ impl<T: Transport> ReplicaNode<T> {
             election_timeout_max: millis(config.election_max),
             snapshot_policy: SnapshotPolicy::LogsSinceLast(config.snapshot_every.max(1)),
             max_in_snapshot_log_to_keep: config.logs_kept,
+            // Purge as soon as a snapshot allows: purging is cheap now that
+            // snapshots copy nothing, and a long log only delays catching up.
+            purge_batch_size: 1,
             ..openraft::Config::default()
         }
         .validate()
@@ -224,7 +233,7 @@ impl<T: Transport> ReplicaNode<T> {
         let raft = Raft::new(
             config.id,
             Arc::new(raft_config),
-            NetworkFactory::new(Arc::clone(&transport)),
+            NetworkFactory::new(Arc::clone(&transport), config.snapshot_chunk_bytes),
             LogStore::new(replica.clone(), sync),
             StateMachine::new(replica.clone(), applied_tx),
         )
@@ -236,6 +245,7 @@ impl<T: Transport> ReplicaNode<T> {
             raft,
             storage,
             replica,
+            receiving: Arc::new(tokio::sync::Mutex::new(None)),
             commit,
             timeout: config.commit.timeout,
             retry: config.commit.retry,
@@ -511,6 +521,8 @@ impl<T: Transport> ReplicaNode<T> {
             id: self.id,
             raft: self.raft.clone(),
             commit: Arc::clone(&self.commit),
+            replica: self.replica.clone(),
+            receiving: Arc::clone(&self.receiving),
         })
     }
 
@@ -528,6 +540,70 @@ struct NodeHandler<T: Transport> {
     raft: Raft,
     /// The node's commit path.
     commit: Arc<RaftCommit<T>>,
+    /// Storage's side of the replica, where received snapshots are stored.
+    replica: Replica,
+    /// The snapshot transfer being received, if any.
+    receiving: Arc<tokio::sync::Mutex<Option<Receiving>>>,
+}
+
+/// A snapshot transfer being received.
+struct Receiving {
+    /// The transfer.
+    id: u64,
+    /// The next chunk expected.
+    next: u64,
+    /// Where its chunks are stored.
+    sink: SnapshotSink,
+}
+
+/// Store one chunk of a snapshot transfer, and install the snapshot once
+/// its last chunk arrives (ADR-0038). A transfer's first chunk replaces any
+/// transfer in progress; a chunk out of order is refused, and the sender
+/// starts again.
+async fn receive_chunk(
+    raft: &Raft,
+    replica: &Replica,
+    receiving: &tokio::sync::Mutex<Option<Receiving>>,
+    id: u64,
+    seq: u64,
+    bytes: Vec<u8>,
+    end: Option<SnapshotEnd>,
+) -> Response {
+    let refused = |e: &dyn std::fmt::Display| Response::SnapshotChunk(Err(e.to_string()));
+    let mut current = receiving.lock().await;
+    if seq == 0 {
+        match replica.begin_receiving().await {
+            Ok(sink) => *current = Some(Receiving { id, next: 0, sink }),
+            Err(e) => return refused(&e),
+        }
+    }
+    let Some(transfer) = current.as_mut().filter(|t| t.id == id && t.next == seq) else {
+        return refused(&"snapshot chunk out of order");
+    };
+    if let Err(e) = transfer.sink.push(bytes).await {
+        *current = None;
+        return refused(&e);
+    }
+    transfer.next += 1;
+    let Some(end) = end else {
+        return Response::SnapshotChunk(Ok(()));
+    };
+    let transfer = current.take().expect("the transfer is in progress");
+    drop(current);
+    if let Err(e) = transfer.sink.finish().await {
+        return refused(&e);
+    }
+    let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
+        meta: end.meta,
+        snapshot: SnapshotData::Stored,
+    };
+    let response = match raft.install_full_snapshot(end.vote, snapshot).await {
+        Ok(response) => Response::Snapshot(response),
+        Err(e) => Response::Refused(e.to_string()),
+    };
+    // Installing removes the stored copy; a refused install leaves it.
+    let _ = replica.clear_stored_snapshot().await;
+    response
 }
 
 impl<T: Transport> Handler for NodeHandler<T> {
@@ -536,6 +612,8 @@ impl<T: Transport> Handler for NodeHandler<T> {
         let raft = self.raft.clone();
         let commit = Arc::clone(&self.commit);
         let id = self.id;
+        let replica = self.replica.clone();
+        let receiving = Arc::clone(&self.receiving);
         Box::pin(async move {
             match request {
                 Request::Append(rpc) => match raft.append_entries(rpc).await {
@@ -551,16 +629,12 @@ impl<T: Transport> Handler for NodeHandler<T> {
                     Err(e) => Response::Refused(e.to_string()),
                 },
                 Request::ReadIndex => Response::ReadIndex(commit.remote_read_index().await),
-                Request::Snapshot { vote, meta, data } => {
-                    let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
-                        meta,
-                        snapshot: crate::state_machine::SnapshotData::Received(data),
-                    };
-                    match raft.install_full_snapshot(vote, snapshot).await {
-                        Ok(response) => Response::Snapshot(response),
-                        Err(e) => Response::Refused(e.to_string()),
-                    }
-                }
+                Request::SnapshotChunk {
+                    id: transfer,
+                    seq,
+                    bytes,
+                    end,
+                } => receive_chunk(&raft, &replica, &receiving, transfer, seq, bytes, end).await,
                 Request::TransferLeader(req) => match raft.handle_transfer_leader(req).await {
                     Ok(response) => Response::TransferLeader(response),
                     Err(e) => Response::Refused(e.to_string()),

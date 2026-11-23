@@ -10,6 +10,7 @@ use super::meta::{
     LAST_COMMIT_TS_KEY, decode_format_version, decode_timestamp, encode_format_version,
     encode_timestamp,
 };
+use super::snapshot::{self, Decoder, Event, ExportCursor};
 use super::stored::{StoredValue, decode_stored, encode_stored};
 use crate::commit::LogEntry;
 use crate::encoding::{split_versioned_key, versioned_key};
@@ -36,16 +37,14 @@ const REPLICA_LOG_KEYSPACE: &str = "replica_log";
 const REPLICA_SNAPSHOT_KEYSPACE: &str = "replica_snapshot";
 /// Size of each stored snapshot chunk.
 const SNAPSHOT_CHUNK_BYTES: usize = 1024 * 1024;
-/// Versions written per batch when importing a snapshot.
-const IMPORT_BATCH: usize = 4096;
+/// Bytes of versions written per batch when importing a snapshot.
+const IMPORT_BATCH_BYTES: usize = 1024 * 1024;
+/// Memtable bytes past which bulk snapshot writes wait for flushes.
+const WRITE_BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
 /// The `meta` key of the stored snapshot's generation.
 const SNAPSHOT_GENERATION_KEY: &[u8] = b"replica_snapshot_generation";
 /// The `meta` key present while a snapshot import is incomplete.
 const IMPORTING_KEY: &[u8] = b"replica_importing";
-/// The first bytes of an exported snapshot.
-const SNAPSHOT_MAGIC: &[u8] = b"ILSNAP2\0";
-/// The marker before an exported snapshot's entry count.
-const SNAPSHOT_END: &[u8] = b"ILSNEND\0";
 
 /// The fjall database with its `data`, `meta` and `raftlog` keyspaces.
 ///
@@ -427,71 +426,84 @@ impl Engine {
         self.db.snapshot()
     }
 
-    /// Encode the current data in `view` as one snapshot (ADR-0038): the
-    /// newest version of each key at or below the view's last commit, with
-    /// its commit timestamp, leaving out keys whose newest version is a
-    /// deletion, plus the last commit timestamp and the `meta` entries at
-    /// `meta_keys`.
-    ///
-    /// Encoding (version 2), integers big-endian: `magic last_commit_ts:u64
-    /// meta_count:u32 (bytes bytes)* (bytes commit_ts:u64 bytes)* end
-    /// entry_count:u64`, where `bytes := len:u32 byte*`, the entries are
-    /// keys, commit timestamps and values in key order, and `end` is a fixed
-    /// marker. The trailer makes a snapshot cut short at an entry boundary
-    /// detectable.
-    pub(crate) fn export(&self, view: &fjall::Snapshot, meta_keys: &[Vec<u8>]) -> Result<Vec<u8>> {
+    /// Encode the next chunk of the current data in `view` (ADR-0038; see
+    /// [`snapshot`](super::snapshot) for the format), resuming at `cursor`:
+    /// the newest version of each key at or below the view's last commit,
+    /// leaving out keys whose newest version is a deletion. A chunk ends
+    /// after the key that takes it past `budget` bytes. Return the chunk and
+    /// where the next one resumes, or `None` after the last chunk, which
+    /// holds the trailer.
+    pub(crate) fn export_chunk(
+        &self,
+        view: &fjall::Snapshot,
+        meta_keys: &[Vec<u8>],
+        mut cursor: ExportCursor,
+        budget: usize,
+    ) -> Result<(Vec<u8>, Option<ExportCursor>)> {
         use fjall::Readable as _;
-        let meta = |key: &[u8]| -> Result<Option<Vec<u8>>> {
-            Ok(view.get(&self.meta, key)?.map(|v| v.to_vec()))
-        };
-        let last = meta(LAST_COMMIT_TS_KEY)?
+        let last = self
+            .view_meta(view, LAST_COMMIT_TS_KEY)?
             .as_deref()
             .map(|v| decode_timestamp(v, "snapshot timestamp"))
             .transpose()?
             .ok_or(Error::CorruptMeta("snapshot view lacks a timestamp"))?;
-        let mut out = SNAPSHOT_MAGIC.to_vec();
-        out.extend_from_slice(&last.into_raw().to_be_bytes());
-        let present: Vec<(&Vec<u8>, Vec<u8>)> = meta_keys
-            .iter()
-            .filter_map(|key| meta(key).transpose().map(|v| v.map(|v| (key, v))))
-            .collect::<Result<_>>()?;
-        out.extend_from_slice(
-            &u32::try_from(present.len())
-                .expect("meta count fits u32")
-                .to_be_bytes(),
-        );
-        let put = |out: &mut Vec<u8>, bytes: &[u8]| {
+        let mut out = Vec::new();
+        if !cursor.started {
+            out.extend_from_slice(snapshot::MAGIC);
+            out.extend_from_slice(&last.into_raw().to_be_bytes());
+            let mut present = Vec::new();
+            for key in meta_keys {
+                if let Some(value) = self.view_meta(view, key)? {
+                    present.push((key, value));
+                }
+            }
             out.extend_from_slice(
-                &u32::try_from(bytes.len())
-                    .expect("length fits u32")
+                &u32::try_from(present.len())
+                    .expect("meta count fits u32")
                     .to_be_bytes(),
             );
-            out.extend_from_slice(bytes);
-        };
-        for (key, value) in &present {
-            put(&mut out, key);
-            put(&mut out, value);
+            for (key, value) in &present {
+                snapshot::put_bytes(&mut out, key);
+                snapshot::put_bytes(&mut out, value);
+            }
+            cursor.started = true;
         }
-        // Versions of a key sort together, newest first: keep the first one
-        // at or below the snapshot, and skip the rest of the key's versions.
+        // Versions of a key sort together, newest first, and no key is a
+        // prefix of another: resuming after a key's oldest possible version
+        // skips the rest of its versions.
+        let start = match &cursor.after {
+            Some(key) => std::ops::Bound::Excluded(versioned_key(key, Timestamp::ZERO)),
+            None => std::ops::Bound::Unbounded,
+        };
         let mut decided: Option<Vec<u8>> = None;
-        let mut entries: u64 = 0;
-        for item in view.iter(&self.data) {
+        for item in view.range(&self.data, (start, std::ops::Bound::Unbounded)) {
             let (versioned, value) = item.into_inner()?;
             let (key, ts) = split_versioned_key(&versioned)?;
             if decided.as_deref() == Some(key) || ts > last {
                 continue;
             }
+            if out.len() >= budget && decided.is_some() {
+                cursor.after = decided;
+                return Ok((out, Some(cursor)));
+            }
             decided = Some(key.to_vec());
             if let StoredValue::Put(value) = decode_stored(Bytes::copy_from_slice(&value))? {
-                put(&mut out, key);
+                snapshot::put_bytes(&mut out, key);
                 out.extend_from_slice(&ts.into_raw().to_be_bytes());
-                put(&mut out, &value);
-                entries += 1;
+                snapshot::put_bytes(&mut out, &value);
+                cursor.entries += 1;
             }
         }
-        out.extend_from_slice(SNAPSHOT_END);
-        out.extend_from_slice(&entries.to_be_bytes());
+        out.extend_from_slice(snapshot::END);
+        out.extend_from_slice(&cursor.entries.to_be_bytes());
+        Ok((out, None))
+    }
+
+    /// Encode all of the current data in `view` as one snapshot.
+    pub(crate) fn export(&self, view: &fjall::Snapshot, meta_keys: &[Vec<u8>]) -> Result<Vec<u8>> {
+        let (out, rest) =
+            self.export_chunk(view, meta_keys, ExportCursor::default(), usize::MAX)?;
+        debug_assert!(rest.is_none(), "an unlimited chunk holds everything");
         Ok(out)
     }
 
@@ -501,51 +513,48 @@ impl Engine {
     /// commit: no older versions exist here any more. Return the snapshot's
     /// last commit timestamp.
     ///
-    /// The whole snapshot is decoded before anything changes. A marker in
-    /// `meta`, synced first and removed in the last batch, shows an import
-    /// a crash interrupted ([`Engine::import_pending`]).
-    pub(crate) fn import(&self, snapshot: &[u8]) -> Result<Timestamp> {
-        let mut reader = SnapshotReader(
-            snapshot
-                .strip_prefix(SNAPSHOT_MAGIC)
-                .ok_or_else(malformed_snapshot)?,
-        );
-        let last = Timestamp::from_raw(reader.u64()?);
-        let meta_count = reader.u32()?;
-        let mut meta = Vec::with_capacity(meta_count);
-        for _ in 0..meta_count {
-            let key = reader.bytes()?.to_vec();
-            meta.push((key, reader.bytes()?.to_vec()));
-        }
-        let mut versions = Vec::new();
-        let trailer = SNAPSHOT_END.len() + 8;
-        loop {
-            if reader.0.len() == trailer && reader.0.starts_with(SNAPSHOT_END) {
-                reader.take(SNAPSHOT_END.len())?;
-                let count = usize::try_from(reader.u64()?).map_err(|_| malformed_snapshot())?;
-                if count != versions.len() {
-                    return Err(malformed_snapshot());
-                }
-                break;
-            }
-            let key = reader.bytes()?;
-            let ts = Timestamp::from_raw(reader.u64()?);
-            if ts > last {
-                return Err(malformed_snapshot());
-            }
-            versions.push((versioned_key(key, ts), reader.bytes()?));
-        }
+    /// `chunks` passes the snapshot's chunks in order to its argument, and
+    /// is called twice: the whole snapshot is checked before anything
+    /// changes, then written in batches, so neither pass holds it in memory.
+    /// A marker in `meta`, synced first and removed in the last batch, shows
+    /// an import a crash interrupted ([`Engine::import_pending`]).
+    pub(crate) fn import_chunks(&self, chunks: &ChunkSource<'_>) -> Result<Timestamp> {
+        let mut check = Decoder::new();
+        chunks(&mut |chunk| check.feed(chunk, &mut |_| Ok(())))?;
+        check.finish()?;
+
         let mut marker = self.db.batch().durability(Some(PersistMode::SyncAll));
         marker.insert(&self.meta, IMPORTING_KEY, b"1");
         marker.commit()?;
         self.data.clear()?;
-        for chunk in versions.chunks(IMPORT_BATCH) {
-            let mut batch = self.db.batch();
-            for (key, value) in chunk {
-                batch.insert(&self.data, key.as_slice(), encode_stored(Some(value)));
+        let mut decoder = Decoder::new();
+        let mut meta = Vec::new();
+        let mut batch = self.db.batch();
+        let mut in_batch = 0;
+        chunks(&mut |chunk| {
+            decoder.feed(chunk, &mut |event| {
+                match event {
+                    Event::Meta(key, value) => meta.push((key.to_vec(), value.to_vec())),
+                    Event::Entry(key, ts, value) => {
+                        batch.insert(
+                            &self.data,
+                            versioned_key(key, ts),
+                            encode_stored(Some(value)),
+                        );
+                        in_batch += key.len() + value.len();
+                    }
+                }
+                Ok(())
+            })?;
+            if in_batch >= IMPORT_BATCH_BYTES {
+                std::mem::replace(&mut batch, self.db.batch()).commit()?;
+                in_batch = 0;
+                self.throttle_writes();
             }
-            batch.commit()?;
-        }
+            Ok(())
+        })?;
+        batch.commit()?;
+        let last = decoder.finish()?;
         let watermark = self.gc_watermark()?.max(last);
         let mut batch = self.db.batch();
         batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
@@ -559,34 +568,111 @@ impl Engine {
         Ok(last)
     }
 
+    /// Wait, for at most two seconds, while memtables hold more than
+    /// [`WRITE_BUFFER_LIMIT`]. fjall doesn't bound memtables awaiting flush,
+    /// so a bulk write, such as a snapshot, could otherwise queue up to its
+    /// whole size in memory. Runs on a storage thread, which it blocks.
+    fn throttle_writes(&self) {
+        // Bounded, so a stalled flush delays the write rather than hangs it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while self.db.write_buffer_size() > WRITE_BUFFER_LIMIT
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Import a snapshot held whole in memory ([`Engine::import_chunks`]).
+    pub(crate) fn import(&self, snapshot: &[u8]) -> Result<Timestamp> {
+        self.import_chunks(&|feed| feed(snapshot))
+    }
+
+    /// Import the stored snapshot ([`Engine::import_chunks`]), reading it
+    /// chunk by chunk.
+    ///
+    /// Chunks are read by key, not through a view: a committed generation
+    /// never changes, and a fjall view held open while the import writes
+    /// `data` kept memory proportional to the snapshot after the import.
+    pub(crate) fn import_stored(&self) -> Result<Timestamp> {
+        let generation = self
+            .snapshot_generation(&self.view())?
+            .ok_or(Error::CorruptMeta("no snapshot is stored"))?;
+        self.import_chunks(&|feed| {
+            for index in 0u32.. {
+                let mut key = generation.to_be_bytes().to_vec();
+                key.extend_from_slice(&index.to_be_bytes());
+                match self.replica_snapshot.get(key)? {
+                    Some(chunk) => feed(&chunk)?,
+                    None => break,
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Return `true` if a snapshot import was interrupted and must be redone.
     pub(crate) fn import_pending(&self) -> Result<bool> {
         Ok(self.meta.get(IMPORTING_KEY)?.is_some())
     }
 
-    /// Replace the stored snapshot with `blob`, durably.
+    /// Begin storing a new snapshot, removing any partly stored one, and
+    /// return its generation. The stored snapshot stays current until
+    /// [`Engine::commit_stored_snapshot`] switches to the new one.
     ///
-    /// Each snapshot is stored under a new generation, chunk keys being the
-    /// generation and chunk index, and becomes current when the `meta`
-    /// pointer to its generation is synced. Readers never see a snapshot
-    /// half-replaced. Older generations are removed afterwards.
-    pub(crate) fn store_snapshot(&self, blob: &[u8]) -> Result<()> {
+    /// Each snapshot is stored under its own generation, chunk keys being
+    /// the generation and chunk index, so readers never see one half
+    /// replaced.
+    pub(crate) fn begin_stored_snapshot(&self) -> Result<u64> {
         let current = self.snapshot_generation(&self.view())?;
         let generation = current.map_or(0, |g| g + 1);
-        let key = |chunk: u32| {
-            let mut key = generation.to_be_bytes().to_vec();
-            key.extend_from_slice(&chunk.to_be_bytes());
-            key
-        };
-        for (i, chunk) in blob.chunks(SNAPSHOT_CHUNK_BYTES).enumerate() {
-            let mut batch = self.db.batch();
-            batch.insert(
-                &self.replica_snapshot,
-                key(u32::try_from(i).expect("chunk count fits u32")),
-                chunk,
-            );
-            batch.commit()?;
+        // A transfer that never finished left chunks under the generation
+        // after the current one: this one, about to be reused.
+        self.remove_generation(generation)?;
+        Ok(generation)
+    }
+
+    /// Return the key of chunk `index` of the snapshot stored under `generation`.
+    fn snapshot_chunk_key(generation: u64, index: u32) -> Vec<u8> {
+        let mut key = generation.to_be_bytes().to_vec();
+        key.extend_from_slice(&index.to_be_bytes());
+        key
+    }
+
+    /// Remove every chunk stored under `generation`, by key: chunks are
+    /// numbered from 0 with no gaps. The keyspace is never iterated, since
+    /// iterating its large values kept memory proportional to them.
+    fn remove_generation(&self, generation: u64) -> Result<()> {
+        let mut batch = self.db.batch();
+        for index in 0u32.. {
+            let key = Self::snapshot_chunk_key(generation, index);
+            if !self.replica_snapshot.contains_key(&key)? {
+                break;
+            }
+            batch.remove(&self.replica_snapshot, key);
         }
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Store chunk `index` of the snapshot being stored under `generation`, unsynced.
+    pub(crate) fn store_snapshot_chunk(
+        &self,
+        generation: u64,
+        index: u32,
+        chunk: &[u8],
+    ) -> Result<()> {
+        let key = Self::snapshot_chunk_key(generation, index);
+        let mut batch = self.db.batch();
+        batch.insert(&self.replica_snapshot, key, chunk);
+        batch.commit()?;
+        self.throttle_writes();
+        Ok(())
+    }
+
+    /// Make the snapshot stored under `generation` current, durably, and
+    /// remove older ones.
+    pub(crate) fn commit_stored_snapshot(&self, generation: u64) -> Result<()> {
+        let previous = self.snapshot_generation(&self.view())?;
         let mut batch = self.db.batch().durability(Some(PersistMode::SyncAll));
         batch.insert(
             &self.meta,
@@ -594,12 +680,23 @@ impl Engine {
             generation.to_be_bytes(),
         );
         batch.commit()?;
-        let mut batch = self.db.batch();
-        for item in self.replica_snapshot.range(..generation.to_be_bytes()) {
-            batch.remove(&self.replica_snapshot, item.key()?);
+        match previous {
+            Some(previous) if previous != generation => self.remove_generation(previous),
+            _ => Ok(()),
         }
-        batch.commit()?;
-        Ok(())
+    }
+
+    /// Replace the stored snapshot with `blob`, durably.
+    pub(crate) fn store_snapshot(&self, blob: &[u8]) -> Result<()> {
+        let generation = self.begin_stored_snapshot()?;
+        for (i, chunk) in blob.chunks(SNAPSHOT_CHUNK_BYTES).enumerate() {
+            self.store_snapshot_chunk(
+                generation,
+                u32::try_from(i).expect("chunk count fits u32"),
+                chunk,
+            )?;
+        }
+        self.commit_stored_snapshot(generation)
     }
 
     /// Return the current snapshot generation in `view`, if any.
@@ -623,25 +720,29 @@ impl Engine {
 
     /// Remove the stored snapshot, if any.
     pub(crate) fn clear_stored_snapshot(&self) -> Result<()> {
+        let Some(generation) = self.snapshot_generation(&self.view())? else {
+            return Ok(());
+        };
         let mut batch = self.db.batch();
         batch.remove(&self.meta, SNAPSHOT_GENERATION_KEY);
-        for item in self.replica_snapshot.iter() {
-            batch.remove(&self.replica_snapshot, item.key()?);
-        }
         batch.commit()?;
-        Ok(())
+        self.remove_generation(generation)
     }
 
     /// Return the stored snapshot, if any.
     pub(crate) fn stored_snapshot(&self) -> Result<Option<Vec<u8>>> {
-        use fjall::Readable as _;
-        let view = self.view();
-        let Some(generation) = self.snapshot_generation(&view)? else {
+        let Some(generation) = self.snapshot_generation(&self.view())? else {
             return Ok(None);
         };
         let mut blob = Vec::new();
-        for item in view.prefix(&self.replica_snapshot, generation.to_be_bytes()) {
-            blob.extend_from_slice(&item.value()?);
+        for index in 0u32.. {
+            match self
+                .replica_snapshot
+                .get(Self::snapshot_chunk_key(generation, index))?
+            {
+                Some(chunk) => blob.extend_from_slice(&chunk),
+                None => break,
+            }
         }
         Ok(Some(blob))
     }
@@ -737,44 +838,8 @@ impl Engine {
     }
 }
 
-/// Return the corruption error for a malformed snapshot.
-fn malformed_snapshot() -> Error {
-    Error::CorruptMeta("malformed snapshot")
-}
-
-/// Reads an exported snapshot's fields in order.
-struct SnapshotReader<'a>(&'a [u8]);
-
-impl<'a> SnapshotReader<'a> {
-    /// Take the next `n` bytes.
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.0.len() < n {
-            return Err(malformed_snapshot());
-        }
-        let (head, tail) = self.0.split_at(n);
-        self.0 = tail;
-        Ok(head)
-    }
-
-    /// Take a big-endian `u64`.
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_be_bytes(
-            self.take(8)?.try_into().expect("8 bytes"),
-        ))
-    }
-
-    /// Take a big-endian `u32` as a length or count.
-    fn u32(&mut self) -> Result<usize> {
-        let value = u32::from_be_bytes(self.take(4)?.try_into().expect("4 bytes"));
-        usize::try_from(value).map_err(|_| malformed_snapshot())
-    }
-
-    /// Take length-prefixed bytes.
-    fn bytes(&mut self) -> Result<&'a [u8]> {
-        let len = self.u32()?;
-        self.take(len)
-    }
-}
+/// Passes a snapshot's chunks, in order, to its argument.
+type ChunkSource<'a> = dyn Fn(&mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> + 'a;
 
 /// Decode a log key: a big-endian `u64` index.
 fn log_index(key: &[u8]) -> Result<u64> {
