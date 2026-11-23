@@ -191,23 +191,18 @@ async fn status_reports_roles_and_lag() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 /// Assert snapshots are made on demand (ADR-0038): replicas pass many
-/// snapshot thresholds and compact their logs without storing any snapshot
-/// data, and a replica that installs one keeps no copy afterwards.
-async fn snapshots_store_nothing() {
+/// snapshot thresholds and compact their logs, and a replica added later
+/// is built from a snapshot of the leader's current data.
+async fn snapshots_are_made_on_demand() {
     let mut cluster = Cluster::start_with(3, small_snapshots).await;
     let leader = cluster.leader().await;
     let last = fill(&cluster, leader, "k", 120).await;
     for &id in &cluster.ids.clone() {
         cluster.get(id, "k119", last).await;
         wait_for_snapshot(&cluster, id).await;
-        assert_eq!(
-            cluster.nodes[&id].stored_snapshot_bytes().await.unwrap(),
-            0,
-            "node {id}"
-        );
     }
     cluster.add_node(4).await;
     cluster.nodes[&leader].add_learner(4).await.unwrap();
     assert_holds(&cluster, 4, "k", 120, last).await;
-    assert_eq!(cluster.nodes[&4].stored_snapshot_bytes().await.unwrap(), 0);
+    assert!(cluster.nodes[&4].status().snapshot_index.is_some());
 }

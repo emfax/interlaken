@@ -157,7 +157,7 @@ impl Txn {
                 .0
                 .shared
                 .pool
-                .run(move |engine| mvcc::read_many(engine.data(), &missing_keys, snapshot))
+                .run(move |engine| mvcc::read_many(&engine.data(), &missing_keys, snapshot))
                 .await??;
             // GC may have removed versions this read needed once the pin expired.
             self.check_age()?;
@@ -215,7 +215,7 @@ impl Txn {
             .pool
             .run(move |engine| {
                 jobs.into_iter()
-                    .map(|job| job.map(|job| mvcc::scan(engine.data(), job)).transpose())
+                    .map(|job| job.map(|job| mvcc::scan(&engine.data(), job)).transpose())
                     .collect::<Result<Vec<_>>>()
             })
             .await??;
@@ -282,7 +282,7 @@ impl Txn {
             .0
             .shared
             .pool
-            .run(move |engine| mvcc::scan(engine.data(), job))
+            .run(move |engine| mvcc::scan(&engine.data(), job))
             .await??;
         // GC may have removed versions this scan needed once the pin expired.
         self.check_age()?;

@@ -1,6 +1,7 @@
 //! Opening the fjall database and its keyspaces.
 
 use std::path::Path;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
@@ -33,18 +34,13 @@ const META_KEYSPACE: &str = "meta";
 const LOG_KEYSPACE: &str = "raftlog";
 /// Name of the keyspace holding a replica's Raft log entries by index (ADR-0037).
 const REPLICA_LOG_KEYSPACE: &str = "replica_log";
-/// Name of the keyspace holding a replica's latest snapshot, in chunks (ADR-0037).
-const REPLICA_SNAPSHOT_KEYSPACE: &str = "replica_snapshot";
-/// Size of each stored snapshot chunk.
-const SNAPSHOT_CHUNK_BYTES: usize = 1024 * 1024;
-/// Bytes of versions written per batch when importing a snapshot.
-const IMPORT_BATCH_BYTES: usize = 1024 * 1024;
+/// Name of the keyspace that held stored snapshots before data generations
+/// (ADR-0037 phase 4); removed on open.
+const OLD_SNAPSHOT_KEYSPACE: &str = "replica_snapshot";
+/// The `meta` key of the current data keyspace generation (ADR-0038).
+const DATA_GENERATION_KEY: &[u8] = b"data_generation";
 /// Memtable bytes past which bulk snapshot writes wait for flushes.
 const WRITE_BUFFER_LIMIT: u64 = 16 * 1024 * 1024;
-/// The `meta` key of the stored snapshot's generation.
-const SNAPSHOT_GENERATION_KEY: &[u8] = b"replica_snapshot_generation";
-/// The `meta` key present while a snapshot import is incomplete.
-const IMPORTING_KEY: &[u8] = b"replica_importing";
 
 /// The fjall database with its `data`, `meta` and `raftlog` keyspaces.
 ///
@@ -57,11 +53,57 @@ const IMPORTING_KEY: &[u8] = b"replica_importing";
 #[derive(Clone)]
 pub struct Engine {
     db: Database,
-    data: Keyspace,
+    /// The current generation of the versioned keyspace, switched when a
+    /// replica installs a snapshot (ADR-0038).
+    data: Arc<RwLock<DataKeyspace>>,
     meta: Keyspace,
     log: Keyspace,
     replica_log: Keyspace,
-    replica_snapshot: Keyspace,
+    /// Memtable size for keyspaces created later, such as data generations.
+    memtable_bytes: u64,
+}
+
+/// The current generation of the versioned keyspace.
+struct DataKeyspace {
+    /// Its generation: 0 for the original `data` keyspace.
+    generation: u64,
+    /// The keyspace.
+    keyspace: Keyspace,
+}
+
+/// Return the name of data keyspace generation `generation`: `data` for the
+/// first, so databases from before generations open unchanged.
+fn data_name(generation: u64) -> String {
+    if generation == 0 {
+        DATA_KEYSPACE.to_owned()
+    } else {
+        format!("{DATA_KEYSPACE}.{generation}")
+    }
+}
+
+/// A snapshot being received into a new data generation (ADR-0038).
+pub(crate) struct Staging {
+    /// The generation being filled.
+    generation: u64,
+    /// Its keyspace.
+    keyspace: Keyspace,
+    /// Decodes and checks the chunks as they arrive.
+    decoder: Decoder,
+    /// The snapshot's `meta` entries.
+    meta: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// A snapshot received in full into a new data generation, synced and
+/// checked, ready to switch to.
+pub(crate) struct Staged {
+    /// The generation.
+    generation: u64,
+    /// Its keyspace.
+    pub(crate) keyspace: Keyspace,
+    /// The snapshot's `meta` entries.
+    meta: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The snapshot's last commit timestamp.
+    last: Timestamp,
 }
 
 impl Engine {
@@ -113,18 +155,42 @@ impl Engine {
             .max_journaling_size(max_journal_bytes.max(MIN_MAX_JOURNAL_BYTES))
             .open()?;
         let create = || KeyspaceCreateOptions::default().max_memtable_size(memtable_bytes);
-        let data = db.keyspace(DATA_KEYSPACE, create)?;
         let meta = db.keyspace(META_KEYSPACE, create)?;
+        let generation = match meta.get(DATA_GENERATION_KEY)? {
+            Some(value) => u64::from_be_bytes(
+                value[..]
+                    .try_into()
+                    .map_err(|_| Error::CorruptMeta("data generation is not 8 bytes"))?,
+            ),
+            None => 0,
+        };
+        // A crash may leave the generation an install was filling, or the
+        // one an install switched away from: neither is current.
+        let stale = [Some(generation + 1), generation.checked_sub(1)];
+        for name in stale
+            .into_iter()
+            .flatten()
+            .map(data_name)
+            .chain([OLD_SNAPSHOT_KEYSPACE.to_owned()])
+        {
+            if db.keyspace_exists(&name) {
+                let handle = db.keyspace(&name, create)?;
+                db.delete_keyspace(handle)?;
+            }
+        }
+        let data = db.keyspace(&data_name(generation), create)?;
         let log = db.keyspace(LOG_KEYSPACE, create)?;
         let replica_log = db.keyspace(REPLICA_LOG_KEYSPACE, create)?;
-        let replica_snapshot = db.keyspace(REPLICA_SNAPSHOT_KEYSPACE, create)?;
         let engine = Self {
             db,
-            data,
+            data: Arc::new(RwLock::new(DataKeyspace {
+                generation,
+                keyspace: data,
+            })),
             meta,
             log,
             replica_log,
-            replica_snapshot,
+            memtable_bytes,
         };
 
         match engine.meta.get(FORMAT_VERSION_KEY)? {
@@ -172,9 +238,14 @@ impl Engine {
         &self.db
     }
 
-    /// Return the versioned `data` keyspace.
-    pub(crate) fn data(&self) -> &Keyspace {
-        &self.data
+    /// Return the current generation of the versioned `data` keyspace.
+    /// The handle is cheap to clone, and stays usable after a switch.
+    pub(crate) fn data(&self) -> Keyspace {
+        self.data
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keyspace
+            .clone()
     }
 
     /// Write a group of commits as a single atomic fjall batch (ADR-0005).
@@ -198,9 +269,10 @@ impl Engine {
             Durability::Sync => PersistMode::SyncAll,
             Durability::Buffered => PersistMode::Buffer,
         };
+        let data = self.data();
         let mut batch = self.db.batch().durability(Some(mode));
         for (ts, key, value) in writes {
-            batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
+            batch.insert(&data, versioned_key(key, ts), encode_stored(value));
         }
         batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
         batch.commit()?;
@@ -243,10 +315,11 @@ impl Engine {
     /// The batch isn't synced: the log entry is the durable record, and
     /// replaying it on open restores anything a crash loses.
     pub(crate) fn apply_entry(&self, entry: &LogEntry) -> Result<()> {
+        let data = self.data();
         let mut batch = self.db.batch();
         for (ts, write) in entry.versions() {
             batch.insert(
-                &self.data,
+                &data,
                 versioned_key(&write.key, ts),
                 encode_stored(write.value.as_deref()),
             );
@@ -322,9 +395,10 @@ impl Engine {
         last: Option<Timestamp>,
         meta: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<()> {
+        let data = self.data();
         let mut batch = self.db.batch();
         for (ts, key, value) in writes {
-            batch.insert(&self.data, versioned_key(key, ts), encode_stored(value));
+            batch.insert(&data, versioned_key(key, ts), encode_stored(value));
         }
         if let Some(last) = last {
             batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
@@ -421,9 +495,13 @@ impl Engine {
         Ok(())
     }
 
-    /// Return a consistent view of every keyspace, for exporting a snapshot.
-    pub(crate) fn view(&self) -> fjall::Snapshot {
-        self.db.snapshot()
+    /// Return a consistent view of every keyspace, with the data keyspace
+    /// it is a view of, for exporting a snapshot.
+    pub(crate) fn view(&self) -> (fjall::Snapshot, Keyspace) {
+        // Read the data generation first: a switch after it leaves the view
+        // seeing the old generation as it was, which is still consistent.
+        let data = self.data();
+        (self.db.snapshot(), data)
     }
 
     /// Encode the next chunk of the current data in `view` (ADR-0038; see
@@ -436,6 +514,7 @@ impl Engine {
     pub(crate) fn export_chunk(
         &self,
         view: &fjall::Snapshot,
+        data: &Keyspace,
         meta_keys: &[Vec<u8>],
         mut cursor: ExportCursor,
         budget: usize,
@@ -476,7 +555,7 @@ impl Engine {
             None => std::ops::Bound::Unbounded,
         };
         let mut decided: Option<Vec<u8>> = None;
-        for item in view.range(&self.data, (start, std::ops::Bound::Unbounded)) {
+        for item in view.range(data, (start, std::ops::Bound::Unbounded)) {
             let (versioned, value) = item.into_inner()?;
             let (key, ts) = split_versioned_key(&versioned)?;
             if decided.as_deref() == Some(key) || ts > last {
@@ -500,72 +579,16 @@ impl Engine {
     }
 
     /// Encode all of the current data in `view` as one snapshot.
-    pub(crate) fn export(&self, view: &fjall::Snapshot, meta_keys: &[Vec<u8>]) -> Result<Vec<u8>> {
+    pub(crate) fn export(
+        &self,
+        view: &fjall::Snapshot,
+        data: &Keyspace,
+        meta_keys: &[Vec<u8>],
+    ) -> Result<Vec<u8>> {
         let (out, rest) =
-            self.export_chunk(view, meta_keys, ExportCursor::default(), usize::MAX)?;
+            self.export_chunk(view, data, meta_keys, ExportCursor::default(), usize::MAX)?;
         debug_assert!(rest.is_none(), "an unlimited chunk holds everything");
         Ok(out)
-    }
-
-    /// Replace `data` with a snapshot's current data, writing each version
-    /// at its original commit timestamp, and set the snapshot's last commit
-    /// timestamp, its `meta` entries, and a GC watermark of at least its last
-    /// commit: no older versions exist here any more. Return the snapshot's
-    /// last commit timestamp.
-    ///
-    /// `chunks` passes the snapshot's chunks in order to its argument, and
-    /// is called twice: the whole snapshot is checked before anything
-    /// changes, then written in batches, so neither pass holds it in memory.
-    /// A marker in `meta`, synced first and removed in the last batch, shows
-    /// an import a crash interrupted ([`Engine::import_pending`]).
-    pub(crate) fn import_chunks(&self, chunks: &ChunkSource<'_>) -> Result<Timestamp> {
-        let mut check = Decoder::new();
-        chunks(&mut |chunk| check.feed(chunk, &mut |_| Ok(())))?;
-        check.finish()?;
-
-        let mut marker = self.db.batch().durability(Some(PersistMode::SyncAll));
-        marker.insert(&self.meta, IMPORTING_KEY, b"1");
-        marker.commit()?;
-        self.data.clear()?;
-        let mut decoder = Decoder::new();
-        let mut meta = Vec::new();
-        let mut batch = self.db.batch();
-        let mut in_batch = 0;
-        chunks(&mut |chunk| {
-            decoder.feed(chunk, &mut |event| {
-                match event {
-                    Event::Meta(key, value) => meta.push((key.to_vec(), value.to_vec())),
-                    Event::Entry(key, ts, value) => {
-                        batch.insert(
-                            &self.data,
-                            versioned_key(key, ts),
-                            encode_stored(Some(value)),
-                        );
-                        in_batch += key.len() + value.len();
-                    }
-                }
-                Ok(())
-            })?;
-            if in_batch >= IMPORT_BATCH_BYTES {
-                std::mem::replace(&mut batch, self.db.batch()).commit()?;
-                in_batch = 0;
-                self.throttle_writes();
-            }
-            Ok(())
-        })?;
-        batch.commit()?;
-        let last = decoder.finish()?;
-        let watermark = self.gc_watermark()?.max(last);
-        let mut batch = self.db.batch();
-        batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
-        batch.insert(&self.meta, GC_WATERMARK_KEY, encode_timestamp(watermark));
-        for (key, value) in &meta {
-            batch.insert(&self.meta, key.as_slice(), value.as_slice());
-        }
-        batch.remove(&self.meta, IMPORTING_KEY);
-        batch.commit()?;
-        self.persist()?;
-        Ok(last)
     }
 
     /// Wait, for at most two seconds, while memtables hold more than
@@ -582,169 +605,140 @@ impl Engine {
         }
     }
 
-    /// Import a snapshot held whole in memory ([`Engine::import_chunks`]).
-    pub(crate) fn import(&self, snapshot: &[u8]) -> Result<Timestamp> {
-        self.import_chunks(&|feed| feed(snapshot))
-    }
-
-    /// Import the stored snapshot ([`Engine::import_chunks`]), reading it
-    /// chunk by chunk.
-    ///
-    /// Chunks are read by key, not through a view: a committed generation
-    /// never changes, and a fjall view held open while the import writes
-    /// `data` kept memory proportional to the snapshot after the import.
-    pub(crate) fn import_stored(&self) -> Result<Timestamp> {
+    /// Begin receiving a snapshot into a new data generation, removing any
+    /// generation an unfinished install left (ADR-0038).
+    pub(crate) fn begin_staging(&self) -> Result<Staging> {
         let generation = self
-            .snapshot_generation(&self.view())?
-            .ok_or(Error::CorruptMeta("no snapshot is stored"))?;
-        self.import_chunks(&|feed| {
-            for index in 0u32.. {
-                let mut key = generation.to_be_bytes().to_vec();
-                key.extend_from_slice(&index.to_be_bytes());
-                match self.replica_snapshot.get(key)? {
-                    Some(chunk) => feed(&chunk)?,
-                    None => break,
-                }
-            }
-            Ok(())
+            .data
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .generation
+            + 1;
+        let name = data_name(generation);
+        let create = || KeyspaceCreateOptions::default().max_memtable_size(self.memtable_bytes);
+        if self.db.keyspace_exists(&name) {
+            let stale = self.db.keyspace(&name, create)?;
+            self.db.delete_keyspace(stale)?;
+        }
+        Ok(Staging {
+            generation,
+            keyspace: self.db.keyspace(&name, create)?,
+            decoder: Decoder::new(),
+            meta: Vec::new(),
         })
     }
 
-    /// Return `true` if a snapshot import was interrupted and must be redone.
-    pub(crate) fn import_pending(&self) -> Result<bool> {
-        Ok(self.meta.get(IMPORTING_KEY)?.is_some())
-    }
-
-    /// Begin storing a new snapshot, removing any partly stored one, and
-    /// return its generation. The stored snapshot stays current until
-    /// [`Engine::commit_stored_snapshot`] switches to the new one.
-    ///
-    /// Each snapshot is stored under its own generation, chunk keys being
-    /// the generation and chunk index, so readers never see one half
-    /// replaced.
-    pub(crate) fn begin_stored_snapshot(&self) -> Result<u64> {
-        let current = self.snapshot_generation(&self.view())?;
-        let generation = current.map_or(0, |g| g + 1);
-        // A transfer that never finished left chunks under the generation
-        // after the current one: this one, about to be reused.
-        self.remove_generation(generation)?;
-        Ok(generation)
-    }
-
-    /// Return the key of chunk `index` of the snapshot stored under `generation`.
-    fn snapshot_chunk_key(generation: u64, index: u32) -> Vec<u8> {
-        let mut key = generation.to_be_bytes().to_vec();
-        key.extend_from_slice(&index.to_be_bytes());
-        key
-    }
-
-    /// Remove every chunk stored under `generation`, by key: chunks are
-    /// numbered from 0 with no gaps. The keyspace is never iterated, since
-    /// iterating its large values kept memory proportional to them.
-    fn remove_generation(&self, generation: u64) -> Result<()> {
+    /// Decode the next chunk of a snapshot being received, checking it, and
+    /// write its versions into the new generation at their original commit
+    /// timestamps, unsynced.
+    pub(crate) fn stage_chunk(&self, staging: &mut Staging, chunk: &[u8]) -> Result<()> {
+        let Staging {
+            keyspace,
+            decoder,
+            meta,
+            ..
+        } = staging;
         let mut batch = self.db.batch();
-        for index in 0u32.. {
-            let key = Self::snapshot_chunk_key(generation, index);
-            if !self.replica_snapshot.contains_key(&key)? {
-                break;
+        decoder.feed(chunk, &mut |event| {
+            match event {
+                Event::Meta(key, value) => meta.push((key.to_vec(), value.to_vec())),
+                Event::Entry(key, ts, value) => {
+                    batch.insert(keyspace, versioned_key(key, ts), encode_stored(Some(value)));
+                }
             }
-            batch.remove(&self.replica_snapshot, key);
-        }
-        batch.commit()?;
-        Ok(())
-    }
-
-    /// Store chunk `index` of the snapshot being stored under `generation`, unsynced.
-    pub(crate) fn store_snapshot_chunk(
-        &self,
-        generation: u64,
-        index: u32,
-        chunk: &[u8],
-    ) -> Result<()> {
-        let key = Self::snapshot_chunk_key(generation, index);
-        let mut batch = self.db.batch();
-        batch.insert(&self.replica_snapshot, key, chunk);
+            Ok(())
+        })?;
         batch.commit()?;
         self.throttle_writes();
         Ok(())
     }
 
-    /// Make the snapshot stored under `generation` current, durably, and
-    /// remove older ones.
-    pub(crate) fn commit_stored_snapshot(&self, generation: u64) -> Result<()> {
-        let previous = self.snapshot_generation(&self.view())?;
+    /// Finish receiving a snapshot: check it ended properly, and sync its
+    /// generation.
+    pub(crate) fn finish_staging(&self, staging: Staging) -> Result<Staged> {
+        let last = staging.decoder.finish()?;
+        self.persist()?;
+        Ok(Staged {
+            generation: staging.generation,
+            keyspace: staging.keyspace,
+            meta: staging.meta,
+            last,
+        })
+    }
+
+    /// Remove a data generation that will never be switched to.
+    pub(crate) fn discard_staging(&self, keyspace: Keyspace) -> Result<()> {
+        self.db.delete_keyspace(keyspace)?;
+        Ok(())
+    }
+
+    /// Switch to a received snapshot's generation, and return its last
+    /// commit timestamp.
+    ///
+    /// One synced batch makes the generation current and records the
+    /// snapshot's last commit timestamp, its `meta` entries, and a GC
+    /// watermark of at least its last commit, since no older versions
+    /// exist in it. The old generation is then deleted; readers still using
+    /// it keep it until they finish. A crash before the batch leaves the old
+    /// generation current, and the new one is removed on open.
+    pub(crate) fn switch_to(&self, staged: Staged) -> Result<Timestamp> {
+        let watermark = self.gc_watermark()?.max(staged.last);
         let mut batch = self.db.batch().durability(Some(PersistMode::SyncAll));
         batch.insert(
             &self.meta,
-            SNAPSHOT_GENERATION_KEY,
-            generation.to_be_bytes(),
+            DATA_GENERATION_KEY,
+            staged.generation.to_be_bytes(),
         );
+        batch.insert(
+            &self.meta,
+            LAST_COMMIT_TS_KEY,
+            encode_timestamp(staged.last),
+        );
+        batch.insert(&self.meta, GC_WATERMARK_KEY, encode_timestamp(watermark));
+        for (key, value) in &staged.meta {
+            batch.insert(&self.meta, key.as_slice(), value.as_slice());
+        }
         batch.commit()?;
-        match previous {
-            Some(previous) if previous != generation => self.remove_generation(previous),
-            _ => Ok(()),
-        }
+        let old = std::mem::replace(
+            &mut *self.data.write().unwrap_or_else(PoisonError::into_inner),
+            DataKeyspace {
+                generation: staged.generation,
+                keyspace: staged.keyspace,
+            },
+        );
+        self.db.delete_keyspace(old.keyspace)?;
+        Ok(staged.last)
     }
 
-    /// Replace the stored snapshot with `blob`, durably.
-    pub(crate) fn store_snapshot(&self, blob: &[u8]) -> Result<()> {
-        let generation = self.begin_stored_snapshot()?;
-        for (i, chunk) in blob.chunks(SNAPSHOT_CHUNK_BYTES).enumerate() {
-            self.store_snapshot_chunk(
-                generation,
-                u32::try_from(i).expect("chunk count fits u32"),
-                chunk,
-            )?;
+    /// Install a snapshot held whole in memory: receive it in one chunk and
+    /// switch to it. A malformed snapshot leaves the data as it was.
+    pub(crate) fn import(&self, snapshot: &[u8]) -> Result<Timestamp> {
+        let mut staging = self.begin_staging()?;
+        let staged = self
+            .stage_chunk(&mut staging, snapshot)
+            .and_then(|()| self.finish_staging(staging));
+        match staged {
+            Ok(staged) => self.switch_to(staged),
+            Err(error) => {
+                let name = data_name(
+                    self.data
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .generation
+                        + 1,
+                );
+                let create =
+                    || KeyspaceCreateOptions::default().max_memtable_size(self.memtable_bytes);
+                self.discard_staging(self.db.keyspace(&name, create)?)?;
+                Err(error)
+            }
         }
-        self.commit_stored_snapshot(generation)
-    }
-
-    /// Return the current snapshot generation in `view`, if any.
-    fn snapshot_generation(&self, view: &fjall::Snapshot) -> Result<Option<u64>> {
-        use fjall::Readable as _;
-        view.get(&self.meta, SNAPSHOT_GENERATION_KEY)?
-            .map(|v| {
-                let bytes: [u8; 8] = v[..]
-                    .try_into()
-                    .map_err(|_| Error::CorruptMeta("snapshot generation"))?;
-                Ok(u64::from_be_bytes(bytes))
-            })
-            .transpose()
     }
 
     /// Return the `meta` entry at `key` as `view` sees it.
     pub(crate) fn view_meta(&self, view: &fjall::Snapshot, key: &[u8]) -> Result<Option<Vec<u8>>> {
         use fjall::Readable as _;
         Ok(view.get(&self.meta, key)?.map(|v| v.to_vec()))
-    }
-
-    /// Remove the stored snapshot, if any.
-    pub(crate) fn clear_stored_snapshot(&self) -> Result<()> {
-        let Some(generation) = self.snapshot_generation(&self.view())? else {
-            return Ok(());
-        };
-        let mut batch = self.db.batch();
-        batch.remove(&self.meta, SNAPSHOT_GENERATION_KEY);
-        batch.commit()?;
-        self.remove_generation(generation)
-    }
-
-    /// Return the stored snapshot, if any.
-    pub(crate) fn stored_snapshot(&self) -> Result<Option<Vec<u8>>> {
-        let Some(generation) = self.snapshot_generation(&self.view())? else {
-            return Ok(None);
-        };
-        let mut blob = Vec::new();
-        for index in 0u32.. {
-            match self
-                .replica_snapshot
-                .get(Self::snapshot_chunk_key(generation, index))?
-            {
-                Some(chunk) => blob.extend_from_slice(&chunk),
-                None => break,
-            }
-        }
-        Ok(Some(blob))
     }
 
     /// Sync everything written so far.
@@ -758,9 +752,10 @@ impl Engine {
         if keys.is_empty() {
             return Ok(());
         }
+        let data = self.data();
         let mut batch = self.db.batch();
         for key in keys {
-            batch.remove(&self.data, key);
+            batch.remove(&data, key);
         }
         batch.commit()?;
         Ok(())
@@ -798,10 +793,9 @@ impl Engine {
     /// means `meta` was lost rather than never written.
     fn initialise_meta(&self) -> Result<()> {
         if !self.meta.is_empty()?
-            || !self.data.is_empty()?
+            || !self.data().is_empty()?
             || !self.log.is_empty()?
             || !self.replica_log.is_empty()?
-            || !self.replica_snapshot.is_empty()?
         {
             return Err(Error::CorruptMeta(
                 "format_version missing from a populated database",
@@ -837,9 +831,6 @@ impl Engine {
         self.meta.get(key)?.ok_or(Error::CorruptMeta(missing))
     }
 }
-
-/// Passes a snapshot's chunks, in order, to its argument.
-type ChunkSource<'a> = dyn Fn(&mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()> + 'a;
 
 /// Decode a log key: a big-endian `u64` index.
 fn log_index(key: &[u8]) -> Result<u64> {
@@ -1061,8 +1052,9 @@ mod tests {
         engine
             .set_meta(&[(b"raft_applied".to_vec(), b"5".to_vec())], false)
             .unwrap();
+        let (view, data) = engine.view();
         let snapshot = engine
-            .export(&engine.view(), &[b"raft_applied".to_vec()])
+            .export(&view, &data, &[b"raft_applied".to_vec()])
             .unwrap();
 
         let other_dir = tempfile::tempdir().unwrap();

@@ -1,12 +1,12 @@
 ---
 id: 0038
 title: Streaming Snapshots
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, replication, network]
 feature-flag:
 created: 2026-11-23
 accepted: 2026-11-23
-implemented:
+implemented: 2026-11-23
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 to 3 are built: snapshots carry current data only, are made on demand, and stream in chunks in bounded memory.
+Implemented. Snapshots carry current data only, are made on demand, stream in chunks in bounded memory, and install into a new data generation switched atomically. The phases' *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -200,11 +200,27 @@ Raft still needs snapshots, for new and far-behind replicas. The log is still pu
     - chunks concatenate to the whole export; the decoder accepts every split and refuses every truncation, an extra byte and a wrong count;
     - the simulation sends snapshots in 256-byte chunks, so every install under its faults spans many; 10 seeds of all five simulations pass;
     - the membership, cluster, read, network and LazyFS power-loss tests pass unchanged.
-- [ ] **Phase 4: Install by generation.**
+- [x] **Phase 4: Install by generation.**
   - Data keyspace generations and the swappable handle.
   - Receiving into a new generation and the atomic switch.
   - Recovery on open.
   - *Testing:* the crash-at-every-step tests; power loss during installs.
+  - *As implemented:*
+    - **Generations.** The first is still called `data`, so existing databases open unchanged; later ones are `data.<n>`, and `meta` records the current one. The engine holds it behind a lock with its generation. `Engine::data` hands out a cheap clone for each use, so reads, writes, applies and GC pick up a switch at their next use.
+      - A captured view carries the generation it was taken of, so an export never reads a generation switched in after its view.
+    - **Receiving** (`Replica::begin_install`, `StagedSnapshot`) decodes and checks each chunk as it arrives and writes its versions straight into the next generation, unsynced and throttled. Finishing checks the trailer and syncs.
+    - **Installing** (`Replica::install`) is openraft's install call, so no entry applies meanwhile. It writes the generation pointer, the last commit timestamp, the GC watermark and the snapshot's `meta` entries in one synced batch, then swaps the handle and deletes the old generation. fjall removes it once readers still using it finish.
+    - **Recovery** is opening: any generation other than the current one is deleted. That is the one after it, which an unfinished install was filling, or the one before it, if a crash came between the switch and the deletion. The `replica_snapshot` keyspace, the stored copy, the redo marker and the receiver's second write are gone, along with phase 2's interim mechanism.
+      - A snapshot openraft declines to install, because the sender's vote is stale, is dropped unused. Its generation is removed by the next install or the next open.
+    - **GC racing a switch** may issue a chunk's removals against the new generation, after scanning the old one. That is harmless: it removes only versions older than a newer version of the same key, and a new generation holds only each key's newest version.
+  - *Testing:*
+    - **an install interrupted halfway:** the replica stops with half the chunks written. Reopening leaves the old data readable and the snapshot's absent, and a later install of the whole snapshot succeeds;
+    - **two installs in a row survive reopening,** the switch being durable;
+    - **every prefix of a snapshot is refused** with the receiver's data untouched, and a transaction open across an install fails with `25P04`;
+    - **the memory test** now shows 42 MiB of heap growth for a 256 MiB snapshot, against 62 MiB with phase 3's stored copy, and 46.5 MiB for 512 MiB;
+      - the regular suite runs it at 64 MiB, with a bound of 64 MiB, which still catches holding a whole copy, and the nightly job at 512 MiB;
+      - the change came after the regular suite twice showed `disk_space_levels_off_short`, a 12-second disk soak, failing under the suite's load: once on each commit path. The soak passed six times alone, and again right after the memory test;
+    - the membership, interrupted-transfer and replication tests, 10 seeds of every simulation, and the network and LazyFS power-loss tests pass.
 
 Phase 3 can begin before phase 4 by streaming into the current import. Phase 4 then removes the remaining stored copy.
 

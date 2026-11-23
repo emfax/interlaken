@@ -114,7 +114,7 @@ In `proof-required` mode ([Changing policies](../security/proposals.md)), a memb
 
 ## Limits
 
-- A member installing a snapshot writes its data twice: once as received, then into place.
+- A member installing a snapshot holds its old data and the new copy on disk until the switch.
 - Commits made through a follower are slower than through the leader under moderate concurrency.
 - Membership changes aren't written to an audit log.
 

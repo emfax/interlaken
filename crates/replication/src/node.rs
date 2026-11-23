@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use interlaken_storage::replica::{CommitPath, Replica, SnapshotSink};
+use interlaken_storage::replica::{CommitPath, Replica, StagedSnapshot};
 use interlaken_storage::{CommitRequest, Durability, Error, FjallStorage, Result, StorageOptions};
 use openraft::async_runtime::WatchReceiver;
 use openraft::error::ClientWriteError;
@@ -458,20 +458,6 @@ impl<T: Transport> ReplicaNode<T> {
             .await
     }
 
-    /// Return the bytes of snapshot data this replica stores: none, except
-    /// while it installs a snapshot it received (ADR-0038).
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn stored_snapshot_bytes(&self) -> Result<usize> {
-        Ok(self
-            .replica
-            .stored_snapshot()
-            .await?
-            .map_or(0, |blob| blob.len()))
-    }
-
     /// Return this replica's view of the cluster.
     #[must_use]
     pub fn status(&self) -> ClusterStatus {
@@ -552,8 +538,8 @@ struct Receiving {
     id: u64,
     /// The next chunk expected.
     next: u64,
-    /// Where its chunks are stored.
-    sink: SnapshotSink,
+    /// The new data generation its chunks are written into.
+    staged: StagedSnapshot,
 }
 
 /// Store one chunk of a snapshot transfer, and install the snapshot once
@@ -572,15 +558,21 @@ async fn receive_chunk(
     let refused = |e: &dyn std::fmt::Display| Response::SnapshotChunk(Err(e.to_string()));
     let mut current = receiving.lock().await;
     if seq == 0 {
-        match replica.begin_receiving().await {
-            Ok(sink) => *current = Some(Receiving { id, next: 0, sink }),
+        match replica.begin_install().await {
+            Ok(staged) => {
+                *current = Some(Receiving {
+                    id,
+                    next: 0,
+                    staged,
+                })
+            }
             Err(e) => return refused(&e),
         }
     }
     let Some(transfer) = current.as_mut().filter(|t| t.id == id && t.next == seq) else {
         return refused(&"snapshot chunk out of order");
     };
-    if let Err(e) = transfer.sink.push(bytes).await {
+    if let Err(e) = transfer.staged.push(bytes).await {
         *current = None;
         return refused(&e);
     }
@@ -590,20 +582,20 @@ async fn receive_chunk(
     };
     let transfer = current.take().expect("the transfer is in progress");
     drop(current);
-    if let Err(e) = transfer.sink.finish().await {
-        return refused(&e);
-    }
+    let ready = match transfer.staged.finish().await {
+        Ok(ready) => ready,
+        Err(e) => return refused(&e),
+    };
     let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
         meta: end.meta,
-        snapshot: SnapshotData::Stored,
+        snapshot: SnapshotData::Ready(ready),
     };
-    let response = match raft.install_full_snapshot(end.vote, snapshot).await {
+    // A snapshot openraft declines to install is dropped unused; its
+    // generation is removed by the next install or when the replica reopens.
+    match raft.install_full_snapshot(end.vote, snapshot).await {
         Ok(response) => Response::Snapshot(response),
         Err(e) => Response::Refused(e.to_string()),
-    };
-    // Installing removes the stored copy; a refused install leaves it.
-    let _ = replica.clear_stored_snapshot().await;
-    response
+    }
 }
 
 impl<T: Transport> Handler for NodeHandler<T> {

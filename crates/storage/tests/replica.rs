@@ -157,13 +157,7 @@ async fn snapshots_carry_a_replica() {
     let other_dir = tempfile::tempdir().unwrap();
     let (other_storage, other, other_captured) = open(other_dir.path());
     let stale = request(&other_storage, &other_captured, "k1", "stale").await;
-    other.store_snapshot(snapshot.clone()).await.unwrap();
-    assert_eq!(
-        other.stored_snapshot().await.unwrap(),
-        Some(snapshot.clone())
-    );
     other.import(snapshot).await.unwrap();
-    assert!(!other.import_pending().await.unwrap());
     assert_eq!(other.visible_ts(), replica.visible_ts());
     assert_eq!(
         other.meta(b"raft_applied".to_vec()).await.unwrap(),
@@ -196,9 +190,57 @@ async fn snapshots_carry_a_replica() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Assert an import a crash interrupted is reported after reopening, and
-/// redoing it from the stored snapshot completes it.
-async fn interrupted_imports_are_redone() {
+/// Assert an install a crash interrupts leaves the old data current, and
+/// the partly received generation is removed when the replica reopens, so
+/// a later install succeeds.
+async fn interrupted_installs_leave_the_old_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    for i in 0..30 {
+        let r = request(&storage, &captured, &format!("k{i:02}"), "new").await;
+        let (batch, _) = replica.proposer().propose(&[r]);
+        replica.apply(batch, Vec::new()).await.unwrap();
+    }
+    let mut parts = Vec::new();
+    let mut chunks = replica.capture().await.unwrap().chunks(Vec::new(), 32);
+    while let Some(chunk) = chunks.next().await.unwrap() {
+        parts.push(chunk);
+    }
+
+    let other_dir = tempfile::tempdir().unwrap();
+    {
+        let (other_storage, other, other_captured) = open(other_dir.path());
+        let r = request(&other_storage, &other_captured, "old", "1").await;
+        let (batch, _) = other.proposer().propose(&[r]);
+        other.apply(batch, Vec::new()).await.unwrap();
+        other.persist().await.unwrap();
+        // Half the snapshot arrives, then the replica stops.
+        let mut staged = other.begin_install().await.unwrap();
+        for part in &parts[..parts.len() / 2] {
+            staged.push(part.clone()).await.unwrap();
+        }
+        assert_eq!(get(&other_storage, "old").await.as_deref(), Some(&b"1"[..]));
+        assert_eq!(get(&other_storage, "k00").await, None);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let (other_storage, other, _) = open(other_dir.path());
+    assert_eq!(get(&other_storage, "old").await.as_deref(), Some(&b"1"[..]));
+    assert_eq!(get(&other_storage, "k00").await, None);
+    let mut staged = other.begin_install().await.unwrap();
+    for part in parts {
+        staged.push(part).await.unwrap();
+    }
+    other.install(staged.finish().await.unwrap()).await.unwrap();
+    assert_eq!(
+        get(&other_storage, "k29").await.as_deref(),
+        Some(&b"new"[..])
+    );
+    assert_eq!(get(&other_storage, "old").await, None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert an installed snapshot survives reopening: the switch is durable.
+async fn installs_survive_reopening() {
     let dir = tempfile::tempdir().unwrap();
     let (storage, replica, captured) = open(dir.path());
     let r = request(&storage, &captured, "k", "v").await;
@@ -215,20 +257,14 @@ async fn interrupted_imports_are_redone() {
     let other_dir = tempfile::tempdir().unwrap();
     {
         let (_storage, other, _) = open(other_dir.path());
-        other.store_snapshot(snapshot).await.unwrap();
-        // What a crash part-way through an import leaves behind.
-        other
-            .set_meta(vec![(b"replica_importing".to_vec(), b"1".to_vec())], true)
-            .await
-            .unwrap();
+        other.import(snapshot.clone()).await.unwrap();
+        // A second install switches generations again.
+        other.import(snapshot).await.unwrap();
     }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let (other_storage, other, _) = open(other_dir.path());
-    assert!(other.import_pending().await.unwrap());
-    let stored = other.stored_snapshot().await.unwrap().unwrap();
-    other.import(stored).await.unwrap();
-    assert!(!other.import_pending().await.unwrap());
     assert_eq!(get(&other_storage, "k").await.as_deref(), Some(&b"v"[..]));
+    assert_eq!(other.visible_ts(), replica.visible_ts());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -249,7 +285,6 @@ async fn damaged_snapshots_are_refused() {
     for len in 0..snapshot.len() {
         let error = replica.import(snapshot[..len].to_vec()).await.unwrap_err();
         assert_eq!(error.sqlstate(), "XX000", "prefix of {len}: {error}");
-        assert!(!replica.import_pending().await.unwrap());
         assert_eq!(get(&storage, "k").await.as_deref(), Some(&b"v"[..]));
     }
 }
@@ -290,7 +325,7 @@ async fn installs_end_older_transactions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 /// Assert a snapshot exported in small chunks concatenates to the whole
-/// export, and chunks stored as they arrive import from storage.
+/// export, and chunks installed as they arrive reproduce the data.
 async fn snapshots_stream_in_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let (storage, replica, captured) = open(dir.path());
@@ -316,12 +351,11 @@ async fn snapshots_stream_in_chunks() {
 
     let other_dir = tempfile::tempdir().unwrap();
     let (other_storage, other, _) = open(other_dir.path());
-    let mut sink = other.begin_receiving().await.unwrap();
+    let mut staged = other.begin_install().await.unwrap();
     for part in parts {
-        sink.push(part).await.unwrap();
+        staged.push(part).await.unwrap();
     }
-    sink.finish().await.unwrap();
-    other.import_stored().await.unwrap();
+    other.install(staged.finish().await.unwrap()).await.unwrap();
     assert_eq!(other.visible_ts(), replica.visible_ts());
     assert_eq!(
         get(&other_storage, "k39").await,

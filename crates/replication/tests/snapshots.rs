@@ -113,5 +113,4 @@ async fn interrupted_transfers_are_retried() {
             "k{i:03}"
         );
     }
-    assert_eq!(second.stored_snapshot_bytes().await.unwrap(), 0);
 }

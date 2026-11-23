@@ -17,15 +17,16 @@
 //!   and records its position; nothing is copied or stored;
 //! - the current snapshot is a fresh view ([`Replica::capture`]), exported
 //!   with only current data when it is sent ([`SnapshotData`]);
-//! - a received snapshot is stored durably, chunk by chunk as it arrives,
-//!   before it is imported from storage, so a replica redoes an import a
-//!   crash interrupts; the stored copy is removed once the import completes.
+//! - a received snapshot is written, chunk by chunk as it arrives, into a
+//!   new generation of the replica's data, and installing it switches to
+//!   that generation in one synced write. A crash before the switch leaves
+//!   the old data current, and readers never see a snapshot half installed.
 //!
 //! Snapshots travel in chunks of [`SNAPSHOT_CHUNK_BYTES`], so neither side
 //! holds a whole snapshot in memory.
 
 use futures::StreamExt;
-use interlaken_storage::replica::{Replica, SnapshotView};
+use interlaken_storage::replica::{ReadySnapshot, Replica, SnapshotView};
 use openraft::EntryPayload;
 use openraft::alias::{SnapshotMetaOf, SnapshotOf};
 use openraft::storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine};
@@ -42,12 +43,12 @@ const MEMBERSHIP: &[u8] = b"raft_membership";
 pub const SNAPSHOT_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// A snapshot's data: a view of this replica, exported a chunk at a time
-/// when it is sent, or a snapshot received and stored here.
+/// when it is sent, or a snapshot received in full, ready to install.
 pub enum SnapshotData {
     /// A consistent view of this replica's data.
     View(SnapshotView),
-    /// The snapshot this replica received and stored.
-    Stored,
+    /// A snapshot received from another replica.
+    Ready(ReadySnapshot),
 }
 
 impl std::fmt::Debug for SnapshotData {
@@ -55,7 +56,7 @@ impl std::fmt::Debug for SnapshotData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::View(_) => f.write_str("SnapshotData::View"),
-            Self::Stored => f.write_str("SnapshotData::Stored"),
+            Self::Ready(_) => f.write_str("SnapshotData::Ready"),
         }
     }
 }
@@ -81,8 +82,6 @@ pub struct StateMachine {
     last_applied: Option<LogId>,
     /// The last applied membership, as storage holds it.
     membership: StoredMembership,
-    /// Whether an interrupted snapshot import has been checked for.
-    recovered: bool,
 }
 
 impl StateMachine {
@@ -94,38 +93,26 @@ impl StateMachine {
             applied,
             last_applied: None,
             membership: StoredMembership::default(),
-            recovered: false,
         }
-    }
-
-    /// Redo a snapshot import a crash interrupted, from the stored snapshot.
-    async fn recover(&mut self) -> std::io::Result<()> {
-        if self.recovered {
-            return Ok(());
-        }
-        if self.replica.import_pending().await.map_err(io)? {
-            self.replica.import_stored().await.map_err(io)?;
-            self.replica.clear_stored_snapshot().await.map_err(io)?;
-        }
-        self.recovered = true;
-        Ok(())
     }
 
     /// Install `data` as this replica's state, as `meta` describes. A
-    /// snapshot received from the network is already stored; another
-    /// replica's view is stored here first, a chunk at a time. Then the
-    /// stored snapshot is imported, and removed.
+    /// snapshot received from the network is ready; another replica's view
+    /// is received here first, a chunk at a time. Then storage switches to
+    /// it.
     async fn install(&mut self, meta: &SnapshotMeta, data: SnapshotData) -> std::io::Result<()> {
-        if let SnapshotData::View(view) = data {
-            let mut chunks = view.chunks(snapshot_meta_keys(), SNAPSHOT_CHUNK_BYTES);
-            let mut sink = self.replica.begin_receiving().await.map_err(io)?;
-            while let Some(chunk) = chunks.next().await.map_err(io)? {
-                sink.push(chunk).await.map_err(io)?;
+        let ready = match data {
+            SnapshotData::Ready(ready) => ready,
+            SnapshotData::View(view) => {
+                let mut chunks = view.chunks(snapshot_meta_keys(), SNAPSHOT_CHUNK_BYTES);
+                let mut staged = self.replica.begin_install().await.map_err(io)?;
+                while let Some(chunk) = chunks.next().await.map_err(io)? {
+                    staged.push(chunk).await.map_err(io)?;
+                }
+                staged.finish().await.map_err(io)?
             }
-            sink.finish().await.map_err(io)?;
-        }
-        self.replica.import_stored().await.map_err(io)?;
-        self.replica.clear_stored_snapshot().await.map_err(io)?;
+        };
+        self.replica.install(ready).await.map_err(io)?;
         self.last_applied = meta.last_log_id;
         self.membership = meta.last_membership.clone();
         self.applied
@@ -167,10 +154,8 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     type SnapshotData = SnapshotData;
     type SnapshotBuilder = SnapshotBuilder;
 
-    /// Return the last applied log ID and membership, after redoing any
-    /// interrupted snapshot import.
+    /// Return the last applied log ID and membership.
     async fn applied_state(&mut self) -> Result<(Option<LogId>, StoredMembership), std::io::Error> {
-        self.recover().await?;
         let applied: Option<LogId> = match self.replica.meta(APPLIED.to_vec()).await.map_err(io)? {
             Some(bytes) => decode(&bytes)?,
             None => None,

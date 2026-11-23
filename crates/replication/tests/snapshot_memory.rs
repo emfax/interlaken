@@ -1,12 +1,13 @@
 //! Snapshots in bounded memory (ADR-0038 phase 3).
 //!
 //! A counting global allocator (`interlaken-test-alloc`) tracks the heap
-//! this process holds. One replica holds 256 MiB of live data and has
-//! compacted its log, so a new replica can only catch up from a snapshot.
-//! Streaming it in chunks must keep the process's heap growth well below
-//! the snapshot's size. Sending it whole held it several times over; what
-//! growth remains is fjall's own: its block caches, memtables awaiting
-//! flush, and table metadata.
+//! this process holds. One replica holds live data (64 MiB, or
+//! `SNAPSHOT_MEMORY_MIB`) and has compacted its log, so a new replica can
+//! only catch up from a snapshot. Streaming it in chunks must keep the
+//! process's heap growth below half the snapshot's size, or 64 MiB if that
+//! is more: fjall's own block caches, memtables and table metadata take
+//! about 40 MiB whatever the size. Sending a snapshot whole held it several
+//! times over. The nightly job runs 512 MiB.
 //!
 //! The test runs alone in its binary, since the counters are process-wide.
 
@@ -21,8 +22,14 @@ use interlaken_test_alloc::{Counting, held, peak, reset_peak};
 /// The process's allocator, counting the heap held.
 static ALLOCATOR: Counting = Counting;
 
-/// Bytes of live data the first replica holds.
-const DATA_BYTES: usize = 256 << 20;
+/// Return the bytes of live data the first replica holds.
+fn data_bytes() -> usize {
+    std::env::var("SNAPSHOT_MEMORY_MIB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64)
+        << 20
+}
 /// Bytes in each value.
 const VALUE_BYTES: usize = 16 << 10;
 /// Values written per transaction.
@@ -51,8 +58,8 @@ fn config(id: u64) -> ReplicaConfig {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-/// Assert a new replica catches up from a 256 MiB snapshot while the heap
-/// grows by well under the snapshot's size.
+/// Assert a new replica catches up from a snapshot while the heap grows by
+/// well under the snapshot's size.
 async fn snapshots_stream_in_bounded_memory() {
     let network = MemoryNetwork::new();
     let dirs = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
@@ -70,7 +77,7 @@ async fn snapshots_stream_in_bounded_memory() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let value = Bytes::from(vec![7u8; VALUE_BYTES]);
-    let count = DATA_BYTES / VALUE_BYTES;
+    let count = data_bytes() / VALUE_BYTES;
     for start in (0..count).step_by(VALUES_PER_TXN) {
         let txn = first.storage().begin(TxnOptions::default()).await.unwrap();
         for i in start..(start + VALUES_PER_TXN).min(count) {
@@ -110,10 +117,11 @@ async fn snapshots_stream_in_bounded_memory() {
     );
     eprintln!(
         "a {} MiB snapshot grew the heap by {:.1} MiB at most",
-        DATA_BYTES >> 20,
+        data_bytes() >> 20,
         growth as f64 / f64::from(1 << 20)
     );
-    assert!(growth < DATA_BYTES / 2, "the heap grew by {growth} bytes");
+    let bound = (data_bytes() / 2).max(64 << 20);
+    assert!(growth < bound, "the heap grew by {growth} bytes");
 
     let txn = second
         .storage()

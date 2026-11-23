@@ -23,7 +23,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0008 | Version garbage collection | implemented |
 | 0009 | Storage correctness testing strategy | implemented |
 | 0037 | Replication with Raft | implemented |
-| 0038 | Streaming snapshots | accepted: phases 1 (current data only), 2 (snapshots on demand) and 3 (streaming) are built |
+| 0038 | Streaming snapshots | implemented |
 
 ## IR and optimizer
 

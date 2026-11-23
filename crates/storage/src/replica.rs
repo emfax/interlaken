@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::commit::{CommitClock, CommitHistory, CommitRequest, LogEntry, LogWrite};
-use crate::engine::{Engine, ExportCursor};
+use crate::engine::{Engine, ExportCursor, Staged, Staging};
 use crate::pool::StoragePool;
 use crate::{Error, Result, Timestamp};
 
@@ -343,23 +343,55 @@ impl Replica {
     ///
     /// Returns a storage error.
     pub async fn capture(&self) -> Result<SnapshotView> {
-        let view = self.state.pool.run(Engine::view).await?;
+        let (view, data) = self.state.pool.run(Engine::view).await?;
         Ok(SnapshotView {
             pool: Arc::clone(&self.state.pool),
             view,
+            data,
         })
     }
 
-    /// Replace this replica's data with `snapshot`'s, made by
-    /// [`SnapshotView::export`] on another replica, and continue from its
+    /// Begin receiving a snapshot made by another replica's
+    /// [`SnapshotView::chunks`] into a new generation of this replica's
+    /// data, which readers can't see until [`Replica::install`] switches to
+    /// it (ADR-0038).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn begin_install(&self) -> Result<StagedSnapshot> {
+        let staging = self.state.pool.run(Engine::begin_staging).await??;
+        Ok(StagedSnapshot {
+            pool: Arc::clone(&self.state.pool),
+            staging: Some(staging),
+        })
+    }
+
+    /// Switch this replica to a received snapshot and continue from its
     /// last commit. A snapshot holds only current data, so transactions
     /// here whose snapshots are older fail at their next operation with
     /// `25P04`, and validation history restarts at its last commit.
     ///
-    /// Store the snapshot durably first ([`Replica::store_snapshot`]): an
-    /// import a crash interrupts is redone from it on restart
-    /// ([`Replica::import_pending`]). Transactions reading while the data
-    /// is replaced can see it incomplete.
+    /// The switch is one synced write: a crash before it leaves the old
+    /// data current, and the partly received generation is removed on open.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn install(&self, ready: ReadySnapshot) -> Result<()> {
+        let staged = ready.staged;
+        let last = self
+            .state
+            .pool
+            .run(move |engine: &Engine| engine.switch_to(staged))
+            .await??;
+        self.imported(last);
+        Ok(())
+    }
+
+    /// Install a snapshot held whole in memory, made by
+    /// [`SnapshotView::export`] on another replica ([`Replica::install`]).
+    /// A malformed snapshot leaves the data as it was.
     ///
     /// # Errors
     ///
@@ -374,20 +406,7 @@ impl Replica {
         Ok(())
     }
 
-    /// Import the stored snapshot ([`Replica::import`]), reading it chunk by
-    /// chunk, so a snapshot of any size is imported in bounded memory.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::CorruptMeta`] if no snapshot is stored or it is
-    /// malformed, or a storage error.
-    pub async fn import_stored(&self) -> Result<()> {
-        let last = self.state.pool.run(Engine::import_stored).await??;
-        self.imported(last);
-        Ok(())
-    }
-
-    /// Continue from an imported snapshot whose last commit is `last`.
+    /// Continue from an installed snapshot whose last commit is `last`.
     fn imported(&self, last: Timestamp) {
         let mut validation = lock(&self.state.validation);
         let retention = validation.retention;
@@ -400,107 +419,93 @@ impl Replica {
         self.state.clock.revoke_before(last);
         self.state.clock.publish(last);
     }
-
-    /// Begin storing a snapshot received in chunks; the stored snapshot
-    /// stays as it was until [`SnapshotSink::finish`].
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn begin_receiving(&self) -> Result<SnapshotSink> {
-        let generation = self.state.pool.run(Engine::begin_stored_snapshot).await??;
-        Ok(SnapshotSink {
-            pool: Arc::clone(&self.state.pool),
-            generation,
-            next: 0,
-        })
-    }
-
-    /// Return `true` if a crash interrupted a snapshot import, which must be
-    /// redone from the stored snapshot before the replica is used.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn import_pending(&self) -> Result<bool> {
-        self.state.pool.run(Engine::import_pending).await?
-    }
-
-    /// Replace the stored snapshot with `blob`, durably.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn store_snapshot(&self, blob: Vec<u8>) -> Result<()> {
-        self.state
-            .pool
-            .run(move |engine: &Engine| engine.store_snapshot(&blob))
-            .await?
-    }
-
-    /// Remove the stored snapshot, once an import from it has completed.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn clear_stored_snapshot(&self) -> Result<()> {
-        self.state.pool.run(Engine::clear_stored_snapshot).await?
-    }
-
-    /// Return the stored snapshot, if one was stored completely.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error.
-    pub async fn stored_snapshot(&self) -> Result<Option<Vec<u8>>> {
-        self.state.pool.run(Engine::stored_snapshot).await?
-    }
 }
 
-/// Stores a snapshot as its chunks arrive ([`Replica::begin_receiving`]).
-pub struct SnapshotSink {
+/// A snapshot being received into a new data generation ([`Replica::begin_install`]).
+pub struct StagedSnapshot {
     /// Runs the writes off the async threads.
     pool: Arc<StoragePool>,
-    /// The generation the snapshot is stored under.
-    generation: u64,
-    /// The next chunk's index.
-    next: u32,
+    /// The generation being filled; taken while a chunk is written.
+    staging: Option<Staging>,
 }
 
-impl std::fmt::Debug for SnapshotSink {
-    /// Render the generation and chunks stored so far.
+impl std::fmt::Debug for StagedSnapshot {
+    /// Render the snapshot opaquely.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SnapshotSink")
-            .field("generation", &self.generation)
-            .field("chunks", &self.next)
-            .finish_non_exhaustive()
+        f.debug_struct("StagedSnapshot").finish_non_exhaustive()
     }
 }
 
-impl SnapshotSink {
-    /// Store the next chunk, unsynced.
+impl StagedSnapshot {
+    /// Take the staging state out, failing if an earlier chunk failed.
+    fn take(&mut self) -> Result<Staging> {
+        self.staging
+            .take()
+            .ok_or(Error::CorruptMeta("an earlier snapshot chunk failed"))
+    }
+
+    /// Decode, check and write the next chunk.
     ///
     /// # Errors
     ///
-    /// Returns a storage error.
+    /// Returns [`Error::CorruptMeta`] for a malformed snapshot, or a storage
+    /// error; the snapshot can then only be discarded.
     pub async fn push(&mut self, chunk: Vec<u8>) -> Result<()> {
-        let (generation, index) = (self.generation, self.next);
-        self.pool
-            .run(move |engine: &Engine| engine.store_snapshot_chunk(generation, index, &chunk))
+        let mut staging = self.take()?;
+        let staging = self
+            .pool
+            .run(move |engine: &Engine| {
+                engine.stage_chunk(&mut staging, &chunk)?;
+                Ok::<_, Error>(staging)
+            })
             .await??;
-        self.next += 1;
+        self.staging = Some(staging);
         Ok(())
     }
 
-    /// Make the stored chunks the stored snapshot, durably.
+    /// Check the snapshot ended properly and sync it, ready to install.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CorruptMeta`] if it ended early, or a storage error.
+    pub async fn finish(mut self) -> Result<ReadySnapshot> {
+        let staging = self.take()?;
+        let staged = self
+            .pool
+            .run(move |engine: &Engine| engine.finish_staging(staging))
+            .await??;
+        Ok(ReadySnapshot {
+            pool: Arc::clone(&self.pool),
+            staged,
+        })
+    }
+}
+
+/// A snapshot received in full, ready to install ([`StagedSnapshot::finish`]).
+pub struct ReadySnapshot {
+    /// Runs the removal if it is discarded.
+    pool: Arc<StoragePool>,
+    /// The received generation.
+    staged: Staged,
+}
+
+impl std::fmt::Debug for ReadySnapshot {
+    /// Render the snapshot opaquely.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadySnapshot").finish_non_exhaustive()
+    }
+}
+
+impl ReadySnapshot {
+    /// Remove the received generation without installing it.
     ///
     /// # Errors
     ///
     /// Returns a storage error.
-    pub async fn finish(self) -> Result<()> {
-        let generation = self.generation;
+    pub async fn discard(self) -> Result<()> {
+        let keyspace = self.staged.keyspace;
         self.pool
-            .run(move |engine: &Engine| engine.commit_stored_snapshot(generation))
+            .run(move |engine: &Engine| engine.discard_staging(keyspace))
             .await?
     }
 }
@@ -511,6 +516,8 @@ pub struct SnapshotView {
     pool: Arc<StoragePool>,
     /// fjall's consistent view.
     view: fjall::Snapshot,
+    /// The data generation the view is of.
+    data: fjall::Keyspace,
 }
 
 impl std::fmt::Debug for SnapshotView {
@@ -552,12 +559,14 @@ impl SnapshotChunks {
         let Some(cursor) = self.cursor.take() else {
             return Ok(None);
         };
-        let view = self.view.view.clone();
+        let (view, data) = (self.view.view.clone(), self.view.data.clone());
         let (meta_keys, budget) = (self.meta_keys.clone(), self.budget);
         let (chunk, rest) = self
             .view
             .pool
-            .run(move |engine: &Engine| engine.export_chunk(&view, &meta_keys, cursor, budget))
+            .run(move |engine: &Engine| {
+                engine.export_chunk(&view, &data, &meta_keys, cursor, budget)
+            })
             .await??;
         self.cursor = rest;
         Ok(Some(chunk))
@@ -601,9 +610,9 @@ impl SnapshotView {
     ///
     /// Returns a storage error.
     pub async fn export(self, meta_keys: Vec<Vec<u8>>) -> Result<Vec<u8>> {
-        let view = self.view;
+        let (view, data) = (self.view, self.data);
         self.pool
-            .run(move |engine: &Engine| engine.export(&view, &meta_keys))
+            .run(move |engine: &Engine| engine.export(&view, &data, &meta_keys))
             .await?
     }
 }
