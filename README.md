@@ -93,4 +93,4 @@ The slow durability checks are scripts in [`scripts/`](scripts):
 
 ## License
 
-Apache-2.0.
+MIT; see [LICENSE](LICENSE). `cargo deny check licenses` checks that every dependency's licence allows it (see `deny.toml`).

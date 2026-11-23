@@ -1,6 +1,6 @@
-# Checks every pull request to main: formatting, clippy, the API docs, the
-# test suite (which also checks the book's examples and generated reference
-# sections) and the book build.
+# Checks every pull request to main: formatting, clippy, the API docs,
+# dependency licences (deny.toml), the test suite (which also checks the
+# book's examples and generated reference sections) and the book build.
 #
 # The slow tests and durability checks run nightly instead (nightly.yml).
 name: CI
@@ -60,6 +60,16 @@ jobs:
         env:
           INTERLAKEN_COMMIT_LOG: "1"
         run: cargo test --release -p interlaken-storage
+
+  licenses:
+    name: Dependency licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Every dependency's licence must allow distributing under MIT (deny.toml).
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
 
   msrv:
     name: Build on Rust 1.90
