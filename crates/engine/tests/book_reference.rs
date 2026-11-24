@@ -543,7 +543,10 @@ fn configuration() -> String {
 fn metric_reference() -> String {
     use interlaken_storage::telemetry::{Metric, MetricKind, MetricUnit};
     let mut out = String::new();
-    for (title, metrics) in [("Storage", interlaken_storage::telemetry::METRICS)] {
+    for (title, metrics) in [
+        ("Statements", interlaken_engine::METRICS),
+        ("Storage", interlaken_storage::telemetry::METRICS),
+    ] {
         writeln!(out, "### {title}\n").unwrap();
         writeln!(out, "| Metric | Kind | Unit | Labels | Meaning |").unwrap();
         writeln!(out, "| --- | --- | --- | --- | --- |").unwrap();

@@ -5,8 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use interlaken_exec::{
-    BatchStream, ExecError, ExplainOptions, Statement, Transaction, execute, explain,
-    explain_analyze,
+    BatchStream, ExecError, ExplainOptions, Op, Physical, Statement, Transaction, UsageCounters,
+    execute, explain, explain_analyze,
 };
 use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Datum, ExecOptions, check_params};
@@ -14,11 +14,13 @@ use interlaken_ir::security::{EntityUid, SecurityContext};
 use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
 use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use super::engine::Engine;
 use super::pipeline::{Step, exec_context, parse, pin, prepare};
 use super::result::QueryResult;
-use super::stream::{Execution, QueryStream};
+use super::stream::{Execution, Meter, QueryStream};
+use super::usage::Usage;
 use crate::catalog::{
     self, ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec,
 };
@@ -28,6 +30,45 @@ use crate::policy::{
     verify_locally,
 };
 use crate::privileges::{self, Privilege, Privileges};
+use crate::telemetry;
+
+/// Count one step of a policy proposal (ADR-0030) and its outcome.
+fn record_proposal<T>(step: &'static str, result: &Result<T, EngineError>) {
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    metrics::counter!(telemetry::POLICY_PROPOSALS, "step" => step, "outcome" => outcome)
+        .increment(1);
+}
+
+/// Return a new statement span, whose fields are recorded as it runs.
+fn statement_span() -> tracing::Span {
+    tracing::info_span!(
+        "interlaken.statement",
+        kind = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+        rows_scanned = tracing::field::Empty,
+        rows_returned = tracing::field::Empty,
+        bytes_read = tracing::field::Empty,
+        bytes_written = tracing::field::Empty,
+        cpu_seconds = tracing::field::Empty,
+        peak_memory = tracing::field::Empty,
+    )
+}
+
+/// Return a query or DML plan's kind, for metrics: the first operator
+/// that writes, or `select` if none does.
+fn statement_kind(node: &Physical) -> &'static str {
+    match &node.op {
+        Op::Insert { .. } => "insert",
+        Op::Update { .. } => "update",
+        Op::Delete { .. } => "delete",
+        op => op
+            .inputs()
+            .into_iter()
+            .map(statement_kind)
+            .find(|&kind| kind != "select")
+            .unwrap_or("select"),
+    }
+}
 
 /// What a statement may change, which decides the privilege it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +128,8 @@ pub struct Session {
     txn: Option<Open>,
     /// A dropped DML statement still running to its end, if any.
     finishing: Option<Finishing>,
+    /// The usage of the current or last transaction's statements.
+    usage: Usage,
 }
 
 impl Session {
@@ -98,6 +141,7 @@ impl Session {
             statement_timeout: None,
             txn: None,
             finishing: None,
+            usage: Usage::default(),
         }
     }
 
@@ -112,6 +156,26 @@ impl Session {
     /// A cancelled statement fails with SQLSTATE `57014` and its writes are undone.
     pub fn set_statement_timeout(&mut self, timeout: Option<Duration>) {
         self.statement_timeout = timeout;
+    }
+
+    /// Return the summed usage of the query and DML statements of the open
+    /// transaction, or of the last one if none is open (ADR-0039). A
+    /// statement run outside a transaction is its own transaction.
+    #[must_use]
+    pub fn transaction_usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Add a statement's usage to its transaction's.
+    pub(super) fn add_usage(&mut self, usage: Usage) {
+        self.usage += usage;
+    }
+
+    /// Return the open transaction's write set size, or zero if none is open.
+    pub(super) fn write_set_bytes(&self) -> usize {
+        self.txn
+            .as_ref()
+            .map_or(0, |open| open.exec.txn().write_set_bytes())
     }
 
     /// Return whether a transaction is open.
@@ -238,6 +302,7 @@ impl Session {
             catalog_dirty: false,
             policies_dirty: false,
         });
+        self.usage = Usage::default();
         Ok(())
     }
 
@@ -314,6 +379,44 @@ impl Session {
     /// Run `body` as one statement of `kind`, in the open transaction or in
     /// its own.
     async fn run<T>(
+        &mut self,
+        kind: Kind,
+        body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let label = match kind {
+            Kind::Catalog => "ddl",
+            Kind::Policy => "policy",
+            Kind::Admin => "admin",
+            Kind::Query => "other",
+        };
+        let span = tracing::info_span!(
+            "interlaken.statement",
+            kind = label,
+            outcome = tracing::field::Empty,
+        );
+        let started = Instant::now();
+        let result = self
+            .run_unmetered(kind, body)
+            .instrument(span.clone())
+            .await;
+        let outcome = if result.is_ok() { "ok" } else { "error" };
+        span.record("outcome", outcome);
+        metrics::counter!(telemetry::STATEMENTS, "kind" => label, "outcome" => outcome)
+            .increment(1);
+        metrics::histogram!(
+            telemetry::STATEMENT_DURATION,
+            "kind" => label,
+            "phase" => "execute"
+        )
+        .record(started.elapsed().as_secs_f64());
+        if let Err(error) = &result {
+            telemetry::record_failure(error);
+        }
+        result
+    }
+
+    /// Run `body` as [`Session::run`] does, without recording metrics.
+    async fn run_unmetered<T>(
         &mut self,
         kind: Kind,
         body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
@@ -490,9 +593,19 @@ impl Session {
         text: &str,
         params: Vec<Datum>,
     ) -> Result<QueryStream<'_>, EngineError> {
-        match parse(text) {
-            Ok(plan) => self.start_stream(Ok(&plan), params).await,
-            Err(e) => self.start_stream(Err(e), params).await,
+        let (started, span) = (Instant::now(), statement_span());
+        let parsed =
+            tracing::info_span!(parent: &span, "interlaken.parse").in_scope(|| parse(text));
+        let parse_time = started.elapsed();
+        match parsed {
+            Ok(plan) => {
+                self.start_stream(Ok(&plan), params, (started, parse_time, span))
+                    .await
+            }
+            Err(e) => {
+                self.start_stream(Err(e), params, (started, parse_time, span))
+                    .await
+            }
         }
     }
 
@@ -507,16 +620,21 @@ impl Session {
         plan: &Plan,
         params: Vec<Datum>,
     ) -> Result<QueryStream<'_>, EngineError> {
-        self.start_stream(Ok(plan), params).await
+        let timing = (Instant::now(), Duration::ZERO, statement_span());
+        self.start_stream(Ok(plan), params, timing).await
     }
 
     /// Begin a query statement (and an implicit transaction if none is
-    /// open), plan `plan` and return the stream that executes it.
+    /// open), plan `plan` and return the stream that executes it. `timing`
+    /// is when the statement started, how long parsing took, and its span.
     async fn start_stream(
         &mut self,
         plan: Result<&Plan, EngineError>,
         params: Vec<Datum>,
+        timing: (Instant, Duration, tracing::Span),
     ) -> Result<QueryStream<'_>, EngineError> {
+        let (started, parse_time, span) = timing;
+        let planning = Instant::now();
         self.settle().await?;
         let implicit = self.txn.is_none();
         if implicit {
@@ -539,6 +657,8 @@ impl Session {
         let (catalog_dirty, policies_dirty, options) =
             (open.catalog_dirty, open.policies_dirty, open.options);
         let txn = open.exec.txn();
+        let written_before = txn.write_set_bytes();
+        let reads = Arc::new(UsageCounters::default());
         let work = async {
             let catalog = engine.catalogs.catalog(txn, catalog_dirty).await?;
             let privileges = privileges::privileges(txn, &context.principal).await?;
@@ -555,24 +675,41 @@ impl Session {
             let prepared = prepare(&step, plan?).await?;
             check_params(&prepared.params, &params)?;
             let writes = prepared.physical.writes();
-            let batches = execute(&prepared.physical, &exec_context(&step, &prepared, params));
+            let ctx = exec_context(&step, &prepared, params).with_usage(Arc::clone(&reads));
+            let batches = execute(&prepared.physical, &ctx);
             Ok::<_, EngineError>(Execution {
                 columns: prepared.columns,
                 types: prepared.types,
                 batches,
                 writes,
+                memory: Arc::clone(&ctx.memory),
+                kind: statement_kind(&prepared.physical),
             })
-        };
-        let started = match timeout {
+        }
+        .instrument(tracing::info_span!(parent: &span, "interlaken.plan"));
+        let begun = match timeout {
             Some(limit) => tokio::time::timeout(limit, work)
                 .await
                 .unwrap_or(Err(EngineError::Exec(ExecError::QueryCanceled))),
             None => work.await,
         };
-        match started {
-            Ok(run) => Ok(QueryStream::new(self, statement, implicit, run, deadline)),
+        let meter = Meter {
+            span,
+            started,
+            parse: parse_time,
+            plan: planning.elapsed(),
+            executing: Instant::now(),
+            reads,
+            cpu: Arc::default(),
+            written_before,
+        };
+        match begun {
+            Ok(run) => Ok(QueryStream::new(
+                self, statement, implicit, run, deadline, meter,
+            )),
             Err(e) => {
                 self.fail_statement(statement, implicit);
+                meter.record_unplanned(&e);
                 Err(e)
             }
         }
@@ -948,10 +1085,13 @@ impl Session {
         invariants: &str,
     ) -> Result<i64, EngineError> {
         let proposer = format!("{}", self.context.principal);
-        self.run(Kind::Admin, async |step: &Step<'_>| {
-            submit_proposal(step.txn, document, invariants, &proposer).await
-        })
-        .await
+        let result = self
+            .run(Kind::Admin, async |step: &Step<'_>| {
+                submit_proposal(step.txn, document, invariants, &proposer).await
+            })
+            .await;
+        record_proposal("submit", &result);
+        result
     }
 
     /// Run the local gates on a proposal and record the results (ADR-0030),
@@ -963,11 +1103,14 @@ impl Session {
     pub async fn verify_policies(&mut self, proposal: i64) -> Result<Vec<GateResult>, EngineError> {
         let verifier = format!("{}", self.context.principal);
         let base = self.context.clone();
-        self.run(Kind::Admin, async |step: &Step<'_>| {
-            let catalog: Arc<dyn interlaken_ir::catalog::Catalog> = step.catalog.clone();
-            verify_locally(step.txn, catalog, proposal, &verifier, &base).await
-        })
-        .await
+        let result = self
+            .run(Kind::Admin, async |step: &Step<'_>| {
+                let catalog: Arc<dyn interlaken_ir::catalog::Catalog> = step.catalog.clone();
+                verify_locally(step.txn, catalog, proposal, &verifier, &base).await
+            })
+            .await;
+        record_proposal("verify", &result);
+        result
     }
 
     /// Activate a verified proposal; return the new policy version
@@ -984,10 +1127,13 @@ impl Session {
         confirm: bool,
     ) -> Result<i64, EngineError> {
         let confirmed_by = confirm.then(|| format!("{}", self.context.principal));
-        self.run(Kind::Policy, async |step: &Step<'_>| {
-            activate(step.txn, proposal, confirmed_by.as_deref()).await
-        })
-        .await
+        let result = self
+            .run(Kind::Policy, async |step: &Step<'_>| {
+                activate(step.txn, proposal, confirmed_by.as_deref()).await
+            })
+            .await;
+        record_proposal("activate", &result);
+        result
     }
 
     /// Replace the policy settings.

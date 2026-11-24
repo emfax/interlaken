@@ -48,6 +48,7 @@ use crate::lookup::LookupKey;
 use crate::memory::{Reservation, batch_bytes};
 use crate::metrics::NodeMetrics;
 use crate::physical::{Op, Physical};
+use crate::usage::UsageCounters;
 
 /// The most keys (or prefix scans) in one storage call; a batch's keys go
 /// in several concurrent calls, so the storage pool reads them in parallel.
@@ -169,13 +170,22 @@ struct Source {
     batch_rows: usize,
     /// Where to count storage calls.
     metrics: Option<Arc<NodeMetrics>>,
+    /// Where to count the statement's reads.
+    usage: Arc<UsageCounters>,
 }
 
 impl Source {
-    /// Record one storage call that read `values`.
-    fn record_call<'v>(&self, values: impl IntoIterator<Item = &'v Vec<Stored>>) {
+    /// Record one storage call that read `values`: rows if `rows`, or
+    /// index entries' primary keys.
+    fn record_call<'v>(&self, values: impl IntoIterator<Item = &'v Vec<Stored>>, rows: bool) {
+        let (mut count, mut bytes) = (0, 0);
+        for value in values {
+            count += 1;
+            bytes += value.iter().map(stored_len).sum::<usize>();
+        }
+        self.usage.record_read(if rows { count } else { 0 }, bytes);
         if let Some(m) = &self.metrics {
-            m.record_storage_call(values.into_iter().flatten().map(stored_len).sum());
+            m.record_storage_call(bytes);
         }
     }
 
@@ -188,7 +198,7 @@ impl Source {
         let mut found = Vec::with_capacity(keys.len());
         for rows in futures::future::try_join_all(calls).await? {
             let rows: Vec<Vec<Stored>> = rows.into_iter().flatten().collect();
-            self.record_call(&rows);
+            self.record_call(&rows, true);
             found.extend(rows);
         }
         Ok(found)
@@ -218,7 +228,7 @@ impl Source {
                     .map(|chunk| rows::scan_many(txn, stored, chunk));
                 let mut batches = Vec::with_capacity(scans.len());
                 for chunk in futures::future::try_join_all(calls).await? {
-                    self.record_call(chunk.iter().flat_map(|b| &b.rows));
+                    self.record_call(chunk.iter().flat_map(|b| &b.rows), true);
                     batches.extend(chunk);
                 }
                 for (scan, batch) in scans.into_iter().zip(batches) {
@@ -231,7 +241,7 @@ impl Source {
                     .map(|chunk| rows::scan_index_many(txn, stored, index, chunk));
                 let mut batches = Vec::with_capacity(scans.len());
                 for chunk in futures::future::try_join_all(calls).await? {
-                    self.record_call(chunk.iter().flat_map(|b| &b.primary_keys));
+                    self.record_call(chunk.iter().flat_map(|b| &b.primary_keys), false);
                     batches.extend(chunk);
                 }
                 for (scan, batch) in scans.into_iter().zip(batches) {
@@ -296,6 +306,7 @@ impl LookupState {
             point: self.point,
             batch_rows: self.batch_rows,
             metrics: self.metrics.clone(),
+            usage: self.ctx.usage.clone(),
         }));
         Ok(())
     }

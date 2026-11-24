@@ -310,8 +310,10 @@ impl State {
                     }
                     None => rows::scan(&self.ctx.txn, stored, scan).await?,
                 };
+                let bytes = rows_bytes(&batch.rows);
+                self.ctx.usage.record_read(batch.rows.len(), bytes);
                 if let Some(m) = &self.metrics {
-                    m.record_storage_call(rows_bytes(&batch.rows));
+                    m.record_storage_call(bytes);
                 }
                 self.done = batch.resume.is_none();
                 scan.resume = batch.resume;
@@ -327,9 +329,13 @@ impl State {
                         .into_iter()
                         .flatten()
                         .collect();
+                let (key_bytes, row_bytes) = (rows_bytes(&batch.primary_keys), rows_bytes(&found));
+                self.ctx
+                    .usage
+                    .record_read(found.len(), key_bytes + row_bytes);
                 if let Some(m) = &self.metrics {
-                    m.record_storage_call(rows_bytes(&batch.primary_keys));
-                    m.record_storage_call(rows_bytes(&found));
+                    m.record_storage_call(key_bytes);
+                    m.record_storage_call(row_bytes);
                 }
                 Ok(Some(found))
             }

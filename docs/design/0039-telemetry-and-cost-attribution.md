@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phase 1 (facades and storage) is built; its *As implemented* notes record where the result differs from this design.
+Accepted. Phases 1 (facades and storage) and 2 (statements and `Usage`) are built; its *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -270,6 +270,19 @@ No other crate depends on it. Tests use its test recorder as a dev-dependency.
 
 - Count rows, bytes, CPU time and peak memory per statement from the executor's existing counters, and return `Usage` with results.
 - Record the statement, memory and authorization metrics, and the statement spans.
+
+#### As implemented (phase 2)
+
+- **`Usage` fields:** `rows_out` became `rows_returned`, the rows a statement returned; rows a DML statement changes without `RETURNING` aren't counted separately. `bytes_written` is the key and value bytes the statement added to its transaction's write set (`Txn::write_set_bytes` before and after), which is what its commit writes; a failed or cancelled statement's is zero. `peak_memory` summed over a transaction is the largest statement's.
+- **Where `Usage` appears:** `QueryResult::usage`, `QueryStream::usage()` once the stream has ended, and `Session::transaction_usage()`, the sum for the open or last transaction. DDL, policy and administrative methods don't return usage; they are counted in the statement metrics only.
+- **Reads are counted for every statement** by `UsageCounters` in the executor's context: scans and lookups add each storage call's rows and bytes, separately from `EXPLAIN ANALYZE`'s per-operator counters. Rows of index entries count towards bytes but not rows scanned.
+- **CPU time** is measured around each poll of the plan's root stream, which is also where the `interlaken.execute` span is entered. Decoding on storage threads isn't counted.
+- **Statement kinds:** queries and DML are labelled `select`, `insert`, `update` or `delete` by the first writing operator in the plan, or `unplanned` if they fail before planning finishes. The other methods are labelled `ddl`, `policy`, `admin` or `other` (`prepare`, `explain`, `privileges`). Outcomes are `ok`, `error` and `cancelled` (a stream dropped before its end; a DML statement that then finishes in the background is counted up to that point).
+- **Added:** `interlaken_statement_cpu_seconds` (a histogram of executor time per statement, whose sum is the total) and `interlaken_bytes_written_total`.
+- **Denials** are counted by error: `column` (a column policy), `write` (a write check), `statement` (a missing privilege or another security error). Rows policies filter out aren't denials, and denials carry no table names.
+- **Policy proposals** are counted by step (`submit`, `verify`, `activate`) and outcome (`ok`, `error`).
+- **UDF time** isn't recorded: WASM UDFs (ADR-0029) aren't built.
+- **`interlaken_engine::describe_metrics()`** describes every crate's metrics in the build, and `interlaken_engine::METRICS` lists the engine's.
 
 ### Phase 3: replication and the network
 

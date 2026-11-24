@@ -24,12 +24,14 @@ pub mod policy;
 pub mod privileges;
 mod session;
 mod sqlstate;
+mod telemetry;
 
 pub use authz::{EntityData, LoadedEntities, load_entities, load_principal};
 pub use error::EngineError;
 pub use privileges::{Privilege, Privileges};
-pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session};
+pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session, Usage};
 pub use sqlstate::{SQLSTATES, SqlState};
+pub use telemetry::{METRICS, describe_metrics};
 
 /// The README's examples, compiled and run as doc tests so they stay correct.
 #[cfg(doctest)]

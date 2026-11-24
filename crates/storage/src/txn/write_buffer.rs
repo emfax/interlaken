@@ -112,7 +112,6 @@ impl WriteBuffer {
     }
 
     /// Return the write set size in bytes of keys plus values.
-    #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
     }

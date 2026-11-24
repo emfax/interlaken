@@ -40,6 +40,7 @@ mod physical;
 mod references;
 mod rowwise;
 mod transaction;
+mod usage;
 
 pub use access::{Access, KeyBounds};
 pub use closure::ClosurePlan;
@@ -55,3 +56,4 @@ pub use operators::{from_stored, stored_type, to_stored};
 pub use physical::{Aggregate, BATCH_ROWS, Layout, Op, Physical, PlanOptions, plan, plan_with};
 pub use references::{CascadePlans, ReferencePlan, cascade_plans};
 pub use transaction::{Statement, Transaction};
+pub use usage::UsageCounters;

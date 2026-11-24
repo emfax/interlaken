@@ -5,6 +5,8 @@ use interlaken_exec::datum_at;
 use interlaken_ir::interp::Datum;
 use interlaken_ir::{DataType, ScalarType, Type};
 
+use super::usage::Usage;
+
 /// The rows a query (or a DML statement's `RETURNING`) produced.
 #[derive(Clone, Debug)]
 pub struct QueryResult {
@@ -14,6 +16,8 @@ pub struct QueryResult {
     pub types: Vec<Type>,
     /// The rows, as Arrow batches.
     pub batches: Vec<RecordBatch>,
+    /// What the statement cost (ADR-0039).
+    pub usage: Usage,
 }
 
 impl QueryResult {

@@ -7,7 +7,7 @@ Interlaken records metrics through the [`metrics`](https://docs.rs/metrics) crat
 To collect them, install a `metrics` recorder (a Prometheus or OpenTelemetry exporter, for example) and a `tracing` subscriber when your program starts, then pass Interlaken's metric declarations to the recorder so it can show their units and descriptions:
 
 ```rust,ignore
-interlaken_storage::telemetry::describe(interlaken_storage::telemetry::METRICS);
+interlaken_engine::describe_metrics();
 ```
 
 The `interlaken-telemetry` crate has an in-memory recorder and subscriber for tests (`install_test_recorder`, `install_test_subscriber`).
@@ -23,17 +23,55 @@ Labels never hold keys, values, SQL text or table names, which policies may hide
 | `interlaken.commit` | `isolation`, `durability`, `outcome` | one transaction's commit, from request to answer |
 | `interlaken.storage.commit_group` | `transactions`, `bytes` | the sequencer validating and writing one group |
 | `interlaken.gc.pass` | `examined`, `removed` | one garbage collection pass |
+| `interlaken.statement` | `kind`, `outcome`; for queries and DML also `rows_scanned`, `rows_returned`, `bytes_read`, `bytes_written`, `cpu_seconds`, `peak_memory` | one statement, from its start to its end |
+| `interlaken.parse`, `interlaken.plan` | none | parsing and planning a query or DML statement, under its statement span |
+| `interlaken.execute` | none | entered each time the statement's plan is polled for rows, under its statement span |
+
+No span records SQL text or IR, so a host that wants statement text in its traces adds it in its own span around the call, where it decides what is safe to record.
+
+## Statement usage
+
+Every query and DML statement counts the work it caused, whether or not a recorder is installed, as a `Usage`:
+
+| Field | Meaning |
+| --- | --- |
+| `rows_scanned` | rows storage returned to the statement's scans and lookups |
+| `rows_returned` | rows the statement returned |
+| `bytes_read` | bytes of the values its scans and lookups read, as decoded |
+| `bytes_written` | key and value bytes it added to its transaction's write set; zero if it failed or was cancelled |
+| `cpu` | time spent executing on the statement's task, not counting waits for storage or the caller |
+| `peak_memory` | the most query memory it reserved at once |
+| `elapsed` | time from its start to its end |
+
+`QueryResult::usage` carries a collected statement's usage, and `QueryStream::usage()` a streamed one's once it has ended. `Session::transaction_usage()` sums the statements of the open transaction, or of the last one; a statement outside a transaction is its own transaction. Applications can log, bill or set quotas on it without a metrics backend.
 
 ### Useful ratios
 
 - **Write amplification:** `interlaken_storage_bytes_written_total` divided by `interlaken_storage_bytes_committed_total` is what each committed byte costs in disk writes, including the journal, flushes and compaction. It counts all of the process's disk writes, and is only available on Linux.
 - **Conflict rate:** `interlaken_storage_commits_total{outcome="conflict"}` relative to `{outcome="committed"}`.
 - **Sequencer saturation:** the rate of `interlaken_storage_sequencer_busy_seconds`, summed over both phases, near 1 means the commit sequencer limits throughput.
+- **Wasted scanning:** `interlaken_rows_returned_total` divided by `interlaken_rows_scanned_total`. A low ratio means filters aren't reaching storage, or an index is missing.
 - **Garbage collection held back:** a rising `interlaken_storage_oldest_snapshot_age_seconds` means a long transaction is keeping old versions alive.
 
 ## Metric reference
 
 <!-- begin generated: metrics -->
+### Statements
+
+| Metric | Kind | Unit | Labels | Meaning |
+| --- | --- | --- | --- | --- |
+| `interlaken_statements_total` | counter | count | `kind`, `outcome` | Statements run, by kind (`select`, `insert`, `update`, `delete`, `unplanned` for a query that failed before planning finished, `ddl`, `policy`, `admin`, `other`) and outcome (`ok`, `error`, `cancelled`). |
+| `interlaken_statement_duration_seconds` | histogram | seconds | `kind`, `phase` | Time per statement phase (`parse`, `plan`, `execute`). A streamed statement's execution includes time the caller spends between batches. |
+| `interlaken_statement_cpu_seconds` | histogram | seconds | `kind` | Time each query or DML statement spent executing on its task, not counting waits for storage. |
+| `interlaken_rows_scanned_total` | counter | count | none | Rows storage returned to scans and lookups. |
+| `interlaken_rows_returned_total` | counter | count | none | Rows statements returned. Divided by rows scanned, how much scanning was useful. |
+| `interlaken_bytes_read_total` | counter | bytes | none | Bytes of the values scans and lookups read, as decoded. |
+| `interlaken_bytes_written_total` | counter | bytes | none | Key and value bytes statements added to their transactions' write sets. |
+| `interlaken_query_memory_peak_bytes` | histogram | bytes | none | The most query memory each query or DML statement reserved at once. |
+| `interlaken_query_memory_exceeded_total` | counter | count | none | Statements that failed for exceeding a memory budget (SQLSTATE `53200`). |
+| `interlaken_authz_denials_total` | counter | count | `kind` | Statements refused by security, by kind: `column` (a column policy), `write` (a write check), `statement` (a missing privilege or another security error). Rows policies filter out aren't denials. |
+| `interlaken_policy_proposals_total` | counter | count | `step`, `outcome` | Policy proposal steps (`submit`, `verify`, `activate`) by outcome (`ok`, `error`). |
+
 ### Storage
 
 | Metric | Kind | Unit | Labels | Meaning |

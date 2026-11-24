@@ -400,6 +400,13 @@ impl Txn {
         Ok(())
     }
 
+    /// Return the size of the transaction's buffered writes, in bytes of
+    /// keys plus values: what its commit would write.
+    #[must_use]
+    pub fn write_set_bytes(&self) -> usize {
+        self.state().writes.bytes()
+    }
+
     /// Mark a statement boundary.
     ///
     /// Writes from the statement just finished become visible to reads.

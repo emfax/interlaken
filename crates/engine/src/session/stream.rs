@@ -1,15 +1,21 @@
 //! Streaming a statement's rows to the caller (ADR-0031).
 
-use std::time::Instant;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
-use futures::StreamExt;
-use interlaken_exec::{BatchStream, ExecError, Statement};
+use futures::{Stream, StreamExt};
+use interlaken_exec::{BatchStream, ExecError, QueryMemory, Statement, UsageCounters};
 use interlaken_ir::Type;
 
 use super::connection::Session;
 use super::result::QueryResult;
+use super::usage::Usage;
 use crate::error::EngineError;
+use crate::telemetry;
 
 /// A planned statement's executing batches and what they hold.
 pub(super) struct Execution {
@@ -21,6 +27,104 @@ pub(super) struct Execution {
     pub(super) batches: BatchStream,
     /// Whether the plan writes (DML).
     pub(super) writes: bool,
+    /// The statement's query memory, for its peak.
+    pub(super) memory: Arc<QueryMemory>,
+    /// The statement's kind, for metrics.
+    pub(super) kind: &'static str,
+}
+
+/// What a statement's usage and metrics are computed from (ADR-0039).
+pub(super) struct Meter {
+    /// The statement's span.
+    pub(super) span: tracing::Span,
+    /// When the statement started.
+    pub(super) started: Instant,
+    /// Time spent parsing.
+    pub(super) parse: Duration,
+    /// Time spent planning.
+    pub(super) plan: Duration,
+    /// When execution started.
+    pub(super) executing: Instant,
+    /// Rows and bytes read from storage.
+    pub(super) reads: Arc<UsageCounters>,
+    /// Nanoseconds spent polling the plan.
+    pub(super) cpu: Arc<AtomicU64>,
+    /// The transaction's write set size when the statement started.
+    pub(super) written_before: usize,
+}
+
+impl Meter {
+    /// Record the phase durations of a statement of `kind`.
+    fn record_phases(&self, kind: &'static str, execute: Option<Duration>) {
+        let phase = |phase: &'static str, time: Duration| {
+            metrics::histogram!(telemetry::STATEMENT_DURATION, "kind" => kind, "phase" => phase)
+                .record(time.as_secs_f64());
+        };
+        if !self.parse.is_zero() {
+            phase("parse", self.parse);
+        }
+        phase("plan", self.plan);
+        if let Some(execute) = execute {
+            phase("execute", execute);
+        }
+    }
+
+    /// Record a statement that failed before it began executing.
+    pub(super) fn record_unplanned(&self, error: &EngineError) {
+        let kind = "unplanned";
+        self.record_phases(kind, None);
+        metrics::counter!(telemetry::STATEMENTS, "kind" => kind, "outcome" => "error").increment(1);
+        telemetry::record_failure(error);
+        self.span.record("kind", kind);
+        self.span.record("outcome", "error");
+    }
+}
+
+/// A stream that times each poll of the plan, within the execute span.
+struct Timed {
+    /// The plan's batches.
+    inner: BatchStream,
+    /// Where to add the time.
+    cpu: Arc<AtomicU64>,
+    /// The `interlaken.execute` span.
+    span: tracing::Span,
+}
+
+impl Stream for Timed {
+    type Item = Result<RecordBatch, ExecError>;
+
+    /// Poll the plan within the span, adding the time the poll took.
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let _entered = this.span.enter();
+        let start = Instant::now();
+        let poll = this.inner.poll_next_unpin(cx);
+        let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        this.cpu.fetch_add(nanos, Ordering::Relaxed);
+        poll
+    }
+}
+
+/// Wrap a plan's batches so each poll's time adds to `cpu`, within an
+/// `interlaken.execute` span under `parent`.
+pub(super) fn timed(
+    inner: BatchStream,
+    cpu: Arc<AtomicU64>,
+    parent: &tracing::Span,
+) -> BatchStream {
+    let span = tracing::info_span!(parent: parent, "interlaken.execute");
+    Timed { inner, cpu, span }.boxed()
+}
+
+/// How a statement ended, for its metrics.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// It ran to its end and its writes were kept.
+    Ok,
+    /// It failed, and its writes were undone.
+    Error,
+    /// Its stream was dropped before its end.
+    Cancelled,
 }
 
 /// The rows of a running query or DML statement, read a batch at a time
@@ -79,6 +183,16 @@ pub struct QueryStream<'s> {
     writes: bool,
     /// When the statement times out, if it has a timeout.
     deadline: Option<Instant>,
+    /// What its usage is computed from.
+    meter: Meter,
+    /// The statement's query memory.
+    memory: Arc<QueryMemory>,
+    /// The statement's kind, for metrics.
+    kind: &'static str,
+    /// Rows returned so far.
+    rows_returned: u64,
+    /// The statement's usage, once it has ended.
+    usage: Option<Usage>,
 }
 
 impl<'s> QueryStream<'s> {
@@ -89,17 +203,76 @@ impl<'s> QueryStream<'s> {
         implicit: bool,
         run: Execution,
         deadline: Option<Instant>,
+        meter: Meter,
     ) -> Self {
+        let batches = timed(run.batches, Arc::clone(&meter.cpu), &meter.span);
+        meter.span.record("kind", run.kind);
         Self {
             session,
             statement: Some(statement),
             implicit,
             columns: run.columns,
             types: run.types,
-            batches: Some(run.batches),
+            batches: Some(batches),
             writes: run.writes,
             deadline,
+            meter,
+            memory: run.memory,
+            kind: run.kind,
+            rows_returned: 0,
+            usage: None,
         }
+    }
+
+    /// Return the statement's usage once it has ended (ADR-0039), or `None`
+    /// while it runs.
+    #[must_use]
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
+    }
+
+    /// End the statement's accounting: compute its usage, record its
+    /// metrics and span fields, and add it to the session's transaction.
+    fn account(&mut self, outcome: Outcome, bytes_written: usize, error: Option<&EngineError>) {
+        let meter = &self.meter;
+        let usage = Usage {
+            rows_scanned: meter.reads.rows_scanned(),
+            rows_returned: self.rows_returned,
+            bytes_read: meter.reads.bytes_read(),
+            bytes_written: u64::try_from(bytes_written).unwrap_or(u64::MAX),
+            cpu: Duration::from_nanos(meter.cpu.load(Ordering::Relaxed)),
+            peak_memory: u64::try_from(self.memory.peak()).unwrap_or(u64::MAX),
+            elapsed: meter.started.elapsed(),
+        };
+        let kind = self.kind;
+        let outcome = match outcome {
+            Outcome::Ok => "ok",
+            Outcome::Error => "error",
+            Outcome::Cancelled => "cancelled",
+        };
+        meter.record_phases(kind, Some(meter.executing.elapsed()));
+        metrics::counter!(telemetry::STATEMENTS, "kind" => kind, "outcome" => outcome).increment(1);
+        metrics::histogram!(telemetry::STATEMENT_CPU, "kind" => kind)
+            .record(usage.cpu.as_secs_f64());
+        metrics::counter!(telemetry::ROWS_SCANNED).increment(usage.rows_scanned);
+        metrics::counter!(telemetry::ROWS_RETURNED).increment(usage.rows_returned);
+        metrics::counter!(telemetry::BYTES_READ).increment(usage.bytes_read);
+        metrics::counter!(telemetry::BYTES_WRITTEN).increment(usage.bytes_written);
+        #[expect(clippy::cast_precision_loss, reason = "metrics are approximate")]
+        metrics::histogram!(telemetry::QUERY_MEMORY_PEAK).record(usage.peak_memory as f64);
+        if let Some(error) = error {
+            telemetry::record_failure(error);
+        }
+        let span = &meter.span;
+        span.record("outcome", outcome);
+        span.record("rows_scanned", usage.rows_scanned);
+        span.record("rows_returned", usage.rows_returned);
+        span.record("bytes_read", usage.bytes_read);
+        span.record("bytes_written", usage.bytes_written);
+        span.record("cpu_seconds", usage.cpu.as_secs_f64());
+        span.record("peak_memory", usage.peak_memory);
+        self.session.add_usage(usage);
+        self.usage = Some(usage);
     }
 
     /// Return the output column names; unnamed columns are `?column?`, as in Postgres.
@@ -136,24 +309,39 @@ impl<'s> QueryStream<'s> {
             None => batches.next().await,
         };
         match pulled {
-            Some(Ok(batch)) => Some(Ok(batch)),
+            Some(Ok(batch)) => {
+                self.rows_returned += batch.num_rows() as u64;
+                Some(Ok(batch))
+            }
             Some(Err(e)) => {
                 self.batches = None;
+                let error = EngineError::from(e);
                 if let Some(statement) = self.statement.take() {
                     self.session.fail_statement(statement, self.implicit);
+                    self.account(Outcome::Error, 0, Some(&error));
                 }
-                Some(Err(e.into()))
+                Some(Err(error))
             }
             None => {
                 self.batches = None;
                 let statement = self.statement.take()?;
+                let written = self
+                    .session
+                    .write_set_bytes()
+                    .saturating_sub(self.meter.written_before);
                 match self
                     .session
                     .finish_statement(statement, self.implicit)
                     .await
                 {
-                    Ok(()) => None,
-                    Err(e) => Some(Err(e)),
+                    Ok(()) => {
+                        self.account(Outcome::Ok, written, None);
+                        None
+                    }
+                    Err(e) => {
+                        self.account(Outcome::Error, 0, Some(&e));
+                        Some(Err(e))
+                    }
                 }
             }
         }
@@ -186,6 +374,7 @@ impl<'s> QueryStream<'s> {
             columns: std::mem::take(&mut self.columns),
             types: std::mem::take(&mut self.types),
             batches,
+            usage: self.usage.unwrap_or_default(),
         })
     }
 }
@@ -198,6 +387,8 @@ impl Drop for QueryStream<'_> {
         let Some(statement) = self.statement.take() else {
             return;
         };
+        // A DML statement finishing in the background is counted up to here.
+        self.account(Outcome::Cancelled, 0, None);
         match (self.writes, self.batches.take()) {
             (true, Some(batches)) => {
                 self.session

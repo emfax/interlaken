@@ -10,10 +10,12 @@ license.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 futures.workspace = true
+metrics.workspace = true
 interlaken-exec.workspace = true
 interlaken-ir.workspace = true
 interlaken-storage.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 cedar-policy = { workspace = true, optional = true }
 interlaken-net = { workspace = true, optional = true }
 interlaken-replication = { workspace = true, optional = true }
@@ -28,6 +30,7 @@ cluster = ["dep:interlaken-net", "dep:interlaken-replication"]
 
 [dev-dependencies]
 rcgen = "=0.14.5"
+interlaken-telemetry.workspace = true
 interlaken-test-alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

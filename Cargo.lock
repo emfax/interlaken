@@ -1268,12 +1268,15 @@ dependencies = [
  "interlaken-net",
  "interlaken-replication",
  "interlaken-storage",
+ "interlaken-telemetry",
  "interlaken-test-alloc",
+ "metrics",
  "proptest",
  "rcgen",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

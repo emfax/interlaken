@@ -21,6 +21,7 @@ use crate::operators::{
     project, set_op, sort, table_scan, unnest, values, write_check,
 };
 use crate::physical::{Op, Physical};
+use crate::usage::UsageCounters;
 
 /// A stream of result batches.
 pub type BatchStream = BoxStream<'static, Result<RecordBatch, ExecError>>;
@@ -56,6 +57,8 @@ pub struct ExecContext {
     pub memory: Arc<QueryMemory>,
     /// Per-operator metrics, collected when set.
     pub metrics: Option<Arc<Metrics>>,
+    /// What the statement read from storage, for its usage (ADR-0039).
+    pub usage: Arc<UsageCounters>,
     /// When the statement times out, if it has a timeout: every operator
     /// fails with [`ExecError::QueryCanceled`] at its next batch after it.
     pub deadline: Option<Instant>,
@@ -85,6 +88,7 @@ impl ExecContext {
             outer: Arc::new([]),
             memory: QueryMemory::new(DEFAULT_QUERY_BUDGET, None),
             metrics: None,
+            usage: Arc::default(),
             deadline: None,
             cascades: None,
             constraints: Arc::default(),
@@ -113,6 +117,12 @@ impl ExecContext {
             metrics: Some(metrics),
             ..self
         }
+    }
+
+    /// Return this context counting what it reads into `usage`.
+    #[must_use]
+    pub fn with_usage(self, usage: Arc<UsageCounters>) -> Self {
+        Self { usage, ..self }
     }
 
     /// Return this context cancelling the statement at `deadline`.
