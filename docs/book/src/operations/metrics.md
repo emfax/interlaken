@@ -47,6 +47,18 @@ Every query and DML statement counts the work it caused, whether or not a record
 
 `QueryResult::usage` carries a collected statement's usage, and `QueryStream::usage()` a streamed one's once it has ended. `Session::transaction_usage()` sums the statements of the open transaction, or of the last one; a statement outside a transaction is its own transaction. Applications can log, bill or set quotas on it without a metrics backend.
 
+### Cost attribution
+
+`EngineOptions::attribution` adds each query and DML statement's usage to the `interlaken_usage_*` metrics under an attribution key, so you can see which workloads cost what:
+
+- `Attribution::Off`, the default: the `interlaken_usage_*` metrics aren't recorded.
+- `Attribution::Principal`: the session's principal, such as `User::"42"`.
+- `Attribution::Context("tenant")`: the session's application context field of that name (`context.app.tenant`). A session without it counts as `none`.
+
+The key is chosen when a session starts. At most `EngineOptions::attribution_limit` distinct keys (1,000 by default) are kept; sessions with new keys beyond it count as `other`, and `interlaken_usage_attribution_overflow_total` counts them. With many principals, attribute by a coarser context field such as a tenant or plan tier, or bill from `Usage` directly.
+
+Attribution keys are stored in your metrics system, with whatever access control it has: turn on `Principal` only if principal IDs may be seen there.
+
 ### Useful ratios
 
 - **Write amplification:** `interlaken_storage_bytes_written_total` divided by `interlaken_storage_bytes_committed_total` is what each committed byte costs in disk writes, including the journal, flushes and compaction. It counts all of the process's disk writes, and is only available on Linux.
@@ -73,6 +85,12 @@ Every query and DML statement counts the work it caused, whether or not a record
 | `interlaken_query_memory_peak_bytes` | histogram | bytes | none | The most query memory each query or DML statement reserved at once. |
 | `interlaken_query_memory_exceeded_total` | counter | count | none | Statements that failed for exceeding a memory budget (SQLSTATE `53200`). |
 | `interlaken_authz_denials_total` | counter | count | `kind` | Statements refused by security, by kind: `column` (a column policy), `write` (a write check), `statement` (a missing privilege or another security error). Rows policies filter out aren't denials. |
+| `interlaken_usage_statements_total` | counter | count | `attribution` | Query and DML statements, by attribution key. Recorded only with `EngineOptions::attribution` on. |
+| `interlaken_usage_rows_scanned_total` | counter | count | `attribution` | Rows scanned, by attribution key. Recorded only with attribution on. |
+| `interlaken_usage_bytes_read_total` | counter | bytes | `attribution` | Bytes read from storage, by attribution key. Recorded only with attribution on. |
+| `interlaken_usage_bytes_written_total` | counter | bytes | `attribution` | Bytes added to write sets, by attribution key. Recorded only with attribution on. |
+| `interlaken_usage_cpu_seconds` | gauge | seconds | `attribution` | Cumulative executor time, by attribution key. Recorded only with attribution on. |
+| `interlaken_usage_attribution_overflow_total` | counter | count | none | Sessions whose attribution key was new when the limit of distinct keys (`EngineOptions::attribution_limit`) was already reached; their usage counts under `other`. |
 | `interlaken_policy_proposals_total` | counter | count | `step`, `outcome` | Policy proposal steps (`submit`, `verify`, `activate`) by outcome (`ok`, `error`). |
 
 ### Storage

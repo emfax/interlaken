@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 (facades and storage), 2 (statements and `Usage`) and 3 (replication and the network) are built; its *As implemented* notes record where the result differs from this design.
+Accepted. Phases 1 (facades and storage), 2 (statements and `Usage`), 3 (replication and the network) and 4 (attribution; its planner feedback waits for ADR-0036) are built; its *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -304,6 +304,15 @@ No other crate depends on it. Tests use its test recorder as a dev-dependency.
 
 - Add the `Attribution` setting and the capped usage counters.
 - Record the q-error of top-level estimates. This needs ADR-0036's estimates; until they exist, the planner's current row estimates are used.
+
+#### As implemented (phase 4)
+
+- **Settings:** `EngineOptions::attribution` (`Attribution::Off`, `Principal` or `Context(name)`) and `EngineOptions::attribution_limit` (default 1,000).
+- **Off records nothing:** with attribution off, the `interlaken_usage_*` metrics aren't recorded at all, rather than recorded without a label. Their totals would duplicate `interlaken_rows_scanned_total`, `interlaken_bytes_read_total`, `interlaken_bytes_written_total` and the sum of `interlaken_statement_cpu_seconds`.
+- **Keys are chosen per session,** when it starts: a session's principal and context are fixed. So the limit, and `interlaken_usage_attribution_overflow_total`, count sessions with new keys, not statements. `Context(name)` reads the application context field `name` (`context.app.name`); a session without it counts as `none`, and one whose value isn't a string or integer as `other`.
+- **CPU per key** is `interlaken_usage_cpu_seconds`, a gauge that only rises, like the other time totals.
+- **Usage is attributed by statement,** as each ends; a transaction's statements count towards its session's key.
+- **Planner feedback is deferred.** The planner makes no row estimates yet: ADR-0036, which adds them, is still a proposal. Recording the q-error moves to ADR-0036's implementation, which has the estimates and can compare them with the actual rows `EXPLAIN ANALYZE` already counts per operator.
 
 ### Phase 5: export
 

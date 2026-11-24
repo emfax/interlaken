@@ -53,6 +53,19 @@ Type `PolicySettings`. Default: mode `analysis-sufficient`, application context 
 
 The policy settings a new database starts with (`Engine::create` only).
 
+### `attribution`
+
+Type `Attribution`. Default: `Attribution::Off`.
+
+What labels the `interlaken_usage_*` metrics, if anything (ADR-0039).
+
+### `attribution_limit`
+
+Type `usize`. Default: 1,000.
+
+The most distinct attribution keys; sessions with new keys beyond
+it count as `other`, which bounds the metrics' series.
+
 ## `StorageOptions`
 
 ### `pool_threads`

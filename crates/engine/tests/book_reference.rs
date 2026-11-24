@@ -456,6 +456,8 @@ fn configuration() -> String {
         node_memory_limit,
         residual_cache_capacity,
         policy_settings,
+        attribution,
+        attribution_limit,
     } = EngineOptions::default();
     let StorageOptions {
         pool_threads: _,
@@ -498,6 +500,8 @@ fn configuration() -> String {
                 policy_settings.app_context
             ),
         ),
+        ("attribution", format!("`Attribution::{attribution:?}`")),
+        ("attribution_limit", count(attribution_limit)),
     ];
     let storage = [
         ("pool_threads", "the number of cores, at least 2".to_owned()),

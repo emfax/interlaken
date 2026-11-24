@@ -17,6 +17,7 @@
 //!   policies read, from the transaction's snapshot
 //!   ([`load_principal`], [`load_entities`], ADR-0017, ADR-0019, ADR-0032).
 
+mod attribution;
 mod authz;
 pub mod catalog;
 mod error;
@@ -26,6 +27,7 @@ mod session;
 mod sqlstate;
 mod telemetry;
 
+pub use attribution::Attribution;
 pub use authz::{EntityData, LoadedEntities, load_entities, load_principal};
 pub use error::EngineError;
 pub use privileges::{Privilege, Privileges};

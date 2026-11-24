@@ -130,12 +130,16 @@ pub struct Session {
     finishing: Option<Finishing>,
     /// The usage of the current or last transaction's statements.
     usage: Usage,
+    /// The key the session's usage is attributed to, if attribution is on.
+    attribution: Option<Arc<str>>,
 }
 
 impl Session {
     /// Construct a session with no transaction open.
     pub(crate) fn new(engine: Engine, context: SecurityContext) -> Self {
+        let attribution = engine.inner.attributor.key(&context);
         Self {
+            attribution,
             engine,
             context,
             statement_timeout: None,
@@ -166,9 +170,23 @@ impl Session {
         self.usage
     }
 
-    /// Add a statement's usage to its transaction's.
+    /// Add a statement's usage to its transaction's, and to its
+    /// attribution key's metrics if attribution is on.
     pub(super) fn add_usage(&mut self, usage: Usage) {
         self.usage += usage;
+        if let Some(key) = &self.attribution {
+            let key = key.to_string();
+            metrics::counter!(telemetry::USAGE_STATEMENTS, "attribution" => key.clone())
+                .increment(1);
+            metrics::counter!(telemetry::USAGE_ROWS_SCANNED, "attribution" => key.clone())
+                .increment(usage.rows_scanned);
+            metrics::counter!(telemetry::USAGE_BYTES_READ, "attribution" => key.clone())
+                .increment(usage.bytes_read);
+            metrics::counter!(telemetry::USAGE_BYTES_WRITTEN, "attribution" => key.clone())
+                .increment(usage.bytes_written);
+            metrics::gauge!(telemetry::USAGE_CPU, "attribution" => key)
+                .increment(usage.cpu.as_secs_f64());
+        }
     }
 
     /// Return the open transaction's write set size, or zero if none is open.

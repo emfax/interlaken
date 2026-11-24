@@ -12,8 +12,11 @@ mod support;
 use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use interlaken_engine::{Engine, EngineError, METRICS, Session, Usage, describe_metrics};
-use interlaken_ir::security::EntityUid;
+use interlaken_engine::{
+    Attribution, Engine, EngineError, EngineOptions, METRICS, Session, Usage, describe_metrics,
+};
+use interlaken_ir::Ident;
+use interlaken_ir::security::{EntityUid, SecValue, SecurityContext};
 use interlaken_storage::TxnOptions;
 use interlaken_telemetry::{
     TestRecorder, TestSubscriber, install_test_recorder, install_test_subscriber,
@@ -281,4 +284,111 @@ async fn recorded_metrics_are_declared() {
     assert!(undeclared.is_empty(), "undeclared metrics: {undeclared:?}");
     describe_metrics();
     assert!(declared.is_subset(&recorder.described()));
+}
+
+/// Create a database attributing usage by `attribution`, keeping at most
+/// `limit` keys, with a table `t` of one row.
+async fn attributed(
+    dir: &std::path::Path,
+    attribution: Attribution,
+    limit: usize,
+) -> (Engine, Session) {
+    let options = EngineOptions {
+        attribution,
+        attribution_limit: limit,
+        ..support::session::options()
+    };
+    let engine = Engine::create(dir, options, &admin()).await.unwrap();
+    let mut root = session(&engine, admin());
+    root.create_table(&table("t", &[("id", "int8")], &["id"]))
+        .await
+        .unwrap();
+    root.query(
+        "(plan (insert t (values (columns id) (row 1)) (columns id)))",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    (engine, root)
+}
+
+/// Return the attributed statements counter for `key`.
+fn attributed_statements(recorder: &TestRecorder, key: &str) -> u64 {
+    recorder.counter("interlaken_usage_statements_total", &[("attribution", key)])
+}
+
+#[tokio::test]
+/// Assert usage is attributed to principals, up to the limit of keys,
+/// beyond which sessions count as `other`.
+async fn usage_is_attributed_by_principal() {
+    let (_guard, recorder, _) = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let admin_key = admin().to_string();
+    let admin_before = attributed_statements(recorder, &admin_key);
+    let (engine, mut root) = attributed(dir.path(), Attribution::Principal, 2).await;
+    root.query("(plan (get t))", Vec::new()).await.unwrap();
+    // The insert and the query.
+    assert_eq!(
+        attributed_statements(recorder, &admin_key) - admin_before,
+        2
+    );
+    assert!(
+        recorder.counter(
+            "interlaken_usage_rows_scanned_total",
+            &[("attribution", admin_key.as_str())]
+        ) >= 1
+    );
+
+    let user = |n: i64| EntityUid::long("User", n);
+    let overflow = recorder.counter("interlaken_usage_attribution_overflow_total", &[]);
+    let others = attributed_statements(recorder, "other");
+    let second_before = attributed_statements(recorder, &user(1).to_string());
+    let mut second = session(&engine, user(1));
+    let mut third = session(&engine, user(2));
+    second.query("(plan (get t))", Vec::new()).await.unwrap();
+    third.query("(plan (get t))", Vec::new()).await.unwrap();
+    assert_eq!(
+        attributed_statements(recorder, &user(1).to_string()) - second_before,
+        1
+    );
+    assert_eq!(attributed_statements(recorder, "other") - others, 1);
+    assert_eq!(
+        recorder.counter("interlaken_usage_attribution_overflow_total", &[]) - overflow,
+        1
+    );
+}
+
+#[tokio::test]
+/// Assert usage is attributed to an application context field, with
+/// sessions lacking it counted as `none`.
+async fn usage_is_attributed_by_context() {
+    let (_guard, recorder, _) = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let (engine, _root) = attributed(dir.path(), Attribution::Context("tenant".into()), 10).await;
+    let acme = attributed_statements(recorder, "acme-7f3a");
+    let none = attributed_statements(recorder, "none");
+    let mut context = SecurityContext::new(admin());
+    context
+        .application
+        .push((Ident::new("tenant"), SecValue::Str("acme-7f3a".into())));
+    let mut tenant = engine.session(context);
+    tenant.query("(plan (get t))", Vec::new()).await.unwrap();
+    let mut plain = session(&engine, admin());
+    plain.query("(plan (get t))", Vec::new()).await.unwrap();
+    assert_eq!(attributed_statements(recorder, "acme-7f3a") - acme, 1);
+    assert_eq!(attributed_statements(recorder, "none") - none, 1);
+}
+
+#[tokio::test]
+/// Assert nothing is attributed with attribution off.
+async fn attribution_is_off_by_default() {
+    let (_guard, recorder, _) = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let before = recorder.series_count("interlaken_usage_statements_total");
+    let (_engine, mut root, _) = seeded(dir.path(), "t").await;
+    root.query("(plan (get t))", Vec::new()).await.unwrap();
+    assert_eq!(
+        recorder.series_count("interlaken_usage_statements_total"),
+        before
+    );
 }

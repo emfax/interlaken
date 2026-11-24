@@ -11,6 +11,7 @@ use interlaken_ir::security::{
 use interlaken_storage::{FjallStorage, Storage, StorageOptions, TxnOptions};
 
 use super::connection::Session;
+use crate::attribution::{Attribution, Attributor};
 use crate::catalog::{CatalogCache, create_catalog_tables, schema_version};
 use crate::error::EngineError;
 use crate::policy::{
@@ -32,12 +33,17 @@ pub struct EngineOptions {
     pub residual_cache_capacity: usize,
     /// The policy settings a new database starts with ([`Engine::create`] only).
     pub policy_settings: PolicySettings,
+    /// What labels the `interlaken_usage_*` metrics, if anything (ADR-0039).
+    pub attribution: Attribution,
+    /// The most distinct attribution keys; sessions with new keys beyond
+    /// it count as `other`, which bounds the metrics' series.
+    pub attribution_limit: usize,
 }
 
 impl Default for EngineOptions {
     /// Return default storage settings, the default query budget, no node
-    /// cap, a 4096-entry residual cache and analysis-sufficient policy
-    /// verification with an empty application context.
+    /// cap, a 4096-entry residual cache, analysis-sufficient policy
+    /// verification with an empty application context, and no attribution.
     fn default() -> Self {
         Self {
             storage: StorageOptions::default(),
@@ -48,6 +54,8 @@ impl Default for EngineOptions {
                 mode: VerificationMode::AnalysisSufficient,
                 app_context: "{}".into(),
             },
+            attribution: Attribution::Off,
+            attribution_limit: 1000,
         }
     }
 }
@@ -80,6 +88,8 @@ pub(crate) struct Inner {
     pub(crate) pool: Option<Arc<MemoryPool>>,
     /// Each statement's memory budget.
     pub(crate) query_budget: usize,
+    /// Sessions' attribution keys.
+    pub(crate) attributor: Attributor,
     /// The cluster this engine is a member of, if any (ADR-0037).
     #[cfg(feature = "cluster")]
     pub(crate) cluster: Option<Arc<interlaken_net::Cluster>>,
@@ -147,6 +157,7 @@ impl Engine {
                 residuals: ResidualCache::new(options.residual_cache_capacity),
                 pool: options.node_memory_limit.map(MemoryPool::new),
                 query_budget: options.query_budget,
+                attributor: Attributor::new(options.attribution.clone(), options.attribution_limit),
                 #[cfg(feature = "cluster")]
                 cluster: None,
             }),

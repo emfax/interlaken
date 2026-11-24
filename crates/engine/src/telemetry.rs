@@ -29,6 +29,19 @@ pub(crate) const AUTHZ_DENIALS: &str = "interlaken_authz_denials_total";
 /// Policy proposal steps, by step and outcome.
 pub(crate) const POLICY_PROPOSALS: &str = "interlaken_policy_proposals_total";
 
+/// Statements, by attribution key.
+pub(crate) const USAGE_STATEMENTS: &str = "interlaken_usage_statements_total";
+/// Rows scanned, by attribution key.
+pub(crate) const USAGE_ROWS_SCANNED: &str = "interlaken_usage_rows_scanned_total";
+/// Bytes read, by attribution key.
+pub(crate) const USAGE_BYTES_READ: &str = "interlaken_usage_bytes_read_total";
+/// Bytes written, by attribution key.
+pub(crate) const USAGE_BYTES_WRITTEN: &str = "interlaken_usage_bytes_written_total";
+/// Executor time, by attribution key.
+pub(crate) const USAGE_CPU: &str = "interlaken_usage_cpu_seconds";
+/// Sessions whose new attribution key was over the limit.
+pub(crate) const USAGE_OVERFLOW: &str = "interlaken_usage_attribution_overflow_total";
+
 /// Every metric the engine records.
 pub const METRICS: &[Metric] = &[
     Metric {
@@ -106,6 +119,51 @@ pub const METRICS: &[Metric] = &[
         help: "Statements refused by security, by kind: `column` (a column policy), `write` (a \
                write check), `statement` (a missing privilege or another security error). Rows \
                policies filter out aren't denials.",
+    },
+    Metric {
+        name: USAGE_STATEMENTS,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Count,
+        labels: &["attribution"],
+        help: "Query and DML statements, by attribution key. Recorded only with \
+               `EngineOptions::attribution` on.",
+    },
+    Metric {
+        name: USAGE_ROWS_SCANNED,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Count,
+        labels: &["attribution"],
+        help: "Rows scanned, by attribution key. Recorded only with attribution on.",
+    },
+    Metric {
+        name: USAGE_BYTES_READ,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Bytes,
+        labels: &["attribution"],
+        help: "Bytes read from storage, by attribution key. Recorded only with attribution on.",
+    },
+    Metric {
+        name: USAGE_BYTES_WRITTEN,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Bytes,
+        labels: &["attribution"],
+        help: "Bytes added to write sets, by attribution key. Recorded only with attribution on.",
+    },
+    Metric {
+        name: USAGE_CPU,
+        kind: MetricKind::Gauge,
+        unit: MetricUnit::Seconds,
+        labels: &["attribution"],
+        help: "Cumulative executor time, by attribution key. Recorded only with attribution on.",
+    },
+    Metric {
+        name: USAGE_OVERFLOW,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Count,
+        labels: &[],
+        help: "Sessions whose attribution key was new when the limit of distinct keys \
+               (`EngineOptions::attribution_limit`) was already reached; their usage counts \
+               under `other`.",
     },
     Metric {
         name: POLICY_PROPOSALS,
