@@ -99,6 +99,9 @@ jobs:
         run: cargo test --release -p interlaken-exec --test ten_million -- --ignored --nocapture
       - name: Streaming memory through a session
         run: cargo test --release -p interlaken-engine --test streaming_memory -- --ignored --nocapture
+      # Recording metrics with Prometheus costs commits at most 5% (ADR-0039).
+      - name: Instrumentation cost
+        run: cargo test --release -p interlaken-storage --test instrumentation_cost -- --ignored --nocapture
 
   power-loss:
     name: Power loss (LazyFS)

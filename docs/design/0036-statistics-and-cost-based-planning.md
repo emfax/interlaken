@@ -136,7 +136,7 @@ The estimator lives in the IR crate, beside the optimizer that uses it: `ir::est
 
 ### Observability
 
-`EXPLAIN` shows `est=N` on each operator for principals with `read-policies`. `EXPLAIN ANALYZE` shows estimated and actual rows side by side. A metric (ADR-0033's metrics) records the q-error, `max(est/actual, actual/est)`, of each top-level estimate, so poor estimates show up in monitoring before they show up as slow queries.
+`EXPLAIN` shows `est=N` on each operator for principals with `read-policies`. `EXPLAIN ANALYZE` shows estimated and actual rows side by side. A metric (ADR-0039's `interlaken_planner_q_error`, recorded once this ADR's estimates exist) records the q-error, `max(est/actual, actual/est)`, of each top-level estimate, so poor estimates show up in monitoring before they show up as slow queries.
 
 ## Implementation Phases
 

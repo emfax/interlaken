@@ -1,12 +1,12 @@
 ---
 id: 0039
 title: Telemetry and Cost Attribution
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [observability, storage, executor, replication, engine]
 feature-flag:
 created: 2026-11-24
 accepted: 2026-11-24
-implemented:
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 (facades and storage), 2 (statements and `Usage`), 3 (replication and the network) and 4 (attribution; its planner feedback waits for ADR-0036) are built; its *As implemented* notes record where the result differs from this design.
+Implemented, except planner feedback, which moved to ADR-0036's implementation (phase 4's notes). Each phase's *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -319,6 +319,14 @@ No other crate depends on it. Tests use its test recorder as a dev-dependency.
 - `install_prometheus` and `install_otlp` in `interlaken-telemetry`.
 - The instrumentation-cost benchmarks, run in CI's nightly job.
 - A book chapter on monitoring: the cost ratios from section 3, what each dashboard should show, and the privacy note on attribution.
+
+#### As implemented (phase 5)
+
+- **Features:** `interlaken-telemetry` has `prometheus` (on by default) and `otlp`. `install_prometheus(addr)` serves `/metrics` over HTTP; `prometheus_builder()` returns the builder with Interlaken's buckets for hosts that install it themselves. Count histograms (`_size`) get buckets from 1 to 1,024; other histograms without a suffix match render as summaries.
+- **OTLP exports spans only,** over HTTP with protobuf (`install_otlp(endpoint, service)`, which returns a guard that flushes on drop). Metrics over OTLP would need a bridge from `metrics` to OpenTelemetry's metrics API; an OpenTelemetry collector can scrape the Prometheus endpoint instead. Only plain HTTP is supported, which keeps TLS libraries out of the build; send to a local collector.
+- **The cost check is a test, not a benchmark:** `instrumentation_cost` (ignored; run nightly in release) alternates rounds of concurrent buffered commits with the Prometheus recorder switched on and off within one process, and fails if the median with Prometheus is more than 5% below the median without. Alternating in one process cancels most of the drift a shared CI runner shows between separate runs. The check without a recorder against the current figures (2%) isn't automated: there is no stored baseline to compare with, and the per-commit cost with no recorder is a handful of atomic loads. The executor's per-statement instrumentation isn't measured this way yet.
+- **CI** runs the exporters' tests (`--all-features`) with every pull request, and clippy, rustdoc and the MSRV check include the `otlp` feature.
+- **The monitoring chapter** is the book's *Metrics and observability* page: exporters, spans, usage, attribution, the cost ratios and the generated metric reference.
 
 ## Consequences
 

@@ -35,11 +35,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features interlaken-engine/cluster -- -D warnings
+        run: cargo clippy --workspace --all-targets --features interlaken-engine/cluster,interlaken-telemetry/otlp -- -D warnings
       - name: API docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --features interlaken-engine/cluster
+        run: cargo doc --workspace --no-deps --features interlaken-engine/cluster,interlaken-telemetry/otlp
 
   test:
     name: Test suite
@@ -55,6 +55,8 @@ jobs:
       # Engines as cluster members, behind the `cluster` feature (ADR-0037).
       - name: Engine cluster tests
         run: cargo test --release -p interlaken-engine --features cluster --test cluster
+      - name: Telemetry exporters
+        run: cargo test --release -p interlaken-telemetry --all-features
       # The storage suite again on the commit log path (ADR-0037).
       - name: Storage tests on the commit log
         env:
@@ -79,7 +81,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        run: cargo check --workspace --all-targets --features interlaken-engine/cluster
+        run: cargo check --workspace --all-targets --features interlaken-engine/cluster,interlaken-telemetry/otlp
 
   book:
     name: Book

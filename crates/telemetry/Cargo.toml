@@ -6,9 +6,32 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["prometheus"]
+# Serve metrics for Prometheus to scrape.
+prometheus = ["dep:metrics-exporter-prometheus"]
+# Export spans over OTLP (HTTP and protobuf).
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+]
+
 [dependencies]
 metrics.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"], optional = true }
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"], optional = true }
+tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"], optional = true }
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

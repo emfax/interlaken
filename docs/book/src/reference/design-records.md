@@ -71,7 +71,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | --- | --- | --- |
 | 0031 | Engine sessions and the storage-backed catalog | implemented |
 | 0035 | Enforced foreign keys | implemented |
-| 0039 | Telemetry and cost attribution | accepted: telemetry and attribution are built; exporters are not |
+| 0039 | Telemetry and cost attribution | implemented |
 
 ## Design documents
 

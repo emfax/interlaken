@@ -4,13 +4,25 @@
 
 Interlaken records metrics through the [`metrics`](https://docs.rs/metrics) crate and spans through [`tracing`](https://docs.rs/tracing), and never installs a recorder or subscriber itself: the program embedding it decides where telemetry goes. With nothing installed, recording costs almost nothing.
 
-To collect them, install a `metrics` recorder (a Prometheus or OpenTelemetry exporter, for example) and a `tracing` subscriber when your program starts, then pass Interlaken's metric declarations to the recorder so it can show their units and descriptions:
+To collect them, install a `metrics` recorder and a `tracing` subscriber when your program starts, then pass Interlaken's metric declarations to the recorder so it can show their units and descriptions. The `interlaken-telemetry` crate has both:
 
 ```rust,ignore
+// Serve /metrics for Prometheus to scrape (feature `prometheus`, on by default).
+interlaken_telemetry::install_prometheus("0.0.0.0:9464".parse()?)?;
 interlaken_engine::describe_metrics();
+
+// Export spans to an OpenTelemetry collector (feature `otlp`). Keep the
+// guard: dropping it flushes the last spans and stops the exporter.
+let _spans = interlaken_telemetry::install_otlp("http://localhost:4318/v1/traces", "my-app")?;
 ```
 
-The `interlaken-telemetry` crate has an in-memory recorder and subscriber for tests (`install_test_recorder`, `install_test_subscriber`).
+- **Prometheus:** histograms ending `_seconds` get latency buckets from 100 µs to 60 s, `_bytes` size buckets from 1 KiB to 1 GiB, and `_size` count buckets from 1 to 1,024. `prometheus_builder()` returns the configured builder if you want to install it yourself.
+- **OTLP:** spans go over HTTP with protobuf, in batches from the exporter's own thread, with or without a Tokio runtime. Only plain HTTP is supported, so send to a collector on the same host or network, which can forward over TLS. Metrics aren't sent over OTLP: point the collector's Prometheus receiver at `/metrics` instead.
+- Any other `metrics` recorder or `tracing` subscriber works too; only one of each can be installed per process.
+
+The crate also has an in-memory recorder and subscriber for tests (`install_test_recorder`, `install_test_subscriber`).
+
+Recording costs little: a nightly test checks that commit throughput with the Prometheus recorder stays within 5% of throughput without one.
 
 Some gauges are sampled rather than updated as things change: storage records disk usage, memtable size, flush and compaction backlogs, and transaction counts every `StorageOptions::metrics_interval` (10 seconds by default). `FjallStorage::record_metrics()` records a sample on demand.
 
