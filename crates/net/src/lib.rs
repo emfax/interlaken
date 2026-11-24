@@ -16,6 +16,7 @@ mod cluster;
 mod codec;
 mod metrics;
 mod server;
+pub mod telemetry;
 mod tls;
 mod transport;
 

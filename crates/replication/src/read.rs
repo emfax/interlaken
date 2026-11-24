@@ -19,6 +19,7 @@ use openraft::LinearizerOption;
 use openraft::async_runtime::WatchReceiver;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::telemetry;
 use crate::transport::{CommitError, Request, Response, Transport};
 use crate::types::{NodeId, Raft};
 
@@ -92,6 +93,8 @@ async fn run<T: Transport>(
         }
         let leader = raft.metrics().borrow_watched().current_leader;
         if leader == Some(id) {
+            let kind = if lease { "lease" } else { "read_index" };
+            metrics::counter!(telemetry::READS, "kind" => kind).increment(batch.len() as u64);
             let index = match raft.get_read_log_id(option.clone()).await {
                 Ok((read, _)) => Ok(read.index()),
                 Err(_) => Err(CommitError::NotLeader),
@@ -109,6 +112,7 @@ async fn run<T: Transport>(
         if local.is_empty() {
             continue;
         }
+        metrics::counter!(telemetry::READS, "kind" => "forwarded").increment(local.len() as u64);
         let index = match leader {
             Some(leader) => match transport.send(leader, Request::ReadIndex).await {
                 Ok(Response::ReadIndex(index)) => index,

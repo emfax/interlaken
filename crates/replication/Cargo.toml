@@ -10,13 +10,16 @@ license.workspace = true
 interlaken-storage.workspace = true
 bytes.workspace = true
 futures.workspace = true
+metrics.workspace = true
 openraft = { version = "=0.10.1", features = ["serde", "type-alias"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+interlaken-telemetry.workspace = true
 interlaken-test-alloc.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util"] }

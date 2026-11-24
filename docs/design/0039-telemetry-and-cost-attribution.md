@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1 (facades and storage) and 2 (statements and `Usage`) are built; its *As implemented* notes record where the result differs from this design.
+Accepted. Phases 1 (facades and storage), 2 (statements and `Usage`) and 3 (replication and the network) are built; its *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -289,6 +289,16 @@ No other crate depends on it. Tests use its test recorder as a dev-dependency.
 - Follow openraft's metrics watch into the Raft gauges.
 - Record proposal latency, read paths, snapshot transfers, and transport bytes and calls per peer, in `interlaken-replication` and `interlaken-net`.
 - Add the Raft spans.
+
+#### As implemented (phase 3)
+
+- **Raft's gauges carry a `node` label** (the replica's ID), so several replicas in one process, as in tests, don't overwrite each other's values. Follower lag also carries `peer`. A task per replica follows openraft's metrics watch and updates them on every change; it ends when Raft stops.
+- **Added:** `interlaken_raft_proposal_size`, the transactions in each proposal: the replicated counterpart of the sequencer's group size, which a replicated database doesn't record.
+- **Reads** count fresh-read requests by path: `lease` or `read_index` on the leader (which one depends on `ReplicaConfig`), `forwarded` from a follower. Reads at `Freshness::Local` don't involve Raft and aren't counted.
+- **Proposal latency** runs from handing a group to Raft until it is committed and applied on the leader, under the `interlaken.raft.propose` span.
+- **Snapshot transfers** are counted on both sides: sent by the leader's network (`interlaken.raft.snapshot.send`), received by the replica's handler, with bytes per chunk, and the duration from the first chunk to the end of the install (`interlaken.raft.snapshot.install`, which covers finishing the staged generation and openraft's install).
+- **Transport metrics** are split by side. Calls a replica makes are counted per `peer`, by request kind and outcome, with request bytes `sent` and response bytes `received`. Requests it answers are counted in total (`interlaken_net_served_total`, `interlaken_net_served_bytes_total`), since the server doesn't know which peer sent them. Bytes are postcard-encoded messages, without gRPC and TLS framing, so actual network traffic is somewhat higher.
+- **`describe_metrics`** includes replication's and the network's metrics when the engine is built with `cluster`; the book's reference lists them always.
 
 ### Phase 4: attribution and planner feedback
 

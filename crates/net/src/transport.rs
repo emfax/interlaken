@@ -11,6 +11,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 use crate::codec::BytesCodec;
 use crate::metrics::Counters;
+use crate::telemetry;
 
 /// The gRPC method every request goes through.
 pub(crate) const PATH: &str = "/interlaken.Replica/Call";
@@ -121,6 +122,9 @@ impl GrpcTransport {
         let channel = self.channel(target)?;
         let bytes = postcard::to_stdvec(request)
             .map_err(|e| TransportError::NotDelivered(e.to_string()))?;
+        let peer = target.to_string();
+        ::metrics::counter!(telemetry::BYTES, "peer" => peer.clone(), "direction" => "sent")
+            .increment(bytes.len() as u64);
         let mut grpc = tonic::client::Grpc::new(channel)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
@@ -141,6 +145,8 @@ impl GrpcTransport {
                     TransportError::NoReply(status.to_string())
                 }
             })?;
+        ::metrics::counter!(telemetry::BYTES, "peer" => peer, "direction" => "received")
+            .increment(response.get_ref().len() as u64);
         postcard::from_bytes(response.get_ref()).map_err(|e| TransportError::NoReply(e.to_string()))
     }
 }
@@ -150,6 +156,18 @@ impl Transport for GrpcTransport {
     async fn send(&self, target: NodeId, request: Request) -> Result<Response, TransportError> {
         let result = self.exchange(target, &request).await;
         self.counters.sent(target, result.is_err());
+        let outcome = match &result {
+            Ok(_) => "ok",
+            Err(TransportError::NotDelivered(_)) => "not_delivered",
+            Err(TransportError::NoReply(_)) => "no_reply",
+        };
+        ::metrics::counter!(
+            telemetry::REQUESTS,
+            "peer" => target.to_string(),
+            "kind" => request.kind(),
+            "outcome" => outcome
+        )
+        .increment(1);
         result
     }
 }

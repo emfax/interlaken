@@ -546,6 +546,8 @@ fn metric_reference() -> String {
     for (title, metrics) in [
         ("Statements", interlaken_engine::METRICS),
         ("Storage", interlaken_storage::telemetry::METRICS),
+        ("Replication", interlaken_replication::telemetry::METRICS),
+        ("Network", interlaken_net::telemetry::METRICS),
     ] {
         writeln!(out, "### {title}\n").unwrap();
         writeln!(out, "| Metric | Kind | Unit | Labels | Meaning |").unwrap();

@@ -15,6 +15,7 @@ pub mod network;
 mod node;
 mod read;
 pub mod state_machine;
+pub mod telemetry;
 pub mod transport;
 pub mod types;
 

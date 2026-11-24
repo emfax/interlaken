@@ -10,12 +10,14 @@ license.workspace = true
 interlaken-replication.workspace = true
 interlaken-storage.workspace = true
 bytes.workspace = true
+metrics.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "net"] }
 tonic = { version = "=0.14.9", default-features = false, features = ["transport", "router", "codegen", "tls-ring"] }
 
 [dev-dependencies]
+interlaken-telemetry.workspace = true
 rcgen = "=0.14.5"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }

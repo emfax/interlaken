@@ -38,7 +38,10 @@ use openraft::impls::ProgressResponder;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, sleep, timeout};
 
+use tracing::Instrument;
+
 use crate::read::{Origin, Reader};
+use crate::telemetry;
 use crate::transport::{
     CommitError, Request, Response, Transport, TransportError, conflict_code, conflict_of,
 };
@@ -454,6 +457,10 @@ impl ProposerTask {
             }
             return;
         };
+        #[expect(clippy::cast_precision_loss, reason = "metrics are approximate")]
+        metrics::histogram!(telemetry::PROPOSAL_SIZE).record(requests.len() as f64);
+        let span = tracing::info_span!("interlaken.raft.propose", transactions = requests.len());
+        let proposed = std::time::Instant::now();
         let (responder, written) = ProgressResponder::complete_only();
         if self
             .raft
@@ -475,40 +482,47 @@ impl ProposerTask {
         let failed_term = Arc::clone(&self.failed_term);
         let mut applied = self.applied.clone();
         let wait = self.config.timeout;
-        tokio::spawn(async move {
-            let result = match written.await {
-                Ok(Ok(response)) => {
-                    let index = response.log_id.index();
-                    match timeout(wait, applied.wait_for(|&i| i >= index)).await {
-                        Ok(Ok(_)) => Ok(index),
-                        _ => Err(CommitError::Unknown(format!(
-                            "committed at index {index} but not applied in time"
-                        ))),
+        tokio::spawn(
+            async move {
+                let result = match written.await {
+                    Ok(Ok(response)) => {
+                        let index = response.log_id.index();
+                        match timeout(wait, applied.wait_for(|&i| i >= index)).await {
+                            Ok(Ok(_)) => Ok(index),
+                            _ => Err(CommitError::Unknown(format!(
+                                "committed at index {index} but not applied in time"
+                            ))),
+                        }
                     }
-                }
-                Ok(Err(ClientWriteError::ForwardToLeader(_))) => {
-                    // Rejected before it was appended: it never commits.
-                    failed_term.fetch_max(term, Ordering::AcqRel);
-                    Err(CommitError::NotLeader)
-                }
-                Ok(Err(error)) => {
-                    failed_term.fetch_max(term, Ordering::AcqRel);
-                    Err(CommitError::Unknown(error.to_string()))
-                }
-                Err(_) => {
-                    failed_term.fetch_max(term, Ordering::AcqRel);
-                    Err(CommitError::Unknown("raft dropped the proposal".into()))
-                }
-            };
-            for ((reply, request), outcome) in replies.into_iter().zip(requests).zip(outcomes) {
-                let answer = match (&result, outcome) {
-                    (_, Err(error)) => Outcome::Failed(from_error(&error)),
-                    (Ok(index), Ok(ts)) => Outcome::Committed(*index, ts),
-                    (Err(CommitError::NotLeader), Ok(_)) => Outcome::NotLeader(request),
-                    (Err(error), Ok(_)) => Outcome::Failed(error.clone()),
+                    Ok(Err(ClientWriteError::ForwardToLeader(_))) => {
+                        // Rejected before it was appended: it never commits.
+                        failed_term.fetch_max(term, Ordering::AcqRel);
+                        Err(CommitError::NotLeader)
+                    }
+                    Ok(Err(error)) => {
+                        failed_term.fetch_max(term, Ordering::AcqRel);
+                        Err(CommitError::Unknown(error.to_string()))
+                    }
+                    Err(_) => {
+                        failed_term.fetch_max(term, Ordering::AcqRel);
+                        Err(CommitError::Unknown("raft dropped the proposal".into()))
+                    }
                 };
-                let _ = reply.send(answer);
+                if result.is_ok() {
+                    metrics::histogram!(telemetry::PROPOSAL_DURATION)
+                        .record(proposed.elapsed().as_secs_f64());
+                }
+                for ((reply, request), outcome) in replies.into_iter().zip(requests).zip(outcomes) {
+                    let answer = match (&result, outcome) {
+                        (_, Err(error)) => Outcome::Failed(from_error(&error)),
+                        (Ok(index), Ok(ts)) => Outcome::Committed(*index, ts),
+                        (Err(CommitError::NotLeader), Ok(_)) => Outcome::NotLeader(request),
+                        (Err(error), Ok(_)) => Outcome::Failed(error.clone()),
+                    };
+                    let _ = reply.send(answer);
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 }

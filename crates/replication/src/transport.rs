@@ -62,6 +62,23 @@ pub enum Request {
     Membership(MembershipChange),
 }
 
+impl Request {
+    /// Return the request's kind, for metrics.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Append(_) => "append",
+            Self::Vote(_) => "vote",
+            Self::PreVote(_) => "pre_vote",
+            Self::Commit(_) => "commit",
+            Self::ReadIndex => "read_index",
+            Self::SnapshotChunk { .. } => "snapshot_chunk",
+            Self::TransferLeader(_) => "transfer_leader",
+            Self::Membership(_) => "membership",
+        }
+    }
+}
+
 /// What a snapshot transfer's last chunk carries.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotEnd {

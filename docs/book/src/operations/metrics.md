@@ -23,6 +23,8 @@ Labels never hold keys, values, SQL text or table names, which policies may hide
 | `interlaken.commit` | `isolation`, `durability`, `outcome` | one transaction's commit, from request to answer |
 | `interlaken.storage.commit_group` | `transactions`, `bytes` | the sequencer validating and writing one group |
 | `interlaken.gc.pass` | `examined`, `removed` | one garbage collection pass |
+| `interlaken.raft.propose` | `transactions` | on the leader, one group of commits from proposal to commit and apply |
+| `interlaken.raft.snapshot.send`, `interlaken.raft.snapshot.install` | none | sending a snapshot to a replica, and installing a received one |
 | `interlaken.statement` | `kind`, `outcome`; for queries and DML also `rows_scanned`, `rows_returned`, `bytes_read`, `bytes_written`, `cpu_seconds`, `peak_memory` | one statement, from its start to its end |
 | `interlaken.parse`, `interlaken.plan` | none | parsing and planning a query or DML statement, under its statement span |
 | `interlaken.execute` | none | entered each time the statement's plan is polled for rows, under its statement span |
@@ -50,6 +52,7 @@ Every query and DML statement counts the work it caused, whether or not a record
 - **Write amplification:** `interlaken_storage_bytes_written_total` divided by `interlaken_storage_bytes_committed_total` is what each committed byte costs in disk writes, including the journal, flushes and compaction. It counts all of the process's disk writes, and is only available on Linux.
 - **Conflict rate:** `interlaken_storage_commits_total{outcome="conflict"}` relative to `{outcome="committed"}`.
 - **Sequencer saturation:** the rate of `interlaken_storage_sequencer_busy_seconds`, summed over both phases, near 1 means the commit sequencer limits throughput.
+- **Network cost:** on a cluster, the rate of `interlaken_net_bytes_total` (per peer) divided by that of `interlaken_storage_bytes_committed_total` on the leader is how many bytes cross the network for each committed byte. Where peers sit in other zones or regions, that ratio drives most of the bill. Replication's gauges (`interlaken_raft_*`) carry a `node` label, and follower lag is reported by the leader.
 - **Wasted scanning:** `interlaken_rows_returned_total` divided by `interlaken_rows_scanned_total`. A low ratio means filters aren't reaching storage, or an index is missing.
 - **Garbage collection held back:** a rising `interlaken_storage_oldest_snapshot_age_seconds` means a long transaction is keeping old versions alive.
 
@@ -93,6 +96,32 @@ Every query and DML statement counts the work it caused, whether or not a record
 | `interlaken_storage_active_transactions` | gauge | count | none | Open transactions within the maximum age. Sampled. |
 | `interlaken_storage_expired_transactions_total` | counter | count | none | Transactions that exceeded the maximum transaction age. Sampled. |
 | `interlaken_storage_oldest_snapshot_age_seconds` | gauge | seconds | none | Age of the oldest open transaction's snapshot, which holds back garbage collection. Sampled. |
+
+### Replication
+
+| Metric | Kind | Unit | Labels | Meaning |
+| --- | --- | --- | --- | --- |
+| `interlaken_raft_term` | gauge | count | `node` | The current Raft term. |
+| `interlaken_raft_is_leader` | gauge | count | `node` | 1 on the leader, 0 elsewhere. |
+| `interlaken_raft_leader_changes_total` | counter | count | `node` | Times this replica saw a new leader. |
+| `interlaken_raft_commit_index` | gauge | count | `node` | The index of the last log entry known committed. |
+| `interlaken_raft_applied_index` | gauge | count | `node` | The index of the last log entry applied here. |
+| `interlaken_raft_follower_lag_entries` | gauge | count | `node`, `peer` | On the leader: how many entries each other member's log trails the leader's by. |
+| `interlaken_raft_proposal_duration_seconds` | histogram | seconds | none | On the leader: time from proposing a group of commits to Raft until it is committed and applied. |
+| `interlaken_raft_proposal_size` | histogram | count | none | On the leader: transactions in each proposal. |
+| `interlaken_raft_reads_total` | counter | count | `kind` | Fresh-read requests answered, by path: `lease` or `read_index` on the leader, `forwarded` from a follower to the leader. |
+| `interlaken_raft_snapshots_total` | counter | count | `direction`, `outcome` | Snapshot transfers, by direction (`sent`, `received`) and outcome (`ok`, `error`). |
+| `interlaken_raft_snapshot_bytes_total` | counter | bytes | `direction` | Snapshot bytes sent and received. |
+| `interlaken_raft_snapshot_duration_seconds` | histogram | seconds | `direction` | Time per snapshot transfer, from its first chunk to the end of sending, or of installing. |
+
+### Network
+
+| Metric | Kind | Unit | Labels | Meaning |
+| --- | --- | --- | --- | --- |
+| `interlaken_net_bytes_total` | counter | bytes | `peer`, `direction` | Bytes of the calls this replica makes to each peer: requests `sent` and responses `received`, as encoded, without gRPC and TLS framing. Divided by bytes committed, the network cost of each committed byte. |
+| `interlaken_net_requests_total` | counter | count | `peer`, `kind`, `outcome` | Calls this replica makes to each peer, by kind (`append`, `vote`, `pre_vote`, `commit`, `read_index`, `snapshot_chunk`, `transfer_leader`, `membership`) and outcome (`ok`; `not_delivered`, surely not received; `no_reply`, perhaps received). |
+| `interlaken_net_served_bytes_total` | counter | bytes | `direction` | Bytes of the requests this replica answers: requests `received` and responses `sent`, as encoded. |
+| `interlaken_net_served_total` | counter | count | `kind` | Requests this replica answered, by kind. |
 
 <!-- end generated: metrics -->
 

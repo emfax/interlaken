@@ -11,7 +11,10 @@ use openraft::raft::{
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
 
+use tracing::Instrument;
+
 use crate::state_machine::{SnapshotData, snapshot_meta_keys};
+use crate::telemetry;
 use crate::transport::{Request, Response, SnapshotEnd, Transport, TransportError};
 use crate::types::{NodeId, TypeConfig};
 
@@ -150,6 +153,50 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
         cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
+        let started = std::time::Instant::now();
+        let sent = std::sync::atomic::AtomicU64::new(0);
+        let result = self
+            .send_snapshot(vote, snapshot, cancel, &sent)
+            .instrument(tracing::info_span!("interlaken.raft.snapshot.send"))
+            .await;
+        let outcome = if result.is_ok() { "ok" } else { "error" };
+        metrics::counter!(telemetry::SNAPSHOTS, "direction" => "sent", "outcome" => outcome)
+            .increment(1);
+        metrics::counter!(telemetry::SNAPSHOT_BYTES, "direction" => "sent")
+            .increment(sent.load(std::sync::atomic::Ordering::Relaxed));
+        metrics::histogram!(telemetry::SNAPSHOT_DURATION, "direction" => "sent")
+            .record(started.elapsed().as_secs_f64());
+        result
+    }
+
+    /// Ask the peer to take over leadership.
+    async fn transfer_leader(
+        &mut self,
+        req: TransferLeaderRequest<TypeConfig>,
+        _option: RPCOption,
+    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
+        match self
+            .transport
+            .send(self.target, Request::TransferLeader(req))
+            .await
+            .map_err(rpc_error)?
+        {
+            Response::TransferLeader(response) => Ok(response),
+            other => Err(unexpected(&other)),
+        }
+    }
+}
+
+impl<T: Transport> Connection<T> {
+    /// Send a whole snapshot in chunks, unless cancelled first, adding the
+    /// bytes sent to `sent`.
+    async fn send_snapshot(
+        &mut self,
+        vote: VoteOf<TypeConfig>,
+        snapshot: SnapshotOf<TypeConfig, SnapshotData>,
+        cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         let SnapshotData::View(view) = snapshot.snapshot else {
             return Err(StreamingError::Network(NetworkError::from_string(
                 "only a view of this replica can be sent",
@@ -169,6 +216,7 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
         });
         for seq in 0.. {
             let bytes = next.take().expect("a chunk is ready");
+            sent.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
             next = chunks.next().await.map_err(|e| failed(&e))?;
             let last = next.is_none();
             let request = Request::SnapshotChunk {
@@ -193,22 +241,5 @@ impl<T: Transport> RaftNetworkV2<TypeConfig> for Connection<T> {
             }
         }
         unreachable!("the chunk loop returns")
-    }
-
-    /// Ask the peer to take over leadership.
-    async fn transfer_leader(
-        &mut self,
-        req: TransferLeaderRequest<TypeConfig>,
-        _option: RPCOption,
-    ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
-        match self
-            .transport
-            .send(self.target, Request::TransferLeader(req))
-            .await
-            .map_err(rpc_error)?
-        {
-            Response::TransferLeader(response) => Ok(response),
-            other => Err(unexpected(&other)),
-        }
     }
 }

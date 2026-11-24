@@ -12,6 +12,7 @@ use tonic::{Status, body::Body};
 
 use crate::codec::BytesCodec;
 use crate::metrics::Counters;
+use crate::telemetry;
 use crate::transport::{MAX_MESSAGE_BYTES, PATH};
 
 /// The gRPC service a replica serves: one method taking every request.
@@ -38,12 +39,18 @@ impl UnaryService<Vec<u8>> for Call {
     fn call(&mut self, request: tonic::Request<Vec<u8>>) -> Self::Future {
         let service = self.0.clone();
         Box::pin(async move {
+            ::metrics::counter!(telemetry::SERVED_BYTES, "direction" => "received")
+                .increment(request.get_ref().len() as u64);
             let request: Request = postcard::from_bytes(request.get_ref())
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let kind = request.kind();
             let response = service.handler.handle(request).await;
             service.counters.served();
+            ::metrics::counter!(telemetry::SERVED, "kind" => kind).increment(1);
             let bytes =
                 postcard::to_stdvec(&response).map_err(|e| Status::internal(e.to_string()))?;
+            ::metrics::counter!(telemetry::SERVED_BYTES, "direction" => "sent")
+                .increment(bytes.len() as u64);
             Ok(tonic::Response::new(bytes))
         })
     }

@@ -13,11 +13,13 @@ use openraft::impls::ChangeMembers;
 use openraft::{BasicNode, ServerState, SnapshotPolicy};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep};
+use tracing::Instrument;
 
 use crate::commit::{CommitConfig, Outcome, RaftCommit};
 use crate::log_store::LogStore;
 use crate::network::NetworkFactory;
 use crate::state_machine::{SNAPSHOT_CHUNK_BYTES, SnapshotData, StateMachine};
+use crate::telemetry;
 use crate::transport::{
     CommitError, Committed, Handler, HandlerFuture, MembershipChange, Request, Response,
     SnapshotEnd, Transport, TransportError,
@@ -240,6 +242,7 @@ impl<T: Transport> ReplicaNode<T> {
         .await
         .map_err(|e| Error::ReplicationUnavailable(e.to_string()))?;
         commit.start(raft.clone(), replica.clone(), applied, transport);
+        tokio::spawn(crate::telemetry::follow(config.id, raft.clone()));
         Ok(Self {
             id: config.id,
             raft,
@@ -540,6 +543,8 @@ struct Receiving {
     next: u64,
     /// The new data generation its chunks are written into.
     staged: StagedSnapshot,
+    /// When its first chunk arrived.
+    started: Instant,
 }
 
 /// Store one chunk of a snapshot transfer, and install the snapshot once
@@ -564,6 +569,7 @@ async fn receive_chunk(
                     id,
                     next: 0,
                     staged,
+                    started: Instant::now(),
                 })
             }
             Err(e) => return refused(&e),
@@ -572,29 +578,56 @@ async fn receive_chunk(
     let Some(transfer) = current.as_mut().filter(|t| t.id == id && t.next == seq) else {
         return refused(&"snapshot chunk out of order");
     };
+    let len = bytes.len() as u64;
     if let Err(e) = transfer.staged.push(bytes).await {
         *current = None;
+        record_received(false, None);
         return refused(&e);
     }
+    metrics::counter!(telemetry::SNAPSHOT_BYTES, "direction" => "received").increment(len);
     transfer.next += 1;
     let Some(end) = end else {
         return Response::SnapshotChunk(Ok(()));
     };
     let transfer = current.take().expect("the transfer is in progress");
     drop(current);
-    let ready = match transfer.staged.finish().await {
-        Ok(ready) => ready,
-        Err(e) => return refused(&e),
+    let started = transfer.started;
+    let install = async {
+        let ready = match transfer.staged.finish().await {
+            Ok(ready) => ready,
+            Err(e) => return refused(&e),
+        };
+        let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
+            meta: end.meta,
+            snapshot: SnapshotData::Ready(ready),
+        };
+        // A snapshot openraft declines to install is dropped unused; its
+        // generation is removed by the next install or when the replica reopens.
+        match raft.install_full_snapshot(end.vote, snapshot).await {
+            Ok(response) => Response::Snapshot(response),
+            Err(e) => Response::Refused(e.to_string()),
+        }
     };
-    let snapshot = openraft::alias::SnapshotOf::<crate::types::TypeConfig, _> {
-        meta: end.meta,
-        snapshot: SnapshotData::Ready(ready),
-    };
-    // A snapshot openraft declines to install is dropped unused; its
-    // generation is removed by the next install or when the replica reopens.
-    match raft.install_full_snapshot(end.vote, snapshot).await {
-        Ok(response) => Response::Snapshot(response),
-        Err(e) => Response::Refused(e.to_string()),
+    let response = install
+        .instrument(tracing::info_span!("interlaken.raft.snapshot.install"))
+        .await;
+    record_received(matches!(response, Response::Snapshot(_)), Some(started));
+    response
+}
+
+/// Count a received snapshot transfer that ended, well or not, and how
+/// long it took from its first chunk.
+fn record_received(ok: bool, started: Option<Instant>) {
+    let outcome = if ok { "ok" } else { "error" };
+    metrics::counter!(
+        telemetry::SNAPSHOTS,
+        "direction" => "received",
+        "outcome" => outcome
+    )
+    .increment(1);
+    if let Some(started) = started {
+        metrics::histogram!(telemetry::SNAPSHOT_DURATION, "direction" => "received")
+            .record(started.elapsed().as_secs_f64());
     }
 }
 

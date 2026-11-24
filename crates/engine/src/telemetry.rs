@@ -129,6 +129,11 @@ pub const METRICS: &[Metric] = &[
 pub fn describe_metrics() {
     interlaken_storage::telemetry::describe(interlaken_storage::telemetry::METRICS);
     interlaken_storage::telemetry::describe(METRICS);
+    #[cfg(feature = "cluster")]
+    {
+        interlaken_storage::telemetry::describe(interlaken_replication::telemetry::METRICS);
+        interlaken_storage::telemetry::describe(interlaken_net::telemetry::METRICS);
+    }
 }
 
 /// Return the security denial kind of `error`, if it is one.

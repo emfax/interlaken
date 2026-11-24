@@ -30,6 +30,8 @@ cluster = ["dep:interlaken-net", "dep:interlaken-replication"]
 
 [dev-dependencies]
 rcgen = "=0.14.5"
+interlaken-net.workspace = true
+interlaken-replication.workspace = true
 interlaken-telemetry.workspace = true
 interlaken-test-alloc.workspace = true
 proptest.workspace = true
