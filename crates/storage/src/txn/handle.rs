@@ -2,8 +2,10 @@
 
 use std::ops::Bound;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use bytes::Bytes;
+use tracing::Instrument;
 
 use super::read_set::ReadSet;
 use super::write_buffer::{WriteBuffer, WriteOp};
@@ -13,6 +15,7 @@ use crate::encoding::{EncodeError, MAX_TUPLE_LEN};
 use crate::engine::mvcc::{self, ScanJob};
 use crate::scan::{Key, KeyRange, ScanBatch, ScanRequest};
 use crate::storage::Shared;
+use crate::telemetry;
 use crate::{Error, Result, Timestamp};
 
 /// Outcome of a successful commit.
@@ -454,8 +457,40 @@ impl Txn {
             dependency_snapshot: state.dependency_snapshot.unwrap_or(state.snapshot),
             writes: state.writes.into_intents(),
         };
+        let bytes: usize = request
+            .writes
+            .iter()
+            .map(|w| w.key.len() + w.op.value().map_or(0, Bytes::len))
+            .sum();
+        let isolation = inner.options.isolation.label();
+        let durability = inner.shared.durability.label();
+        let span = tracing::info_span!(
+            "interlaken.commit",
+            isolation,
+            durability,
+            outcome = tracing::field::Empty,
+        );
+        let started = Instant::now();
         // `inner` keeps the snapshot pin alive until validation is done.
-        let ts = inner.shared.commit.submit(request).await?;
+        let result = inner
+            .shared
+            .commit
+            .submit(request)
+            .instrument(span.clone())
+            .await;
+        let outcome = match &result {
+            Ok(_) => "committed",
+            Err(Error::SerializationFailure(_)) => "conflict",
+            Err(_) => "error",
+        };
+        span.record("outcome", outcome);
+        metrics::counter!(telemetry::COMMITS, "isolation" => isolation, "outcome" => outcome)
+            .increment(1);
+        metrics::histogram!(telemetry::COMMIT_DURATION, "durability" => durability)
+            .record(telemetry::seconds(started.elapsed()));
+        let ts = result?;
+        metrics::counter!(telemetry::BYTES_COMMITTED)
+            .increment(u64::try_from(bytes).unwrap_or(u64::MAX));
         Ok(CommitInfo {
             commit_ts: Some(ts),
         })

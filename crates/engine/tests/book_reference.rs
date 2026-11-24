@@ -470,6 +470,7 @@ fn configuration() -> String {
         max_journal_bytes,
         memtable_bytes,
         commit_log: _,
+        metrics_interval,
     } = StorageOptions::default();
     let count = |n: usize| {
         let s = n.to_string();
@@ -517,6 +518,10 @@ fn configuration() -> String {
             "commit_log",
             "`false`, or `true` when `INTERLAKEN_COMMIT_LOG` is `1`".to_owned(),
         ),
+        (
+            "metrics_interval",
+            metrics_interval.map_or("none".to_owned(), duration),
+        ),
     ];
     let mut out = String::new();
     options_section(
@@ -532,6 +537,55 @@ fn configuration() -> String {
         &storage,
     );
     out
+}
+
+/// Render the metric reference: every declared metric, by the crate that records it.
+fn metric_reference() -> String {
+    use interlaken_storage::telemetry::{Metric, MetricKind, MetricUnit};
+    let mut out = String::new();
+    for (title, metrics) in [("Storage", interlaken_storage::telemetry::METRICS)] {
+        writeln!(out, "### {title}\n").unwrap();
+        writeln!(out, "| Metric | Kind | Unit | Labels | Meaning |").unwrap();
+        writeln!(out, "| --- | --- | --- | --- | --- |").unwrap();
+        for Metric {
+            name,
+            kind,
+            unit,
+            labels,
+            help,
+        } in metrics
+        {
+            let kind = match kind {
+                MetricKind::Counter => "counter",
+                MetricKind::Gauge => "gauge",
+                MetricKind::Histogram => "histogram",
+            };
+            let unit = match unit {
+                MetricUnit::Count => "count",
+                MetricUnit::Seconds => "seconds",
+                MetricUnit::Bytes => "bytes",
+            };
+            let labels = if labels.is_empty() {
+                "none".to_owned()
+            } else {
+                labels
+                    .iter()
+                    .map(|l| format!("`{l}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            writeln!(out, "| `{name}` | {kind} | {unit} | {labels} | {help} |").unwrap();
+        }
+        writeln!(out).unwrap();
+    }
+    out
+}
+
+#[test]
+/// Assert the book's metric reference matches the declared metrics.
+fn metric_reference_is_current() {
+    check_section("operations/metrics.md", "metrics", &metric_reference());
 }
 
 #[test]

@@ -7,6 +7,7 @@ members = [
     "crates/net",
     "crates/replication",
     "crates/storage",
+    "crates/telemetry",
     "crates/test-alloc",
 ]
 
@@ -22,6 +23,7 @@ interlaken-ir = { path = "crates/ir" }
 interlaken-net = { path = "crates/net" }
 interlaken-replication = { path = "crates/replication" }
 interlaken-storage = { path = "crates/storage" }
+interlaken-telemetry = { path = "crates/telemetry" }
 interlaken-test-alloc = { path = "crates/test-alloc" }
 fjall = { version = "3.1", features = ["bytes_1"] }
 bytes = "1"
@@ -32,6 +34,9 @@ arrow-buffer = "60"
 arrow-schema = "60"
 arrow-select = "60"
 futures = "0.3"
+# Telemetry facades (ADR-0039): libraries record, the host chooses an exporter.
+metrics = "0.24"
+tracing = "0.1"
 # Pinned exactly: type-aware partial evaluation (tpe) is experimental (ADR-0020).
 cedar-policy = { version = "=4.15.0", default-features = false, features = ["tpe"] }
 smol_str = "0.3"

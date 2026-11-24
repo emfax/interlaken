@@ -10,6 +10,7 @@ use crate::engine::{DEFAULT_MAX_JOURNAL_BYTES, DEFAULT_MEMTABLE_BYTES};
 use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
 use crate::replica::{CommitPath, Replica, ReplicaState, Validation};
+use crate::sampler::Sampler;
 use crate::{Engine, Freshness, Result, Timestamp, Txn, TxnOptions};
 
 /// Entry point to the transactional storage layer.
@@ -28,6 +29,16 @@ pub enum Durability {
     /// Acknowledge once the group reaches OS buffers. Commits survive a
     /// process crash but not power loss. For development and tests.
     Buffered,
+}
+
+impl Durability {
+    /// Return the mode's metric label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::Buffered => "buffered",
+        }
+    }
 }
 
 /// Configuration for [`FjallStorage::open`].
@@ -80,6 +91,11 @@ pub struct StorageOptions {
     /// A database can switch between the two paths from one open to the
     /// next: opening it applies anything left in the log first.
     pub commit_log: bool,
+    /// How often the metrics sampler records sizes, backlogs and
+    /// transaction counts as gauges, or `None` for no sampler (ADR-0039).
+    /// Defaults to 10 seconds. With no metrics recorder installed, each
+    /// sample reads a few of fjall's counters and is discarded.
+    pub metrics_interval: Option<Duration>,
 }
 
 impl Default for StorageOptions {
@@ -99,6 +115,7 @@ impl Default for StorageOptions {
             max_journal_bytes: DEFAULT_MAX_JOURNAL_BYTES,
             memtable_bytes: DEFAULT_MEMTABLE_BYTES,
             commit_log: std::env::var_os("INTERLAKEN_COMMIT_LOG").is_some_and(|v| v == "1"),
+            metrics_interval: Some(Duration::from_secs(10)),
         }
     }
 }
@@ -134,6 +151,8 @@ pub struct StorageMetrics {
 ///
 /// Fields drop in order: the GC thread stops before the pool it uses.
 pub(crate) struct Shared {
+    /// The metrics sampler thread, if enabled.
+    pub(crate) _sampler: Option<Sampler>,
     /// The background GC thread, if enabled.
     pub(crate) _gc_task: Option<GcTask>,
     /// What a GC pass needs.
@@ -148,6 +167,8 @@ pub(crate) struct Shared {
     pub(crate) stats: Arc<SequencerStats>,
     /// Per-transaction limits.
     pub(crate) limits: Limits,
+    /// When commits are acknowledged, for metrics.
+    pub(crate) durability: Durability,
 }
 
 /// [`Storage`] backed by fjall, with all fjall calls on a dedicated pool.
@@ -263,6 +284,10 @@ impl FjallStorage {
             options.queue_capacity,
         )?);
         let stats = Arc::new(SequencerStats::default());
+        let sampler = options
+            .metrics_interval
+            .map(|interval| Sampler::start(engine.clone(), Arc::clone(&clock), interval))
+            .transpose()?;
         let commit = commit_path(
             engine,
             Arc::clone(&clock),
@@ -283,6 +308,7 @@ impl FjallStorage {
             .transpose()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                _sampler: sampler,
                 _gc_task: gc_task,
                 gc,
                 pool,
@@ -293,6 +319,7 @@ impl FjallStorage {
                     max_write_set_bytes: options.max_write_set_bytes,
                     max_transaction_age: options.max_transaction_age,
                 },
+                durability: options.durability,
             }),
         })
     }
@@ -320,6 +347,21 @@ impl FjallStorage {
     /// Returns a storage error if a chunk or the watermark write fails.
     pub async fn run_gc(&self) -> Result<GcReport> {
         self.shared.gc.pass().await
+    }
+
+    /// Record the storage layer's sizes, backlogs and transaction counts as
+    /// metrics now, as the sampler does every
+    /// [`StorageOptions::metrics_interval`] (ADR-0039).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if fjall's sizes can't be read.
+    pub async fn record_metrics(&self) -> Result<()> {
+        let clock = Arc::clone(&self.shared.clock);
+        self.shared
+            .pool
+            .run(move |engine| crate::sampler::record(engine, &clock))
+            .await?
     }
 
     /// Return a snapshot of the storage layer's state and counters.

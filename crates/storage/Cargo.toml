@@ -10,11 +10,14 @@ license.workspace = true
 bytes.workspace = true
 fjall.workspace = true
 flume.workspace = true
+metrics.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
+interlaken-telemetry.workspace = true
 tokio.workspace = true
 
 [[bench]]

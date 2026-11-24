@@ -15,6 +15,7 @@ use super::snapshot::{self, Decoder, Event, ExportCursor};
 use super::stored::{StoredValue, decode_stored, encode_stored};
 use crate::commit::LogEntry;
 use crate::encoding::{split_versioned_key, versioned_key};
+use crate::telemetry;
 use crate::{Durability, Error, Result, Timestamp};
 
 /// Default cap on fjall's journals: fjall's own default, 512 MiB.
@@ -61,6 +62,25 @@ pub struct Engine {
     replica_log: Keyspace,
     /// Memtable size for keyspaces created later, such as data generations.
     memtable_bytes: u64,
+}
+
+/// fjall's sizes and backlogs at one moment (ADR-0039).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EngineSample {
+    /// Bytes on disk in the current data generation.
+    pub(crate) data_bytes: u64,
+    /// Bytes on disk in journals.
+    pub(crate) journal_bytes: u64,
+    /// Every other keyspace's bytes on disk.
+    pub(crate) other_bytes: u64,
+    /// Bytes in memtables, active and awaiting flush.
+    pub(crate) memtable_bytes: u64,
+    /// Memtable flushes queued.
+    pub(crate) flush_backlog: usize,
+    /// Tables in level 0 of the data keyspace.
+    pub(crate) l0_tables: usize,
+    /// Time spent compacting since the database was opened.
+    pub(crate) compacting: std::time::Duration,
 }
 
 /// The current generation of the versioned keyspace.
@@ -597,11 +617,24 @@ impl Engine {
     /// whole size in memory. Runs on a storage thread, which it blocks.
     fn throttle_writes(&self) {
         // Bounded, so a stalled flush delays the write rather than hangs it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(2);
+        let mut waited = false;
         while self.db.write_buffer_size() > WRITE_BUFFER_LIMIT
             && std::time::Instant::now() < deadline
         {
+            waited = true;
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if waited {
+            let wait = started.elapsed();
+            metrics::gauge!(telemetry::WRITE_THROTTLE).increment(telemetry::seconds(wait));
+            if wait >= std::time::Duration::from_secs(2) {
+                tracing::warn!(
+                    memtable_bytes = self.db.write_buffer_size(),
+                    "memtables still above the write limit after the longest wait",
+                );
+            }
         }
     }
 
@@ -771,6 +804,23 @@ impl Engine {
     /// Return the space the database uses on disk, in bytes.
     pub(crate) fn disk_space(&self) -> Result<u64> {
         Ok(self.db.disk_space()?)
+    }
+
+    /// Sample fjall's sizes and backlogs for the metrics sampler (ADR-0039).
+    pub(crate) fn sample(&self) -> Result<EngineSample> {
+        let total = self.db.disk_space()?;
+        let journal = self.db.journal_disk_space()?;
+        let data = self.data();
+        let data_bytes = data.disk_space();
+        Ok(EngineSample {
+            data_bytes,
+            journal_bytes: journal,
+            other_bytes: total.saturating_sub(journal).saturating_sub(data_bytes),
+            memtable_bytes: self.db.write_buffer_size(),
+            flush_backlog: self.db.outstanding_flushes(),
+            l0_tables: data.l0_table_count(),
+            compacting: self.db.time_compacting(),
+        })
     }
 
     /// Validate an existing `meta` keyspace against this build.

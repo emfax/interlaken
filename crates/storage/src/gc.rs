@@ -13,9 +13,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use tracing::Instrument;
+
 use crate::commit::CommitClock;
 use crate::engine::gc::{GcChunk, collect_chunk};
 use crate::pool::StoragePool;
+use crate::telemetry;
 use crate::{Error, Result, Timestamp};
 
 /// What one GC pass did.
@@ -67,6 +70,10 @@ pub(crate) struct GcCounters {
 impl GcCounters {
     /// Record a completed pass.
     fn record(&self, report: &GcReport) {
+        metrics::counter!(telemetry::GC_VERSIONS, "outcome" => "examined")
+            .increment(report.examined);
+        metrics::counter!(telemetry::GC_VERSIONS, "outcome" => "removed").increment(report.removed);
+        metrics::counter!(telemetry::GC_PASSES, "outcome" => "completed").increment(1);
         self.examined.fetch_add(report.examined, Ordering::Relaxed);
         self.removed.fetch_add(report.removed, Ordering::Relaxed);
         self.last_watermark
@@ -105,6 +112,19 @@ pub(crate) struct GcContext {
 impl GcContext {
     /// Run one pass from an async caller.
     pub(crate) async fn pass(&self) -> Result<GcReport> {
+        let span = tracing::info_span!(
+            "interlaken.gc.pass",
+            examined = tracing::field::Empty,
+            removed = tracing::field::Empty,
+        );
+        let report = self.pass_async().instrument(span.clone()).await?;
+        span.record("examined", report.examined);
+        span.record("removed", report.removed);
+        Ok(report)
+    }
+
+    /// Run one pass from an async caller, within its span.
+    async fn pass_async(&self) -> Result<GcReport> {
         let watermark = self.clock.horizon();
         let mut report = GcReport {
             watermark,
@@ -134,6 +154,22 @@ impl GcContext {
 
     /// Run one pass from the GC thread, stopping early if `stop` closes.
     fn pass_blocking(&self, stop: &flume::Receiver<()>) -> Result<Option<GcReport>> {
+        let span = tracing::info_span!(
+            "interlaken.gc.pass",
+            examined = tracing::field::Empty,
+            removed = tracing::field::Empty,
+        );
+        let _entered = span.enter();
+        let report = self.pass_blocking_inner(stop)?;
+        if let Some(report) = &report {
+            span.record("examined", report.examined);
+            span.record("removed", report.removed);
+        }
+        Ok(report)
+    }
+
+    /// Run one pass from the GC thread, within its span.
+    fn pass_blocking_inner(&self, stop: &flume::Receiver<()>) -> Result<Option<GcReport>> {
         let watermark = self.clock.horizon();
         let mut report = GcReport {
             watermark,
@@ -186,11 +222,14 @@ impl GcTask {
                     match context.pass_blocking(&stopped) {
                         Ok(Some(_)) => {}
                         Ok(None) => return,
-                        Err(_) => {
+                        Err(error) => {
                             context
                                 .counters
                                 .failed_passes
                                 .fetch_add(1, Ordering::Relaxed);
+                            metrics::counter!(telemetry::GC_PASSES, "outcome" => "failed")
+                                .increment(1);
+                            tracing::warn!(%error, "garbage collection pass failed");
                         }
                     }
                 }

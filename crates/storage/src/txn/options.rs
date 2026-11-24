@@ -12,6 +12,17 @@ pub enum Isolation {
     Serializable,
 }
 
+impl Isolation {
+    /// Return the level's metric label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ReadCommitted => "read_committed",
+            Self::RepeatableRead => "repeatable_read",
+            Self::Serializable => "serializable",
+        }
+    }
+}
+
 /// How recent a transaction's snapshot must be on a replicated database
 /// (ADR-0037). A single-node database is always fresh.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

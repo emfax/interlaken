@@ -218,6 +218,20 @@ impl State {
     /// Rejected transactions hear back immediately. Returns `Err` if the
     /// group's write failed and the sequencer must stop.
     fn commit_group(&mut self, group: Vec<Submission>) -> Result<(), ()> {
+        let span = tracing::info_span!(
+            "interlaken.storage.commit_group",
+            transactions = group.len(),
+            bytes = tracing::field::Empty,
+        );
+        if !span.is_disabled() {
+            let bytes: usize = group
+                .iter()
+                .flat_map(|submission| &submission.request.writes)
+                .map(|w| w.key.len() + w.op.value().map_or(0, bytes::Bytes::len))
+                .sum();
+            span.record("bytes", bytes);
+        }
+        let _entered = span.enter();
         let started = Instant::now();
         let mut conflicts = 0;
         let mut accepted: Vec<(Timestamp, Submission)> = Vec::with_capacity(group.len());

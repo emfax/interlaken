@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::telemetry;
+
 /// Cumulative commit pipeline counters since the database was opened.
 ///
 /// Read them twice and subtract to measure an interval. The sequencer is
@@ -77,7 +79,12 @@ impl SequencerStats {
     ) {
         if committed > 0 {
             self.groups.fetch_add(1, Ordering::Relaxed);
+            metrics::histogram!(telemetry::COMMIT_GROUP_SIZE).record(telemetry::float(committed));
         }
+        metrics::gauge!(telemetry::SEQUENCER_BUSY, "phase" => "validation")
+            .increment(telemetry::seconds(validation));
+        metrics::gauge!(telemetry::SEQUENCER_BUSY, "phase" => "write")
+            .increment(telemetry::seconds(write));
         self.committed.fetch_add(committed, Ordering::Relaxed);
         self.conflicts.fetch_add(conflicts, Ordering::Relaxed);
         self.validation_nanos

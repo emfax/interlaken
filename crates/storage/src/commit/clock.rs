@@ -34,6 +34,8 @@ struct Pins {
 /// State shared between a pin and the registry.
 #[derive(Debug)]
 pub(crate) struct PinState {
+    /// When the pin was taken.
+    taken: Instant,
     /// When the pin expires; `None` if the maximum age is too large to represent.
     deadline: Option<Instant>,
     revoked: AtomicBool,
@@ -64,8 +66,10 @@ impl CommitClock {
         let ts = self.visible_ts();
         let id = pins.next_id;
         pins.next_id += 1;
+        let taken = Instant::now();
         let state = Arc::new(PinState {
-            deadline: Instant::now().checked_add(max_age),
+            taken,
+            deadline: taken.checked_add(max_age),
             revoked: AtomicBool::new(false),
         });
         pins.by_snapshot.insert((ts, id), Arc::clone(&state));
@@ -140,6 +144,13 @@ impl CommitClock {
             pins.by_snapshot.len(),
             pins.by_snapshot.keys().next().map(|&(ts, _)| ts),
         )
+    }
+
+    /// Return how long the oldest open pin has been held, if any is.
+    pub(crate) fn oldest_pin_age(&self) -> Option<Duration> {
+        let pins = self.pins();
+        let oldest = pins.by_snapshot.values().map(|state| state.taken).min()?;
+        Some(oldest.elapsed())
     }
 
     /// Return the number of pins revoked for exceeding the maximum age.

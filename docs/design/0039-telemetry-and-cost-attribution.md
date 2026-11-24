@@ -1,11 +1,11 @@
 ---
 id: 0039
 title: Telemetry and Cost Attribution
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [observability, storage, executor, replication, engine]
 feature-flag:
 created: 2026-11-24
-accepted:
+accepted: 2026-11-24
 implemented:
 spec-sections: []
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Accepted. Phase 1 (facades and storage) is built; its *As implemented* notes record where the result differs from this design.
 
 ## Summary
 
@@ -253,6 +253,18 @@ No other crate depends on it. Tests use its test recorder as a dev-dependency.
 - Sample disk usage, memtable size and compaction backlog on a timer.
 - Add the `interlaken.commit`, `interlaken.storage.commit_group` and `interlaken.gc.pass` spans.
 - Add the generated metric reference to the book.
+
+#### As implemented (phase 1)
+
+- **Time totals are gauges.** `metrics` counters count whole numbers, so cumulative times (`interlaken_storage_sequencer_busy_seconds`, `interlaken_storage_write_throttle_seconds`, `interlaken_storage_compaction_seconds`) are gauges that only rise, incremented by fractional seconds. Their names drop `_total`; `rate()` works on them as on counters, though Prometheus can't detect their reset on restart as it does for counters.
+- **Bytes written come from the operating system.** fjall reports sizes but not bytes written, so `interlaken_storage_bytes_written_total` is the process's `write_bytes` from `/proc/self/io`, sampled. It counts all of the process's writes and exists only on Linux.
+- **Compaction backlog is two gauges.** fjall doesn't report segments waiting to compact. `interlaken_storage_flush_backlog` (memtable flushes queued) and `interlaken_storage_l0_tables` (level-0 tables in the data keyspace) stand in for it, and `interlaken_storage_compaction_seconds` records time spent compacting.
+- **Commit counts and latency are measured around the commit path,** in `Txn::commit`, so they cover the sequencer, the commit log and replicated commit paths alike. `interlaken_storage_commits_total` counts transactions with writes; read-only and empty commits don't reach a commit path and aren't counted. Group sizes come from the sequencer, so a replicated database doesn't record them yet.
+- **Added:** `interlaken_storage_active_transactions` and `interlaken_storage_expired_transactions_total`, sampled alongside the oldest snapshot's age.
+- **The sampler** is a thread started by `FjallStorage::open`, every `StorageOptions::metrics_interval` (default 10 seconds, `None` for none). `FjallStorage::record_metrics` records a sample on demand.
+- **Declarations** live in `interlaken_storage::telemetry`: the `Metric` type, each crate's `METRICS` list, and `describe`, which passes declarations to the installed recorder. The book's metric reference (`operations/metrics.md`) is generated from them.
+- **The commit span isn't linked to its group's span.** One group answers many commits; linking them needs the group span's ID carried back with each answer, which can come later if traces need it.
+- **The test recorder and subscriber** are written against the `metrics` and `tracing` traits directly, without `metrics-util` or `tracing-subscriber`. Their values are process-wide, so a test binary that checks metrics serialises its tests.
 
 ### Phase 2: statements and `Usage`
 

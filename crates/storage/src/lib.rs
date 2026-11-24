@@ -32,8 +32,10 @@ mod gc;
 mod pool;
 pub mod replica;
 pub mod rows;
+mod sampler;
 mod scan;
 mod storage;
+pub mod telemetry;
 mod timestamp;
 mod txn;
 

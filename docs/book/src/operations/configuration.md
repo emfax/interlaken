@@ -150,4 +150,13 @@ environment variable lets every test suite run on either path unchanged.
 A database can switch between the two paths from one open to the
 next: opening it applies anything left in the log first.
 
+### `metrics_interval`
+
+Type `Option<Duration>`.
+
+How often the metrics sampler records sizes, backlogs and
+transaction counts as gauges, or `None` for no sampler (ADR-0039).
+Defaults to 10 seconds. With no metrics recorder installed, each
+sample reads a few of fjall's counters and is discarded.
+
 <!-- end generated: options -->
