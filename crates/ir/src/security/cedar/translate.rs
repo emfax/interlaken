@@ -68,9 +68,11 @@ impl Translator<'_> {
             pst::Literal::Bool(b) => SecValue::Bool(*b),
             pst::Literal::Long(n) => SecValue::Long(*n),
             pst::Literal::String(s) => SecValue::Str(s.to_string()),
-            pst::Literal::EntityUID(uid) => {
-                SecValue::Entity(entity_uid(self.catalog, &uid.ty.to_string(), &uid.eid)?)
-            }
+            pst::Literal::EntityUID(uid) => SecValue::Entity(entity_uid(
+                self.catalog,
+                &super::schema::from_cedar(&uid.ty.to_string()),
+                &uid.eid,
+            )?),
             other => return Err(unsupported(format!("literal {other:?}"))),
         })
     }
@@ -154,7 +156,12 @@ impl Translator<'_> {
                 in_expr,
             } => {
                 let base = self.expr(expr)?;
-                let is = SecExpr::Is(bx(base.clone()), entity_type.to_string().as_str().into());
+                let is = SecExpr::Is(
+                    bx(base.clone()),
+                    super::schema::from_cedar(&entity_type.to_string())
+                        .as_str()
+                        .into(),
+                );
                 match in_expr {
                     None => is,
                     Some(group) => {

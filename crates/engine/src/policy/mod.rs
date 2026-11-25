@@ -12,6 +12,7 @@
 mod document;
 mod proposals;
 mod prover;
+mod scopes;
 #[cfg(feature = "smt-prover")]
 mod smt;
 mod snapshot;
@@ -21,8 +22,11 @@ mod verify;
 pub use document::{ActivePolicies, PolicyDocument, PolicyLanguage, build_provider};
 pub use proposals::{
     Proposal, ProposalState, activate, pending_proposals, proposal, submit_proposal,
+    submit_scoped_proposal,
 };
 pub use prover::{Prover, prove_pending, watch_proposals};
+pub(crate) use scopes::{Replacing, drop_policy_scope, effective};
+pub use scopes::{ScopedPolicies, load_scope, load_scopes, proposal_scope};
 #[cfg(feature = "smt-prover")]
 pub use smt::SmtProver;
 pub use snapshot::entity_snapshot;

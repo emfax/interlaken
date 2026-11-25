@@ -84,9 +84,18 @@ when { resource has owner && resource.owner == principal };
 
 Group 7 reads every document, but sees titles in full only on documents they own, and with all but the last four characters masked on the rest. See [Column policies and masks](masks.md).
 
-## Administrators and other undeclared principals
+## Administrators and other principals without tables
 
-Cedar policies can only name declared entity types, so a principal like `Admin::"root"` can't be granted anything in Cedar. Use a principal of a declared type for administration, or RLS policies (see [Governed tables](model.md#governed-tables)).
+Principal types with no table, such as the first administrator's `Admin` (declared when the database is created) or a `Service` declared with `Session::declare_principal_type`, appear in the generated schema as entity types with no attributes, which can be principals but not resources:
+
+```cedar
+permit (principal is Admin, action, resource);
+permit (principal, action == Action::"read", resource is Doc) when { resource has owner && resource.owner == principal };
+```
+
+The first administrator does anything; users read the documents they own.
+
+A principal whose type is declared nowhere is denied. See [Governed tables](model.md#governed-tables).
 
 ## Proving changes
 

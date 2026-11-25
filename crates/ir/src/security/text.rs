@@ -22,7 +22,7 @@ use super::expr::{
 };
 use crate::text::ParseError;
 use crate::text::pretty::render;
-use crate::text::read::{Form, ident};
+use crate::text::read::{Form, ident, qualified};
 use crate::text::sexp::{Sexp, SexpKind, read_one};
 
 /// Shorthand for results in this module.
@@ -100,7 +100,7 @@ pub(crate) fn expr(sexp: &Sexp) -> Result<SecExpr> {
     };
     let e = match form.head {
         "entity" => {
-            let ty = ident(form.next("the entity type")?)?;
+            let ty = type_name(form.next("the entity type")?)?;
             let key = key(form.next("the key")?)?;
             SecExpr::Lit(SecValue::Entity(EntityUid { ty, key }))
         }
@@ -153,7 +153,7 @@ pub(crate) fn expr(sexp: &Sexp) -> Result<SecExpr> {
         }
         "is" => {
             let base = next(&mut form, "the value")?;
-            SecExpr::Is(base, ident(form.next("the type")?)?)
+            SecExpr::Is(base, type_name(form.next("the type")?)?)
         }
         "in" => SecExpr::In(
             next(&mut form, "the member")?,
@@ -253,7 +253,7 @@ fn policy(sexp: &Sexp) -> Result<Policy> {
                 .ok_or_else(|| error(a, "expected read, insert, update or delete"))
         })
         .collect::<Result<_>>()?;
-    let resource_type = ident(form.next("the resource type")?)?;
+    let resource_type = type_name(form.next("the resource type")?)?;
     let condition = expr(form.next("the condition")?)?;
     let column = form.keyword("column").map(ident).transpose()?;
     let mask = form
@@ -272,6 +272,19 @@ fn policy(sexp: &Sexp) -> Result<Policy> {
         column,
         mask,
     })
+}
+
+/// Read an entity type name: `Doc`, or `app.Todo` for a type in namespace
+/// `app` (ADR-0042).
+fn type_name(sexp: &Sexp) -> Result<crate::Ident> {
+    let name = qualified(sexp)?;
+    if name.parts().len() > 2 {
+        return Err(ParseError::at(
+            sexp.pos,
+            "an entity type has at most a namespace and a name",
+        ));
+    }
+    Ok(crate::Ident::new(name.joined()))
 }
 
 /// Parse a policy set, `(policies POLICY...)`.
@@ -316,7 +329,7 @@ fn value_sexp(v: &SecValue) -> Sexp {
         SecValue::Str(s) => Sexp::new(SexpKind::Str(s.clone())),
         SecValue::Entity(uid) => Sexp::list(vec![
             Sexp::raw("entity"),
-            Sexp::symbol([uid.ty.as_str()]),
+            Sexp::symbol(uid.ty.as_str().split('.')),
             match &uid.key {
                 EntityKey::Long(k) => Sexp::new(SexpKind::Int(i128::from(*k))),
                 EntityKey::Str(k) => Sexp::new(SexpKind::Str(k.clone())),
@@ -354,7 +367,10 @@ fn expr_sexp(e: &SecExpr) -> Sexp {
         SecExpr::Error => Sexp::raw("error"),
         SecExpr::Attr(base, a) => form("attr", vec![expr_sexp(base), Sexp::symbol([a.as_str()])]),
         SecExpr::Has(base, a) => form("has", vec![expr_sexp(base), Sexp::symbol([a.as_str()])]),
-        SecExpr::Is(base, t) => form("is", vec![expr_sexp(base), Sexp::symbol([t.as_str()])]),
+        SecExpr::Is(base, t) => form(
+            "is",
+            vec![expr_sexp(base), Sexp::symbol(t.as_str().split('.'))],
+        ),
         SecExpr::In(a, b) => form("in", vec![expr_sexp(a), expr_sexp(b)]),
         SecExpr::Contains(a, b) => form("contains", vec![expr_sexp(a), expr_sexp(b)]),
         SecExpr::ContainsAll(a, b) => form("contains-all", vec![expr_sexp(a), expr_sexp(b)]),

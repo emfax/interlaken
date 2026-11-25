@@ -22,7 +22,7 @@ use super::result::QueryResult;
 use super::stream::{Execution, Meter, QueryStream};
 use super::usage::Usage;
 use crate::catalog::{
-    self, ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec,
+    self, ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, ObjectKind, TableSpec,
 };
 use crate::error::EngineError;
 use crate::policy::{
@@ -83,6 +83,43 @@ enum Kind {
     Admin,
 }
 
+/// Check that the principal may change the namespaces in `namespaces`:
+/// administrators may change anything, and an owner its own namespaces
+/// (ADR-0042). With no namespaces, only administrators may.
+async fn may_change(step: &Step<'_>, namespaces: &[&str]) -> Result<(), EngineError> {
+    if step.privileges.admin {
+        return Ok(());
+    }
+    if namespaces.is_empty() {
+        return Err(EngineError::PermissionDenied(
+            "this change requires the admin privilege".into(),
+        ));
+    }
+    for namespace in namespaces {
+        if !catalog::owns(step.txn, &step.context.principal, namespace).await? {
+            return Err(EngineError::PermissionDenied(format!(
+                "changing namespace {namespace} requires owning it or the admin privilege"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Check that the principal may verify or activate proposal `proposal`:
+/// administrators any, and a namespace's owner its namespace's (ADR-0042).
+async fn may_change_policies(step: &Step<'_>, proposal: i64) -> Result<(), EngineError> {
+    match crate::policy::proposal_scope(step.txn, proposal).await? {
+        Some(scope) => may_change(step, &[scope.as_str()]).await,
+        None => may_change(step, &[]).await,
+    }
+}
+
+/// Return the stored name of an existing object of `kind` named `name`,
+/// looked up through the session's search path.
+async fn existing(step: &Step<'_>, kind: ObjectKind, name: &str) -> Result<String, EngineError> {
+    catalog::resolve_existing(step.txn, step.search_path, kind, name).await
+}
+
 /// An open transaction.
 struct Open {
     /// The statement runner (ADR-0026).
@@ -132,6 +169,8 @@ pub struct Session {
     usage: Usage,
     /// The key the session's usage is attributed to, if attribution is on.
     attribution: Option<Arc<str>>,
+    /// The namespaces unqualified names are looked up in (ADR-0042).
+    search_path: Vec<String>,
 }
 
 impl Session {
@@ -146,7 +185,26 @@ impl Session {
             txn: None,
             finishing: None,
             usage: Usage::default(),
+            search_path: vec![crate::catalog::PUBLIC.to_owned()],
         }
+    }
+
+    /// Set the namespaces unqualified names are looked up in, in order
+    /// (ADR-0042). New tables and other objects named without a namespace
+    /// go in the first. The default is `["public"]`; namespaces that don't
+    /// exist are skipped.
+    pub fn set_search_path<I, S>(&mut self, namespaces: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.search_path = namespaces.into_iter().map(Into::into).collect();
+    }
+
+    /// Return the namespaces unqualified names are looked up in.
+    #[must_use]
+    pub fn search_path(&self) -> &[String] {
+        &self.search_path
     }
 
     /// Return the principal and request facts statements run with.
@@ -550,6 +608,7 @@ impl Session {
     ) -> Result<T, EngineError> {
         let engine = self.engine.inner.clone();
         let context = &self.context;
+        let search_path = &self.search_path;
         let timeout = self.statement_timeout;
         let open = self.txn.as_mut().ok_or(EngineError::NoTransaction)?;
         let (catalog_dirty, policies_dirty, options) =
@@ -561,7 +620,8 @@ impl Session {
                 let work = async {
                     let catalog = engine.catalogs.catalog(txn, catalog_dirty).await?;
                     let privileges = privileges::privileges(txn, &context.principal).await?;
-                    if kind != Kind::Query && !privileges.admin {
+                    // Catalog statements check ownership themselves (ADR-0042).
+                    if kind == Kind::Admin && !privileges.admin {
                         return Err(EngineError::PermissionDenied(format!(
                             "{} requires the admin privilege",
                             match kind {
@@ -580,6 +640,7 @@ impl Session {
                         use_caches: !catalog_dirty && !policies_dirty,
                         options,
                         deadline,
+                        search_path,
                     };
                     let value = body(&step).await?;
                     if kind == Kind::Catalog {
@@ -757,6 +818,7 @@ impl Session {
         };
         let engine = &self.engine.inner;
         let context = &self.context;
+        let search_path = &self.search_path;
         let (catalog_dirty, policies_dirty, options) =
             (open.catalog_dirty, open.policies_dirty, open.options);
         let txn = open.exec.txn();
@@ -774,6 +836,7 @@ impl Session {
                 use_caches: !catalog_dirty && !policies_dirty,
                 options,
                 deadline,
+                search_path,
             };
             let prepared = prepare(&step, plan?).await?;
             check_params(&prepared.params, &params)?;
@@ -891,7 +954,7 @@ impl Session {
     pub async fn prepare(&mut self, text: &str) -> Result<Plan, EngineError> {
         let plan = parse(text);
         self.run(Kind::Query, async move |step: &Step<'_>| {
-            Ok(pin(&plan?, step.catalog.as_ref())?.0)
+            Ok(pin(&plan?, step.catalog.as_ref(), step.search_path)?.0)
         })
         .await
     }
@@ -941,7 +1004,13 @@ impl Session {
     /// definition's error (see [`catalog::create_table`]).
     pub async fn create_table(&mut self, spec: &TableSpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::create_table(step.txn, spec).await
+            let name = catalog::qualify_new(step.txn, step.search_path, &spec.name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            let spec = TableSpec {
+                name,
+                ..spec.clone()
+            };
+            catalog::create_table(step.txn, &spec).await
         })
         .await
     }
@@ -953,7 +1022,9 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::drop_table`]).
     pub async fn drop_table(&mut self, name: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::drop_table(step.txn, name).await
+            let name = existing(step, ObjectKind::Table, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::drop_table(step.txn, &name).await
         })
         .await
     }
@@ -969,7 +1040,9 @@ impl Session {
         column: &ColumnSpec,
     ) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::add_column(step.txn, table, column).await
+            let table = existing(step, ObjectKind::Table, table).await?;
+            may_change(step, &[catalog::namespace_of(&table)]).await?;
+            catalog::add_column(step.txn, &table, column).await
         })
         .await
     }
@@ -981,7 +1054,15 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::create_index`]).
     pub async fn create_index(&mut self, spec: &IndexSpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::create_index(step.txn, spec).await
+            let table = existing(step, ObjectKind::Table, &spec.table).await?;
+            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            may_change(step, &[catalog::namespace_of(&table)]).await?;
+            let spec = IndexSpec {
+                name,
+                table,
+                ..spec.clone()
+            };
+            catalog::create_index(step.txn, &spec).await
         })
         .await
     }
@@ -993,7 +1074,9 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::drop_index`]).
     pub async fn drop_index(&mut self, name: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::drop_index(step.txn, name).await
+            let name = existing(step, ObjectKind::Index, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::drop_index(step.txn, &name).await
         })
         .await
     }
@@ -1005,7 +1088,50 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::declare_entity`]).
     pub async fn declare_entity(&mut self, spec: &EntitySpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::declare_entity(step.txn, spec).await
+            let table = existing(step, ObjectKind::Table, &spec.table).await?;
+            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            may_change(step, &[catalog::namespace_of(&table)]).await?;
+            let mut spec = spec.clone();
+            for attribute in &mut spec.attributes {
+                if let Some(target) = &attribute.references {
+                    attribute.references = Some(existing(step, ObjectKind::Entity, target).await?);
+                }
+            }
+            let spec = EntitySpec {
+                name,
+                table,
+                ..spec
+            };
+            catalog::declare_entity(step.txn, &spec).await
+        })
+        .await
+    }
+
+    /// Declare a principal type that no table backs, such as `Admin` or
+    /// `Service`, so policies can name its principals (ADR-0042).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::declare_principal_type`]).
+    pub async fn declare_principal_type(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            let name = catalog::qualify_new(step.txn, step.search_path, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::declare_principal_type(step.txn, &name).await
+        })
+        .await
+    }
+
+    /// Remove a principal type that no table backs.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Session::create_table`] (see [`catalog::drop_principal_type`]).
+    pub async fn drop_principal_type(&mut self, name: &str) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            let name = catalog::qualify_new(step.txn, step.search_path, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::drop_principal_type(step.txn, &name).await
         })
         .await
     }
@@ -1017,7 +1143,9 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::drop_entity`]).
     pub async fn drop_entity(&mut self, name: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::drop_entity(step.txn, name).await
+            let name = existing(step, ObjectKind::Entity, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::drop_entity(step.txn, &name).await
         })
         .await
     }
@@ -1029,7 +1157,24 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::declare_membership`]).
     pub async fn declare_membership(&mut self, spec: &MembershipSpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::declare_membership(step.txn, spec).await
+            let spec = MembershipSpec {
+                member: existing(step, ObjectKind::Entity, &spec.member).await?,
+                group: existing(step, ObjectKind::Entity, &spec.group).await?,
+                edges: existing(step, ObjectKind::Table, &spec.edges).await?,
+                closure: existing(step, ObjectKind::Table, &spec.closure).await?,
+                ..spec.clone()
+            };
+            may_change(
+                step,
+                &[
+                    catalog::namespace_of(&spec.member),
+                    catalog::namespace_of(&spec.group),
+                    catalog::namespace_of(&spec.edges),
+                    catalog::namespace_of(&spec.closure),
+                ],
+            )
+            .await?;
+            catalog::declare_membership(step.txn, &spec).await
         })
         .await
     }
@@ -1041,7 +1186,17 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::drop_membership`]).
     pub async fn drop_membership(&mut self, member: &str, group: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::drop_membership(step.txn, member, group).await
+            let member = existing(step, ObjectKind::Entity, member).await?;
+            let group = existing(step, ObjectKind::Entity, group).await?;
+            may_change(
+                step,
+                &[
+                    catalog::namespace_of(&member),
+                    catalog::namespace_of(&group),
+                ],
+            )
+            .await?;
+            catalog::drop_membership(step.txn, &member, &group).await
         })
         .await
     }
@@ -1057,7 +1212,24 @@ impl Session {
     /// and [`EngineError::ForeignKey`] if an existing row violates it.
     pub async fn create_foreign_key(&mut self, spec: &ForeignKeySpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::create_foreign_key(step.txn, spec).await
+            let table = existing(step, ObjectKind::Table, &spec.table).await?;
+            let references = existing(step, ObjectKind::Table, &spec.references).await?;
+            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            may_change(
+                step,
+                &[
+                    catalog::namespace_of(&table),
+                    catalog::namespace_of(&references),
+                ],
+            )
+            .await?;
+            let spec = ForeignKeySpec {
+                name,
+                table,
+                references,
+                ..spec.clone()
+            };
+            catalog::create_foreign_key(step.txn, &spec).await
         })
         .await
     }
@@ -1069,7 +1241,9 @@ impl Session {
     /// As for [`Session::create_table`] (see [`catalog::drop_foreign_key`]).
     pub async fn drop_foreign_key(&mut self, name: &str) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
-            catalog::drop_foreign_key(step.txn, name).await
+            let name = existing(step, ObjectKind::ForeignKey, name).await?;
+            may_change(step, &[catalog::namespace_of(&name)]).await?;
+            catalog::drop_foreign_key(step.txn, &name).await
         })
         .await
     }
@@ -1087,6 +1261,7 @@ impl Session {
     ) -> Result<(), EngineError> {
         let name = QualifiedName::from(name);
         self.run(Kind::Catalog, async |step: &Step<'_>| {
+            may_change(step, &[]).await?;
             catalog::set_function_leakproof(step.txn, &name, args, leakproof).await
         })
         .await
@@ -1094,6 +1269,58 @@ impl Session {
 
     /// Check this session's principal holds `admin`, in an empty
     /// administrative step.
+    /// Create namespace `name`, owned by `owner` (ADR-0042). Its owner can
+    /// change its schema and policies without `admin`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or
+    /// [`EngineError::InvalidDefinition`] if the name is taken or invalid.
+    pub async fn create_namespace(
+        &mut self,
+        name: &str,
+        owner: &EntityUid,
+    ) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            may_change(step, &[]).await?;
+            catalog::create_namespace(step.txn, name, owner).await
+        })
+        .await
+    }
+
+    /// Drop namespace `name`: only if it's empty, unless `cascade`, which
+    /// drops everything in it, and foreign keys referring to its tables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or
+    /// [`EngineError::InvalidDefinition`] (see [`catalog::drop_namespace`]).
+    pub async fn drop_namespace(&mut self, name: &str, cascade: bool) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            may_change(step, &[]).await?;
+            catalog::drop_namespace(step.txn, name, cascade).await
+        })
+        .await
+    }
+
+    /// Give namespace `name` to `owner`; its owner or an administrator may.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] for anyone else, or
+    /// [`EngineError::InvalidDefinition`] if there is no such namespace.
+    pub async fn set_namespace_owner(
+        &mut self,
+        name: &str,
+        owner: &EntityUid,
+    ) -> Result<(), EngineError> {
+        self.run(Kind::Catalog, async |step: &Step<'_>| {
+            may_change(step, &[name]).await?;
+            catalog::set_namespace_owner(step.txn, name, owner).await
+        })
+        .await
+    }
+
     #[cfg(feature = "cluster")]
     async fn require_admin(&mut self) -> Result<(), EngineError> {
         self.run(Kind::Admin, async |_step: &Step<'_>| Ok(())).await
@@ -1197,6 +1424,38 @@ impl Session {
         result
     }
 
+    /// Propose a policy set for namespace `scope` (ADR-0042); return the
+    /// proposal's ID, to verify and activate like any proposal.
+    ///
+    /// The set is combined with the database-wide baseline, whose forbids
+    /// still apply, and may concern only the namespace's own entity types.
+    /// The namespace's owner may propose, verify and activate its set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] unless the principal owns
+    /// the namespace or has `admin`, or the errors of
+    /// [`policy::submit_scoped_proposal`](crate::policy::submit_scoped_proposal).
+    pub async fn submit_scoped_policies(
+        &mut self,
+        scope: &str,
+        document: &PolicyDocument,
+        invariants: &str,
+    ) -> Result<i64, EngineError> {
+        let proposer = format!("{}", self.context.principal);
+        let result = self
+            .run(Kind::Policy, async |step: &Step<'_>| {
+                may_change(step, &[scope]).await?;
+                crate::policy::submit_scoped_proposal(
+                    step.txn, scope, document, invariants, &proposer,
+                )
+                .await
+            })
+            .await;
+        record_proposal("submit", &result);
+        result
+    }
+
     /// Run the local gates on a proposal and record the results (ADR-0030),
     /// analysing impact with this session's context as the base request.
     ///
@@ -1207,7 +1466,8 @@ impl Session {
         let verifier = format!("{}", self.context.principal);
         let base = self.context.clone();
         let result = self
-            .run(Kind::Admin, async |step: &Step<'_>| {
+            .run(Kind::Policy, async |step: &Step<'_>| {
+                may_change_policies(step, proposal).await?;
                 let catalog: Arc<dyn interlaken_ir::catalog::Catalog> = step.catalog.clone();
                 verify_locally(step.txn, catalog, proposal, &verifier, &base).await
             })
@@ -1232,6 +1492,7 @@ impl Session {
         let confirmed_by = confirm.then(|| format!("{}", self.context.principal));
         let result = self
             .run(Kind::Policy, async |step: &Step<'_>| {
+                may_change_policies(step, proposal).await?;
                 activate(step.txn, proposal, confirmed_by.as_deref()).await
             })
             .await;
@@ -1249,6 +1510,7 @@ impl Session {
         settings: &PolicySettings,
     ) -> Result<(), EngineError> {
         self.run(Kind::Policy, async |step: &Step<'_>| {
+            may_change(step, &[]).await?;
             set_policy_settings(step.txn, settings).await
         })
         .await

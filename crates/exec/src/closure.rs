@@ -205,7 +205,7 @@ impl ClosurePlan {
     pub fn table_names(&self) -> Vec<String> {
         self.closures
             .iter()
-            .map(|c| c.table.name.last().to_string())
+            .map(|c| c.table.name.joined())
             .collect()
     }
 
@@ -233,7 +233,7 @@ pub(crate) fn guard_dml(
         .any(|m| m.closure == table.id);
     if maintained {
         return Err(ExecError::PermissionDenied {
-            table: table.name.last().to_string(),
+            table: table.name.joined(),
         });
     }
     Ok(ClosurePlan::for_table(catalog, table.id)?.map(Arc::new))
@@ -441,7 +441,7 @@ impl Maintainer {
         if let Some(t) = &self.stored[ci] {
             return Ok(t.clone());
         }
-        let name = self.plan.closures[ci].table.name.last().to_string();
+        let name = self.plan.closures[ci].table.name.joined();
         let table = interlaken_storage::catalog::table(txn, &name)
             .await?
             .ok_or_else(|| ExecError::Catalog(format!("table {name} is not stored")))?;

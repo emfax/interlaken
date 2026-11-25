@@ -286,7 +286,7 @@ impl Source {
 impl LookupState {
     /// Look up the stored table (and index) on the first pull.
     async fn start(&mut self) -> Result<(), ExecError> {
-        let name = self.table.name.last().to_string();
+        let name = self.table.name.joined();
         let stored = interlaken_storage::catalog::table(&self.ctx.txn, &name)
             .await?
             .ok_or_else(|| ExecError::Catalog(format!("table {name} is not stored")))?;

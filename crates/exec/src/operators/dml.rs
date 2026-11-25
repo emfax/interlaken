@@ -310,7 +310,7 @@ impl Pull for DmlState {
     /// Write one input batch per pull and return its `RETURNING` rows.
     async fn next(&mut self) -> Result<Option<RecordBatch>, ExecError> {
         if self.stored.is_none() {
-            let name = self.table.name.last().to_string();
+            let name = self.table.name.joined();
             self.stored = Some(
                 interlaken_storage::catalog::table(&self.ctx.txn, &name)
                     .await?

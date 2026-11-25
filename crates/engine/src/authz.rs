@@ -102,7 +102,7 @@ async fn stored_table(
     let def = catalog
         .table_by_id(id)
         .ok_or_else(|| EngineError::Catalog(format!("IR table {} is not declared", id.get())))?;
-    let name = def.name.last().to_string();
+    let name = def.name.joined();
     catalog::table(txn, &name)
         .await?
         .ok_or_else(|| EngineError::Catalog(format!("table {name} is not stored")))

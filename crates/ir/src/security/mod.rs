@@ -24,11 +24,12 @@ mod marker;
 mod paths;
 mod plan;
 mod provider;
+mod scoped;
 mod store;
 mod text;
 
 pub use cache::{CacheStats, CachedProvider, ResidualCache, VOLATILE_CONTEXT_FIELDS};
-pub use cedar::{CedarProvider, cedar_schema};
+pub use cedar::{CedarProvider, cedar_schema, policy_resource_types};
 pub use closure::{Closure, CycleError};
 pub use error::SecurityError;
 pub use eval::{EntityStore, EvalFailure, ResourceData};
@@ -45,5 +46,6 @@ pub use provider::{
     ColumnAccess, CombiningRule, Decision, Dependencies, PartialRequest, PolicyProvider, Request,
     Residual, RlsProvider, SecurityContext, StandardContext,
 };
+pub use scoped::{ScopedProvider, type_namespace};
 pub use store::DatabaseEntities;
 pub use text::{parse_policies, parse_sec_expr, print_sec_expr};

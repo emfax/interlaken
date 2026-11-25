@@ -30,7 +30,7 @@ pub async fn entity_snapshot(txn: &Txn, catalog: &dyn Catalog) -> Result<Databas
         let def = catalog.table_by_id(id).ok_or_else(|| {
             EngineError::Catalog(format!("IR table {} is not declared", id.get()))
         })?;
-        let name = def.name.last().to_string();
+        let name = def.name.joined();
         let stored = catalog::table(txn, &name)
             .await?
             .ok_or_else(|| EngineError::Catalog(format!("table {name} is not stored")))?;

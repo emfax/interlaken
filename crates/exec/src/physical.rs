@@ -517,10 +517,9 @@ fn governed_table(rel: &Rel, catalog: &dyn Catalog) -> String {
         Rel::Get {
             table: TableRef::Id(id),
             ..
-        } => catalog.table_by_id(*id).map_or_else(
-            || format!("table {}", id.get()),
-            |t| t.name.last().to_string(),
-        ),
+        } => catalog
+            .table_by_id(*id)
+            .map_or_else(|| format!("table {}", id.get()), |t| t.name.joined()),
         other => other
             .inputs()
             .first()
@@ -880,7 +879,7 @@ impl Planner<'_> {
         let references =
             crate::references::ReferencePlan::for_table(self.catalog, &table)?.map(Arc::new);
         let mut input = self.build(input)?;
-        name_write_checks(&mut input, table.name.last().as_str());
+        name_write_checks(&mut input, &table.name.joined());
         Ok(Dml {
             input: Box::new(input),
             returning: returning.iter().map(|e| e.expr.clone()).collect(),

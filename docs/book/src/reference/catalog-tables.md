@@ -155,6 +155,16 @@ Membership declarations between entity types: the edges table and its member and
 | `closure_ancestor` | `int4` | no |  |
 | `closure_paths` | `int4` | no |  |
 
+### `engine_namespaces`
+
+Namespaces and their owners (ADR-0042). `public` exists in every database; objects in other namespaces are stored as `namespace.name`.
+
+| Column | Type | Nullable | Primary key |
+| --- | --- | --- | --- |
+| `name` | `text` | no | 1 |
+| `owner_type` | `text` | no |  |
+| `owner_key` | `text` | no |  |
+
 ### `engine_policy_proposals`
 
 Proposed policy changes: the version each is based on, its language, text and invariants, who proposed it, its state, the version it became when activated and who confirmed it.
@@ -203,6 +213,14 @@ The result of each deployment gate a verifier ran on a proposal: whether it pass
 | `gate` | `text` | no | 3 |
 | `passed` | `bool` | no |  |
 | `detail` | `text` | no |  |
+
+### `engine_principal_types`
+
+Principal types that no table backs, such as the first administrator's: policies can name them, and their principals have no attributes or ancestors.
+
+| Column | Type | Nullable | Primary key |
+| --- | --- | --- | --- |
+| `name` | `text` | no | 1 |
 
 ### `engine_privileges`
 

@@ -97,6 +97,18 @@ impl QualifiedName {
         &self.0
     }
 
+    /// Return the parts joined with `.`, unquoted: the form storage keeps a
+    /// table's name in, such as `app.todos` for a table in namespace `app`
+    /// (ADR-0042).
+    #[must_use]
+    pub fn joined(&self) -> String {
+        self.0
+            .iter()
+            .map(Ident::as_str)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     /// Return the last (innermost) part.
     #[must_use]
     pub fn last(&self) -> &Ident {

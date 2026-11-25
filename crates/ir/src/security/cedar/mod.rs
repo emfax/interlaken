@@ -16,4 +16,4 @@ mod schema;
 mod translate;
 
 pub use provider::CedarProvider;
-pub use schema::cedar_schema;
+pub use schema::{cedar_schema, policy_resource_types};

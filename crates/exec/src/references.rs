@@ -166,10 +166,10 @@ impl ReferencePlan {
                 .collect::<Result<_, ExecError>>()?;
             outgoing.push(Outgoing {
                 name: fk.name.to_string(),
-                table: table.name.last().to_string(),
+                table: table.name.joined(),
                 columns: fk.columns.iter().map(|&c| at(c)).collect(),
                 referenced: Probe {
-                    table: referenced.name.last().to_string(),
+                    table: referenced.name.joined(),
                     index: fk.referenced_index.as_ref().map(ToString::to_string),
                     key: sources,
                     names: key
@@ -203,13 +203,13 @@ impl ReferencePlan {
                 name: fk.name.to_string(),
                 columns: fk.referenced_columns.iter().map(|&c| at(c)).collect(),
                 referencing: Probe {
-                    table: referencing.name.last().to_string(),
+                    table: referencing.name.joined(),
                     index: index.as_ref().map(ToString::to_string),
                     names: sources.iter().map(|&p| column_name(table, p)).collect(),
                     key: sources,
                 },
                 own: Probe {
-                    table: table.name.last().to_string(),
+                    table: table.name.joined(),
                     index: fk.referenced_index.as_ref().map(ToString::to_string),
                     key: own_key.iter().map(|&k| at(k)).collect(),
                     names: own_key.iter().map(|&k| column_name(table, at(k))).collect(),
@@ -221,7 +221,7 @@ impl ReferencePlan {
             return Ok(None);
         }
         Ok(Some(Self {
-            target: table.name.last().to_string(),
+            target: table.name.joined(),
             outgoing,
             incoming,
         }))

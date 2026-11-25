@@ -49,6 +49,8 @@ pub(crate) const FOREIGN_KEY_COLUMNS: &str = "engine_foreign_key_columns";
 pub(crate) const FUNCTIONS: &str = "engine_functions";
 /// Privileges granted to principals.
 pub(crate) const PRIVILEGES: &str = "engine_privileges";
+/// Principal types with no table (ADR-0042).
+pub(crate) const PRINCIPAL_TYPES: &str = "engine_principal_types";
 
 /// The primary key of the `engine_catalog` row.
 pub(crate) const CATALOG_ROW: i64 = 1;
@@ -126,6 +128,14 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
             "Function properties set by administrators: whether each function is leakproof."
         }
         "engine_privileges" => "Privileges (`admin`, `read-policies`) granted to principals.",
+        "engine_namespaces" => {
+            "Namespaces and their owners (ADR-0042). `public` exists in every database; objects \
+             in other namespaces are stored as `namespace.name`."
+        }
+        "engine_principal_types" => {
+            "Principal types that no table backs, such as the first administrator's: policies \
+             can name them, and their principals have no attributes or ancestors."
+        }
         "engine_policy_set" => {
             "One row holding the active policy set: its version, language and text."
         }
@@ -239,6 +249,7 @@ pub(crate) async fn create_catalog_tables(txn: &Txn) -> Result<(), EngineError> 
             ],
             vec!["principal_type", "principal_key", "privilege"],
         ),
+        (PRINCIPAL_TYPES, vec![text("name")], vec!["name"]),
     ];
     for (name, columns, primary_key) in specs {
         catalog::create_table(

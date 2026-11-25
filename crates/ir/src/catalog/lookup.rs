@@ -51,6 +51,12 @@ pub trait Catalog: Send + Sync {
         Vec::new()
     }
 
+    /// Return the principal types that no table backs, ordered by name
+    /// (ADR-0042). None by default.
+    fn principal_types(&self) -> Vec<Ident> {
+        Vec::new()
+    }
+
     /// Return every membership whose member type is `member`. None by default.
     fn memberships_of(&self, member: &Ident) -> Vec<Arc<MembershipDef>> {
         let _ = member;

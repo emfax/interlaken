@@ -91,6 +91,8 @@ pub struct InMemoryCatalog {
     memberships: HashMap<(Ident, Ident), Arc<MembershipDef>>,
     /// Foreign keys by name.
     foreign_keys: BTreeMap<Ident, Arc<ForeignKeyDef>>,
+    /// Principal types with no table (ADR-0042), ordered by name.
+    principal_types: std::collections::BTreeSet<Ident>,
 }
 
 impl InMemoryCatalog {
@@ -106,7 +108,26 @@ impl InMemoryCatalog {
             entities: HashMap::new(),
             memberships: HashMap::new(),
             foreign_keys: BTreeMap::new(),
+            principal_types: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Declare a principal type with no table (ADR-0042): principals of it
+    /// can be named by policies, but have no attributes or ancestors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::InvalidEntity`] if the name is already a
+    /// principal type or an entity type.
+    pub fn add_principal_type(&mut self, name: Ident) -> Result<(), CatalogError> {
+        if self.entities.contains_key(&name) || self.principal_types.contains(&name) {
+            return Err(CatalogError::InvalidEntity {
+                name: name.to_string(),
+                reason: "already declared".into(),
+            });
+        }
+        self.principal_types.insert(name);
+        Ok(())
     }
 
     /// Set the reported schema version, as a DDL change would.
@@ -279,7 +300,7 @@ impl InMemoryCatalog {
     /// already declared, or the table or a column does not exist.
     pub fn add_entity(&mut self, entity: EntityDef) -> Result<(), CatalogError> {
         let name = entity.name.to_string();
-        if self.entities.contains_key(&entity.name) {
+        if self.entities.contains_key(&entity.name) || self.principal_types.contains(&entity.name) {
             return Err(CatalogError::InvalidEntity {
                 name,
                 reason: "already declared".into(),
@@ -429,6 +450,11 @@ impl Catalog for InMemoryCatalog {
         let mut out: Vec<_> = self.entities.values().cloned().collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+
+    /// Return the principal types with no table, ordered by name.
+    fn principal_types(&self) -> Vec<Ident> {
+        self.principal_types.iter().cloned().collect()
     }
 
     /// Return every membership of `member` entities, ordered by group type.

@@ -89,6 +89,26 @@ The prover gates need Cedar policies and a node built with the `smt-prover` feat
 
 Otherwise it fails with `55000` and says why. Activating a proposal supersedes every other pending proposal, since their base version is no longer current. Concurrent activations conflict, and transactions that wrote while relying on the old policies fail at commit with `40001` (see [Authorization is transactional](model.md#authorization-is-transactional)).
 
+## Policy sets per namespace
+
+Besides the database-wide policy set, the *baseline*, each [namespace](../ddl/namespaces.md) can have a set of its own. A request on a resource in namespace `app` is decided by the baseline and `app`'s set together, permit-unless-forbid as always, so a forbid in the baseline applies in every namespace and no namespace can override it.
+
+```rust,ignore
+let id = owner.submit_scoped_policies("app", &PolicyDocument {
+    language: PolicyLanguage::Cedar,
+    body: r#"permit (principal, action == Action::"read", resource is app::Todo) when { resource.owner == principal };"#.into(),
+}, "").await?;
+owner.verify_policies(id).await?;
+owner.activate_policies(id, false).await?;
+```
+
+- **Who:** the namespace's owner, or an administrator, proposes, verifies and activates its set. The baseline needs `admin`.
+- **Language:** a namespace's set is in the baseline's language.
+- **Confinement:** every policy in a namespace's set must name one of the namespace's own types as its resource (`resource is app::Todo` or `resource in app::Folder::"x"` in Cedar; the resource type in RLS). One that could match another namespace's resources, or names no resource type, fails the validation gate. Principals and their attributes may be of any type.
+- **Staleness is per set:** activating `app`'s set doesn't make proposals for `crm`'s set or for the baseline stale.
+- **Impact analysis** of a baseline change covers every namespace, since the baseline applies to all of them.
+- **Dropping a namespace** drops its set.
+
 ## Policy settings
 
 `set_policy_settings` changes two cluster-wide settings, which `EngineOptions::policy_settings` sets for a new database:

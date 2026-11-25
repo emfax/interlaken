@@ -1,12 +1,12 @@
 ---
 id: 0042
 title: Namespaces and Scoped Policies
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [catalog, engine, security, ir]
 feature-flag:
 created: 2026-11-25
-accepted:
-implemented:
+accepted: 2026-11-25
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Implemented, in all four phases. The *As implemented* notes after the phases record where the result differs from this design, chiefly: objects in `public` are stored unqualified; an entity type replaces a principal type of the same name; and namespaces' policy sets live in tables of their own beside the unchanged baseline table.
 
 ## Summary
 
@@ -162,6 +162,20 @@ This closes backlog `undeclared-principal-types`.
 
 - `engine_policy_sets`, confinement, per-namespace providers, Cedar namespaces in the schema, proposals per scope.
 - The book: namespaces, ownership and scoped policies.
+
+### As implemented
+
+- **Principal types** are kept in `engine_principal_types`. `Engine::create` records the first administrator's type there without bumping the schema version, so a new database still starts at version 1. Declaring an entity type of the same name replaces the principal type rather than failing, since the book's recommended setup makes the first administrator a `User` and then declares `User` over a table. The Cedar provider denies a principal of an undeclared type before building Cedar's request, and gives a principal type's principals an entity with no attributes or ancestors, so policies are fully evaluated for them.
+- **Stored names:** objects in `public` keep their unqualified names, so existing databases need nothing; objects in other namespaces are stored as `namespace.name`. Index and foreign key names are scoped by their table's namespace. Several places in the executor and engine looked stored tables up by a name's last part; they now use the whole name (`QualifiedName::joined`).
+- **Resolution** wraps the statement's catalog in a `Scoped` catalog that tries a one-part table name in each namespace of the search path, for resolving only; resolved plans refer to tables by ID. DDL names are qualified in the session before each operation: new objects go in the first namespace of the path, and existing ones are looked up through it.
+- **Older databases:** `engine_namespaces`, `engine_principal_types` and the policy scope tables are created the first time they're written, so a database made before this ADR opens unchanged; its `public` has no owner until one is set.
+- **Cascade** advances the statement between steps, so each step reads what the previous one dropped.
+- **Ownership** is checked in each catalog and policy operation instead of before every catalog statement: administrators may do anything, and an owner anything within its namespaces. Verifying a proposal now runs as a policy statement, since a namespace's owner may verify its set.
+- **Policy sets** for namespaces are kept in `engine_policy_scopes`, and each proposal's namespace in `engine_policy_proposal_scopes`; the baseline's table and the proposals table are unchanged, so baseline proposals work as before. Every set uses the baseline's language.
+- **Providers:** `ScopedProvider`, in the IR crate, routes each request by its resource type's namespace to a provider built from the baseline and that namespace's set together (Cedar texts concatenated, RLS policies combined), and everything else to the baseline. Without namespace sets, the baseline provider is used directly. The residual cache's key is a number per distinct combination of the baseline's and namespaces' versions seen by the process, rather than the baseline's version alone.
+- **Cedar** puts each namespace's entity types in a `namespace` block and names them `app::Todo` everywhere else; a namespace's types can refer to types in `public` by their plain names. The RLS sublanguage reads `app.Todo` wherever it reads a type.
+- **Verification** builds the providers that are active and that the proposal would make, so impact analysis of a baseline change covers every namespace. The SMT prover is given a Cedar namespace set combined with the baseline.
+- **Confinement** reads each policy's resource constraint: `is`, `is ... in`, `==` and `in` must name a type of the namespace; an unconstrained resource fails.
 
 ## Consequences
 

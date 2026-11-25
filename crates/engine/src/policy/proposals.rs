@@ -160,6 +160,63 @@ pub async fn submit_proposal(
     Ok(id)
 }
 
+/// Submit a proposed policy set for namespace `scope` (ADR-0042) against
+/// its current version; return the proposal's ID.
+///
+/// The set must be in the baseline's language, and is combined with the
+/// baseline when activated: the baseline's forbids still apply.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidDefinition`] if the namespace doesn't
+/// exist or is `public`, [`EngineError::Invalid`] if the language differs
+/// from the baseline's, or a storage error.
+pub async fn submit_scoped_proposal(
+    txn: &Txn,
+    scope: &str,
+    document: &PolicyDocument,
+    invariants: &str,
+    proposer: &str,
+) -> Result<i64, EngineError> {
+    if scope == crate::catalog::PUBLIC || !crate::catalog::namespace_exists(txn, scope).await? {
+        return Err(EngineError::InvalidDefinition(format!(
+            "{scope} isn't a namespace that can have its own policies"
+        )));
+    }
+    let baseline = load_policies(txn).await?;
+    if document.language != baseline.document.language {
+        return Err(EngineError::Invalid(format!(
+            "namespace policies must be in the baseline's language, {}",
+            baseline.document.language.name()
+        )));
+    }
+    let base_version = super::scopes::load_scope(txn, scope).await?.version;
+    let id = all(txn).await?.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+    let proposal = Proposal {
+        id,
+        base_version,
+        document: document.clone(),
+        invariants: invariants.into(),
+        proposer: proposer.into(),
+        state: ProposalState::Pending,
+        activated_version: None,
+        confirmed_by: None,
+    };
+    rows::insert(txn, &table(txn, PROPOSALS_TABLE).await?, encode(&proposal)).await?;
+    super::scopes::set_proposal_scope(txn, id, scope).await?;
+    txn.next_statement();
+    Ok(id)
+}
+
+/// Return the current version of the set proposal `id` would replace: the
+/// baseline's, or its namespace's.
+pub(crate) async fn current_version(txn: &Txn, scope: Option<&str>) -> Result<i64, EngineError> {
+    Ok(match scope {
+        None => load_policies(txn).await?.version,
+        Some(scope) => super::scopes::load_scope(txn, scope).await?.version,
+    })
+}
+
 /// Read one proposal.
 ///
 /// # Errors
@@ -209,12 +266,13 @@ pub async fn activate(txn: &Txn, id: i64, confirmed_by: Option<&str>) -> Result<
     if proposal.state != ProposalState::Pending {
         return Err(EngineError::NotPending(id));
     }
-    let current = load_policies(txn).await?;
-    if proposal.base_version != current.version {
+    let scope = super::scopes::proposal_scope(txn, id).await?;
+    let current_version = current_version(txn, scope.as_deref()).await?;
+    if proposal.base_version != current_version {
         return Err(EngineError::Stale {
             proposal: id,
             base: proposal.base_version,
-            current: current.version,
+            current: current_version,
         });
     }
     let results = verifications(txn, id).await?;
@@ -244,11 +302,17 @@ pub async fn activate(txn: &Txn, id: i64, confirmed_by: Option<&str>) -> Result<
             detail: failed.join("; "),
         });
     }
-    let version = current.version + 1;
-    write_policies(txn, version, &proposal.document).await?;
+    let version = current_version + 1;
+    match &scope {
+        None => write_policies(txn, version, &proposal.document).await?,
+        Some(scope) => {
+            super::scopes::write_scope(txn, scope, version, &proposal.document.body).await?;
+        }
+    }
     let table = table(txn, PROPOSALS_TABLE).await?;
     for mut other in pending_proposals(txn).await? {
-        if other.id != id {
+        // Only proposals for the same set are superseded.
+        if other.id != id && super::scopes::proposal_scope(txn, other.id).await? == scope {
             other.state = ProposalState::Superseded;
             rows::update(txn, &table, &[Datum::Int8(other.id)], encode(&other)).await?;
         }

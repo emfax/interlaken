@@ -8,10 +8,9 @@ use interlaken_storage::Txn;
 use interlaken_storage::encoding::Datum;
 use interlaken_storage::rows::{self, RowScan};
 
-use super::document::build_provider;
 use super::proposals::proposal;
 use super::snapshot::entity_snapshot;
-use super::tables::{VERIFICATIONS_TABLE, int_of, load_policies, policy_settings, table, text_of};
+use super::tables::{VERIFICATIONS_TABLE, int_of, policy_settings, table, text_of};
 use crate::error::EngineError;
 
 /// A check a policy change must pass.
@@ -195,9 +194,33 @@ pub async fn verify_locally(
         .await?
         .ok_or(EngineError::ProposalNotFound(proposal_id))?;
     let settings = policy_settings(txn).await?;
-    let current = load_policies(txn).await?;
+    let (current, scopes) = super::scopes::load_all(txn).await?;
+    let scope = super::scopes::proposal_scope(txn, proposal_id).await?;
+    // The proposal against everything else that's active: the baseline it
+    // replaces, or the baseline with its namespace's set (ADR-0042).
+    let replacing = match &scope {
+        None => super::scopes::Replacing::Baseline(&proposal.document),
+        Some(scope) => super::scopes::Replacing::Scope(scope, &proposal.document.body),
+    };
+    let proposed = match &scope {
+        Some(scope) => super::scopes::check_confined(
+            proposal.document.language,
+            scope,
+            &proposal.document.body,
+        ),
+        None => Ok(()),
+    }
+    .and_then(|()| {
+        super::scopes::effective(
+            &current,
+            &scopes,
+            replacing,
+            catalog.clone(),
+            &settings.app_context,
+        )
+    });
     let mut results = Vec::new();
-    match build_provider(&proposal.document, catalog.clone(), &settings.app_context) {
+    match proposed {
         Err(e) => results.push(GateResult::new(Gate::Validation, false, e.to_string())),
         Ok(proposed) => {
             results.push(GateResult::new(Gate::Validation, true, "valid"));
@@ -207,8 +230,13 @@ pub async fn verify_locally(
                 warnings.is_empty(),
                 warnings.join("; "),
             ));
-            let current_provider =
-                build_provider(&current.document, catalog.clone(), &settings.app_context)?;
+            let current_provider = super::scopes::effective(
+                &current,
+                &scopes,
+                super::scopes::Replacing::Nothing,
+                catalog.clone(),
+                &settings.app_context,
+            )?;
             let data = entity_snapshot(txn, catalog.as_ref()).await?;
             let report = impact_analysis(
                 current_provider.as_ref(),

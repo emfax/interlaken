@@ -22,7 +22,7 @@ use interlaken_storage::{ConstraintViolation, Error, Txn, rows};
 use super::specs::{ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec};
 use super::tables::{
     ATTRIBUTES, COLUMNS, ENTITIES, FOREIGN_KEY_COLUMNS, FOREIGN_KEYS, FUNCTIONS, MEMBERSHIPS,
-    bump_schema_version, id_datum, is_engine_table, read_all, stored, text_at,
+    PRINCIPAL_TYPES, bump_schema_version, id_datum, is_engine_table, read_all, stored, text_at,
 };
 use super::types::stored_type;
 use crate::error::EngineError;
@@ -289,6 +289,11 @@ pub async fn drop_index(txn: &Txn, name: &str) -> Result<(), EngineError> {
 /// storage's error if the table or a column doesn't exist. Reloading the
 /// catalog afterwards rejects a table that already backs an entity type.
 pub async fn declare_entity(txn: &Txn, spec: &EntitySpec) -> Result<(), EngineError> {
+    // A principal type with no table, such as the first administrator's,
+    // is replaced by an entity type of the same name (ADR-0042).
+    if let Some(types) = catalog::table(txn, PRINCIPAL_TYPES).await? {
+        rows::delete(txn, &types, &[Datum::Text(spec.name.clone())]).await?;
+    }
     let table = user_table(txn, &spec.table).await?;
     let key = column_of(&table, &spec.key)?;
     rows::insert(
@@ -326,6 +331,75 @@ pub async fn declare_entity(txn: &Txn, spec: &EntitySpec) -> Result<(), EngineEr
             ],
         )
         .await?;
+    }
+    bump_schema_version(txn).await?;
+    Ok(())
+}
+
+/// Declare `name` as a principal type with no table (ADR-0042): policies
+/// can name it, as in Cedar's `principal is Admin`, and its principals have
+/// no attributes or ancestors.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidDefinition`] if the name is already a
+/// principal type or an entity type, or isn't an identifier.
+pub async fn declare_principal_type(txn: &Txn, name: &str) -> Result<(), EngineError> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(invalid(format!("{name:?} isn't a principal type name")));
+    }
+    let entities = stored(txn, ENTITIES).await?;
+    if rows::get(txn, &entities, &[Datum::Text(name.to_owned())])
+        .await?
+        .is_some()
+    {
+        return Err(invalid(format!("{name} is an entity type")));
+    }
+    let table = match catalog::table(txn, PRINCIPAL_TYPES).await? {
+        Some(table) => table,
+        // A database created before ADR-0042.
+        None => {
+            catalog::create_table(
+                txn,
+                interlaken_storage::catalog::TableSpec {
+                    name: PRINCIPAL_TYPES.into(),
+                    columns: vec![
+                        ColumnDef::new("name", interlaken_storage::encoding::ColumnType::Text)
+                            .not_null(),
+                    ],
+                    primary_key: vec!["name".into()],
+                },
+            )
+            .await?
+        }
+    };
+    rows::insert(txn, &table, vec![Datum::Text(name.to_owned())])
+        .await
+        .map_err(|e| exists_as(e, format!("principal type {name} already exists")))?;
+    bump_schema_version(txn).await?;
+    Ok(())
+}
+
+/// Record principal type `name` in a new database, whose schema version
+/// stays at 1.
+pub(crate) async fn create_principal_type(txn: &Txn, name: &str) -> Result<(), EngineError> {
+    let table = stored(txn, PRINCIPAL_TYPES).await?;
+    rows::insert(txn, &table, vec![Datum::Text(name.to_owned())]).await?;
+    Ok(())
+}
+
+/// Remove a principal type with no table.
+///
+/// # Errors
+///
+/// Returns [`EngineError::InvalidDefinition`] if there is no such type.
+pub async fn drop_principal_type(txn: &Txn, name: &str) -> Result<(), EngineError> {
+    let removed = match catalog::table(txn, PRINCIPAL_TYPES).await? {
+        Some(table) => rows::delete(txn, &table, &[Datum::Text(name.to_owned())]).await?,
+        None => false,
+    };
+    if !removed {
+        return Err(invalid(format!("principal type {name} does not exist")));
     }
     bump_schema_version(txn).await?;
     Ok(())

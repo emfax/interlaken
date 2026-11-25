@@ -56,6 +56,8 @@ pub(crate) struct Step<'a> {
     pub(crate) options: ExecOptions,
     /// When the statement times out, if it has a timeout.
     pub(crate) deadline: Option<Instant>,
+    /// The namespaces unqualified names are looked up in, in order (ADR-0042).
+    pub(crate) search_path: &'a [String],
 }
 
 /// A statement ready to run.
@@ -78,12 +80,21 @@ pub(crate) fn parse(text: &str) -> Result<Plan, EngineError> {
     parse_plan(text).map_err(EngineError::Syntax)
 }
 
-/// Resolve `plan` (unless already resolved) and verify it as client IR.
-pub(crate) fn pin(plan: &Plan, catalog: &dyn Catalog) -> Result<(Plan, RelSchema), EngineError> {
+/// Resolve `plan` (unless already resolved), looking unqualified names up
+/// through `search_path`, and verify it as client IR.
+pub(crate) fn pin(
+    plan: &Plan,
+    catalog: &dyn Catalog,
+    search_path: &[String],
+) -> Result<(Plan, RelSchema), EngineError> {
     let resolved = if plan.schema_version.is_some() {
         plan.clone()
     } else {
-        resolve(plan, catalog)?.plan
+        let scoped = crate::catalog::Scoped {
+            inner: catalog,
+            path: search_path,
+        };
+        resolve(plan, &scoped)?.plan
     };
     let schema = verify(&resolved, catalog, &VerifyOptions { trusted: false })?;
     Ok((resolved, schema))
@@ -92,13 +103,15 @@ pub(crate) fn pin(plan: &Plan, catalog: &dyn Catalog) -> Result<(Plan, RelSchema
 /// Take `plan` through the pipeline to a physical plan.
 pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, EngineError> {
     let catalog = step.catalog.as_ref();
-    let (resolved, schema) = pin(plan, catalog)?;
+    let (resolved, schema) = pin(plan, catalog, step.search_path)?;
     let params = declared_params(&resolved.root);
     let policies = load_policies(step.txn).await?;
+    let scopes = crate::policy::load_scopes(step.txn).await?;
     let settings = policy_settings(step.txn).await?;
     let provider = step.engine.provider(
         &step.catalog,
         &policies,
+        &scopes,
         &settings.app_context,
         step.use_caches,
     )?;
@@ -109,10 +122,10 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
         &provider.entity_paths(),
     )
     .await?;
-    let cached = step
-        .engine
-        .residuals
-        .provider(provider.as_ref(), policies.version);
+    let cached = step.engine.residuals.provider(
+        provider.as_ref(),
+        step.engine.policy_key(&policies, &scopes),
+    );
     let provider: &dyn interlaken_ir::security::PolicyProvider = if step.use_caches {
         &cached
     } else {
@@ -128,7 +141,7 @@ pub(crate) async fn prepare(step: &Step<'_>, plan: &Plan) -> Result<Prepared, En
     let mut cascades = CascadePlans::new();
     for fk in reachable_cascades(catalog, &resolved.root) {
         if let Some(cascade) = cascade_plan(catalog, &fk) {
-            let (cascade, _) = pin(&cascade, catalog)?;
+            let (cascade, _) = pin(&cascade, catalog, &[])?;
             cascades.insert(fk.name.to_string(), Arc::new(physical(&cascade)?));
         }
     }

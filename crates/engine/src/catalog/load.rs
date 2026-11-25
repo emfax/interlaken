@@ -125,6 +125,16 @@ pub async fn load_catalog(txn: &Txn) -> Result<InMemoryCatalog, EngineError> {
         })
         .map_err(invalid)?;
     }
+    // Absent from databases created before ADR-0042.
+    if interlaken_storage::catalog::table(txn, super::tables::PRINCIPAL_TYPES)
+        .await?
+        .is_some()
+    {
+        for row in read_all(txn, super::tables::PRINCIPAL_TYPES, Vec::new()).await? {
+            ir.add_principal_type(text_at(&row, 0)?.into())
+                .map_err(invalid)?;
+        }
+    }
     if let Some(entity) = attributes.keys().next() {
         return Err(EngineError::Catalog(format!(
             "attributes of undeclared entity type {entity}"

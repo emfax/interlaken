@@ -49,8 +49,10 @@ pub async fn prove_pending<P: Prover>(
     let current = load_policies(txn).await?;
     let app_context = policy_settings(txn).await?.app_context;
     let mut proved = Vec::new();
-    for proposal in pending_proposals(txn).await? {
-        if proposal.base_version != current.version {
+    for mut proposal in pending_proposals(txn).await? {
+        let scope = super::scopes::proposal_scope(txn, proposal.id).await?;
+        let current_version = super::proposals::current_version(txn, scope.as_deref()).await?;
+        if proposal.base_version != current_version {
             continue;
         }
         let done = verifications(txn, proposal.id)
@@ -60,8 +62,20 @@ pub async fn prove_pending<P: Prover>(
         if done {
             continue;
         }
+        // A namespace's set is proved combined with the baseline, as it
+        // would be enforced (ADR-0042).
+        let mut document = current.document.clone();
+        if let Some(scope) = scope
+            .as_ref()
+            .filter(|_| document.language == super::PolicyLanguage::Cedar)
+        {
+            let active = super::scopes::load_scope(txn, scope).await?;
+            document.body = format!("{}\n{}", current.document.body, active.body);
+            proposal.document.body =
+                format!("{}\n{}", current.document.body, proposal.document.body);
+        }
         let results = prover
-            .prove(&current.document, &proposal, &catalog, &app_context)
+            .prove(&document, &proposal, &catalog, &app_context)
             .await?;
         record_verification(txn, proposal.id, prover.name(), &results).await?;
         proved.push(proposal.id);

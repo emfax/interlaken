@@ -56,6 +56,12 @@ pub struct CedarProvider {
     paths: Vec<EntityPath>,
     /// Every policy, for dependency analysis.
     all: PolicySet,
+    /// The types a principal may have: entity types and principal types
+    /// with no table (ADR-0042). Requests from other types are denied.
+    principals: HashSet<String>,
+    /// The principal types with no table, whose principals have no
+    /// attributes or ancestors.
+    principal_only: HashSet<String>,
 }
 
 impl std::fmt::Debug for CedarProvider {
@@ -69,8 +75,8 @@ impl std::fmt::Debug for CedarProvider {
 
 /// Return the Cedar UID of an entity.
 fn cedar_uid(uid: &EntityUid) -> Result<CedarUid, SecurityError> {
-    let ty =
-        EntityTypeName::from_str(uid.ty.as_str()).map_err(|e| cedar_error("entity type", e))?;
+    let ty = EntityTypeName::from_str(&super::schema::to_cedar(uid.ty.as_str()))
+        .map_err(|e| cedar_error("entity type", e))?;
     Ok(CedarUid::from_type_name_and_id(
         ty,
         EntityId::new(eid(&uid.key)),
@@ -337,6 +343,16 @@ impl CedarProvider {
                 .map_err(|e| cedar_error("policy set", e))?;
         }
         let paths = cedar_entity_paths(&all, catalog.as_ref());
+        let principal_only: HashSet<String> = catalog
+            .principal_types()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let principals = entity_types
+            .iter()
+            .map(|t| (*t).to_owned())
+            .chain(principal_only.iter().cloned())
+            .collect();
         Ok(Self {
             catalog,
             schema,
@@ -345,6 +361,8 @@ impl CedarProvider {
             masks,
             paths,
             all,
+            principals,
+            principal_only,
         })
     }
 
@@ -377,8 +395,14 @@ impl CedarProvider {
         resource_type: &Ident,
         store: &dyn EntityStore,
     ) -> Result<Residual, SecurityError> {
-        let resource_type_name = EntityTypeName::from_str(resource_type.as_str())
-            .map_err(|e| cedar_error("resource type", e))?;
+        // A principal of a type the schema doesn't know is denied, rather
+        // than failing Cedar's request validation (ADR-0042).
+        if !self.principals.contains(context.principal.ty.as_str()) {
+            return Ok(Residual::Deny);
+        }
+        let resource_type_name =
+            EntityTypeName::from_str(&super::schema::to_cedar(resource_type.as_str()))
+                .map_err(|e| cedar_error("resource type", e))?;
         let request = CedarPartialRequest::new(
             PartialEntityUid::from_concrete(cedar_uid(&context.principal)?),
             action_uid(action)?,
@@ -399,6 +423,19 @@ impl CedarProvider {
         let mut known = Vec::new();
         for uid in &uids {
             known.extend(known_entity(uid, store, &self.schema)?);
+        }
+        // A principal type with no table: no attributes, no ancestors.
+        if self.principal_only.contains(context.principal.ty.as_str()) {
+            known.push(
+                PartialEntity::new(
+                    cedar_uid(&context.principal)?,
+                    Some(BTreeMap::new()),
+                    Some(HashSet::new()),
+                    Some(BTreeMap::new()),
+                    &self.schema,
+                )
+                .map_err(|e| cedar_error("entity", e))?,
+            );
         }
         let entities = PartialEntities::from_partial_entities(known, &self.schema)
             .map_err(|e| cedar_error("entities", e))?;
@@ -476,6 +513,9 @@ impl CedarProvider {
         req: &Request<'_>,
         entities: &dyn EntityStore,
     ) -> Result<Decision, SecurityError> {
+        if !self.principals.contains(req.context.principal.ty.as_str()) {
+            return Ok(Decision::Deny);
+        }
         let resource_uid = match &req.resource.uid {
             Some(uid) => cedar_uid(uid)?,
             None => cedar_uid(&EntityUid::str(req.resource.ty.as_str(), ""))?,

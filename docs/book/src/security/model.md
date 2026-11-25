@@ -11,7 +11,7 @@ A table is *governed* once it backs an entity type (see [Entities and membership
 
 **Declaring an entity type closes its table at once, for everyone, the creating administrator included.** Until a policy set that permits access is active, every read of the table returns no rows, and every write is refused with `42501`. Plan the order: create tables, declare entity types, activate policies, then load data. Alternatively, load the data before declaring entity types.
 
-A principal whose type isn't a declared entity type, such as the `Admin::"root"` principal in this book's examples, has a further problem. Cedar policies can't name it, and until an RLS policy set is active, its queries on governed tables fail with `42501` and the message "secured plan is invalid … principal type `Admin` is not valid". So prefer an administrator of a declared entity type, such as a `User`. Pass that principal to `Engine::create` as the first administrator, and grant it access in the policies like anyone else. Allowing undeclared principal types is backlog item `undeclared-principal-types`.
+A principal's type needn't be backed by a table. `Engine::create` declares the first administrator's type, such as `Admin` for the `Admin::"root"` principal in this book's examples, as a *principal type*, and `Session::declare_principal_type` declares others, such as `Service`. Policies name them like entity types (`permit (principal is Admin, action, resource);` in Cedar), and their principals have no attributes and belong to no groups. A principal whose type is declared nowhere is simply denied. `drop_principal_type` removes one, and declaring an entity type of the same name replaces it, so a type can start without a table and gain one later.
 
 ## Policies
 

@@ -221,7 +221,7 @@ impl Renderer<'_> {
                 secured,
                 ..
             } => {
-                let name = table.name.last();
+                let name = table.name.joined();
                 let hidden = hide && *secured;
                 let mut text = match access {
                     Access::Full => format!("TableScan {name}"),
@@ -465,7 +465,7 @@ impl Renderer<'_> {
                 self.line(
                     node,
                     depth,
-                    &format!("Insert into {}{}", dml.table.name.last(), maintains(dml)),
+                    &format!("Insert into {}{}", dml.table.name.joined(), maintains(dml)),
                 );
                 self.node(&dml.input, depth + 1, scope);
             }
@@ -488,7 +488,7 @@ impl Renderer<'_> {
                     depth,
                     &format!(
                         "Update {} set {}{}",
-                        dml.table.name.last(),
+                        dml.table.name.joined(),
                         sets.join(", "),
                         maintains(dml)
                     ),
@@ -499,7 +499,7 @@ impl Renderer<'_> {
                 self.line(
                     node,
                     depth,
-                    &format!("Delete from {}{}", dml.table.name.last(), maintains(dml)),
+                    &format!("Delete from {}{}", dml.table.name.joined(), maintains(dml)),
                 );
                 self.node(&dml.input, depth + 1, scope);
             }

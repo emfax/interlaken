@@ -15,8 +15,7 @@ use crate::attribution::{Attribution, Attributor};
 use crate::catalog::{CatalogCache, create_catalog_tables, schema_version};
 use crate::error::EngineError;
 use crate::policy::{
-    ActivePolicies, PolicyDocument, PolicySettings, VerificationMode, build_provider,
-    create_policy_tables,
+    ActivePolicies, PolicyDocument, PolicySettings, VerificationMode, create_policy_tables,
 };
 use crate::privileges::{Privilege, grant};
 
@@ -68,6 +67,8 @@ struct ProviderEntry {
     policy_version: i64,
     /// The policies.
     document: PolicyDocument,
+    /// The namespaces' policy sets (ADR-0042).
+    scopes: Vec<crate::policy::ScopedPolicies>,
     /// The application context type the provider validated against.
     app_context: String,
     /// The provider.
@@ -82,6 +83,8 @@ pub(crate) struct Inner {
     pub(crate) catalogs: CatalogCache,
     /// The provider for the newest committed catalog and policies.
     providers: Mutex<Option<ProviderEntry>>,
+    /// A key for each policy state seen, for the residual cache (ADR-0042).
+    policy_states: Mutex<std::collections::HashMap<Vec<(String, i64)>, i64>>,
     /// Residuals by everything they depend on (ADR-0019).
     pub(crate) residuals: ResidualCache,
     /// The node-wide memory pool, if any.
@@ -96,12 +99,32 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
+    /// Return a key for the policy state of `policies` and `scopes`,
+    /// distinct for every distinct state this process has seen: the
+    /// residual cache's policy version (ADR-0042).
+    pub(crate) fn policy_key(
+        &self,
+        policies: &ActivePolicies,
+        scopes: &[crate::policy::ScopedPolicies],
+    ) -> i64 {
+        if scopes.is_empty() {
+            return policies.version;
+        }
+        let state: Vec<(String, i64)> = std::iter::once((String::new(), policies.version))
+            .chain(scopes.iter().map(|s| (s.scope.clone(), s.version)))
+            .collect();
+        let mut states = self.policy_states.lock().expect("policy state lock");
+        let next = -i64::try_from(states.len()).unwrap_or(i64::MAX) - 1;
+        *states.entry(state).or_insert(next)
+    }
+
     /// Return the policy provider for `policies` over `catalog`, reusing
     /// the last one built if `use_cache` and nothing it depends on changed.
     pub(crate) fn provider(
         &self,
         catalog: &Arc<InMemoryCatalog>,
         policies: &ActivePolicies,
+        scopes: &[crate::policy::ScopedPolicies],
         app_context: &str,
         use_cache: bool,
     ) -> Result<Arc<dyn PolicyProvider>, EngineError> {
@@ -116,18 +139,25 @@ impl Inner {
             && entry.schema_version == version
             && entry.policy_version == policies.version
             && entry.document == policies.document
+            && entry.scopes == scopes
             && entry.app_context == app_context
         {
             return Ok(entry.provider.clone());
         }
         let shared: Arc<dyn Catalog> = catalog.clone();
-        let provider: Arc<dyn PolicyProvider> =
-            Arc::from(build_provider(&policies.document, shared, app_context)?);
+        let provider: Arc<dyn PolicyProvider> = Arc::from(crate::policy::effective(
+            policies,
+            scopes,
+            crate::policy::Replacing::Nothing,
+            shared,
+            app_context,
+        )?);
         if use_cache {
             *self.providers.lock().expect("provider lock") = Some(ProviderEntry {
                 schema_version: version,
                 policy_version: policies.version,
                 document: policies.document.clone(),
+                scopes: scopes.to_vec(),
                 app_context: app_context.to_owned(),
                 provider: provider.clone(),
             });
@@ -154,6 +184,7 @@ impl Engine {
                 storage,
                 catalogs: CatalogCache::default(),
                 providers: Mutex::new(None),
+                policy_states: Mutex::new(std::collections::HashMap::new()),
                 residuals: ResidualCache::new(options.residual_cache_capacity),
                 pool: options.node_memory_limit.map(MemoryPool::new),
                 query_budget: options.query_budget,
@@ -183,6 +214,9 @@ impl Engine {
         create_catalog_tables(&txn).await?;
         create_policy_tables(&txn, &options.policy_settings).await?;
         grant(&txn, admin, Privilege::Admin).await?;
+        crate::catalog::create_namespaces_table(&txn, admin).await?;
+        // So Cedar policies can name the first administrator (ADR-0042).
+        crate::catalog::create_principal_type(&txn, admin.ty.as_str()).await?;
         txn.commit().await?;
         Ok(true)
     }
