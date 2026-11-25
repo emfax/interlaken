@@ -16,6 +16,18 @@ interlaken_engine::describe_metrics();
 let _spans = interlaken_telemetry::install_otlp("http://localhost:4318/v1/traces", "my-app")?;
 ```
 
+`install_otlp` makes OTLP export the process's only subscriber. To keep your own log output as well, build the exporter as a layer and compose it with your other layers:
+
+```rust,ignore
+use tracing_subscriber::layer::SubscriberExt;
+
+let (otlp, _spans) = interlaken_telemetry::otlp_layer("http://localhost:4318/v1/traces", "my-app")?;
+let subscriber = tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer())
+    .with(otlp);
+tracing::subscriber::set_global_default(subscriber)?;
+```
+
 - **Prometheus:** histograms ending `_seconds` get latency buckets from 100 µs to 60 s, `_bytes` size buckets from 1 KiB to 1 GiB, and `_size` count buckets from 1 to 1,024. `prometheus_builder()` returns the configured builder if you want to install it yourself.
 - **OTLP:** spans go over HTTP with protobuf, in batches from the exporter's own thread, with or without a Tokio runtime. Only plain HTTP is supported, so send to a collector on the same host or network, which can forward over TLS. Metrics aren't sent over OTLP: point the collector's Prometheus receiver at `/metrics` instead.
 - Any other `metrics` recorder or `tracing` subscriber works too; only one of each can be installed per process.

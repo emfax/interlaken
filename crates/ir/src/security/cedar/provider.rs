@@ -255,6 +255,27 @@ fn entities_in(value: &SecValue, out: &mut Vec<EntityUid>) {
     }
 }
 
+/// Stack left, as `stacker` measures it, below which Cedar runs on a
+/// stack of its own. Cedar refuses to evaluate with under 100 KiB left.
+const CEDAR_RED_ZONE: usize = 256 * 1024;
+
+/// The size of the stack Cedar runs on when the current one is short.
+const CEDAR_STACK: usize = 2 * 1024 * 1024;
+
+/// Run `f`, which calls into Cedar, on a stack `stacker` can measure.
+///
+/// Cedar checks the stack left before each step of validation and
+/// evaluation, through `stacker`, which knows the bounds of the OS thread's
+/// stack only. On a stack of its own (a fiber, such as the one a WASM
+/// runtime polls host calls on) the measure is wrong and Cedar fails with
+/// "recursion limit reached" however much stack there is. When the measure
+/// is under [`CEDAR_RED_ZONE`] (a fiber below the thread's stack, or a
+/// thread that is nearly out), `f` runs on a fresh [`CEDAR_STACK`] that
+/// `stacker` allocates and measures correctly; otherwise it runs in place.
+fn on_cedar_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(CEDAR_RED_ZONE, CEDAR_STACK, f)
+}
+
 impl CedarProvider {
     /// Construct a provider for Cedar `policies`, validating them against the
     /// schema generated from `catalog` for `entity_types`, with `app_context`
@@ -265,6 +286,16 @@ impl CedarProvider {
     /// Returns [`SecurityError::Invalid`] if the schema or policies do not
     /// parse, or the policies do not validate (Cedar's strict mode).
     pub fn new(
+        policies: &str,
+        catalog: std::sync::Arc<dyn Catalog>,
+        entity_types: &[&str],
+        app_context: &str,
+    ) -> Result<Self, SecurityError> {
+        on_cedar_stack(|| Self::build(policies, catalog, entity_types, app_context))
+    }
+
+    /// Construct the provider; see [`CedarProvider::new`].
+    fn build(
         policies: &str,
         catalog: std::sync::Arc<dyn Catalog>,
         entity_types: &[&str],
@@ -323,8 +354,22 @@ impl CedarProvider {
         &self.schema
     }
 
-    /// Run TPE on `set` for a request whose resource is unknown.
+    /// Run TPE on `set` for a request whose resource is unknown, on a stack
+    /// Cedar can measure.
     fn partial(
+        &self,
+        set: &PolicySet,
+        context: &SecurityContext,
+        action: Action,
+        resource_type: &Ident,
+        store: &dyn EntityStore,
+    ) -> Result<Residual, SecurityError> {
+        on_cedar_stack(|| self.partial_here(set, context, action, resource_type, store))
+    }
+
+    /// Run TPE on `set` for a request whose resource is unknown, on the
+    /// current stack.
+    fn partial_here(
         &self,
         set: &PolicySet,
         context: &SecurityContext,
@@ -423,26 +468,10 @@ impl CedarProvider {
         }
         Ok(combine(permits, forbids))
     }
-}
 
-impl PolicyProvider for CedarProvider {
-    /// Partially evaluate the row-level policies with Cedar's TPE and translate the residual.
-    fn partial_eval(
-        &self,
-        req: &PartialRequest<'_>,
-        entities: &dyn EntityStore,
-    ) -> Result<Residual, SecurityError> {
-        self.partial(
-            &self.rows,
-            req.context,
-            req.action,
-            req.resource_type,
-            entities,
-        )
-    }
-
-    /// Decide with Cedar's own authorizer, loading entities on demand.
-    fn authorize(
+    /// Decide `req` with Cedar's own authorizer, loading entities on demand,
+    /// on the current stack.
+    fn decide(
         &self,
         req: &Request<'_>,
         entities: &dyn EntityStore,
@@ -496,6 +525,32 @@ impl PolicyProvider for CedarProvider {
             CedarDecision::Allow => Decision::Allow,
             CedarDecision::Deny => Decision::Deny,
         })
+    }
+}
+
+impl PolicyProvider for CedarProvider {
+    /// Partially evaluate the row-level policies with Cedar's TPE and translate the residual.
+    fn partial_eval(
+        &self,
+        req: &PartialRequest<'_>,
+        entities: &dyn EntityStore,
+    ) -> Result<Residual, SecurityError> {
+        self.partial(
+            &self.rows,
+            req.context,
+            req.action,
+            req.resource_type,
+            entities,
+        )
+    }
+
+    /// Decide with Cedar's own authorizer, loading entities on demand.
+    fn authorize(
+        &self,
+        req: &Request<'_>,
+        entities: &dyn EntityStore,
+    ) -> Result<Decision, SecurityError> {
+        on_cedar_stack(|| self.decide(req, entities))
     }
 
     /// Return the context fields and principal data any policy reads.

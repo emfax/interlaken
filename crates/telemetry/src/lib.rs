@@ -7,8 +7,9 @@
 //!
 //! - [`install_prometheus`] (feature `prometheus`, on by default): serve
 //!   metrics for Prometheus to scrape, with Interlaken's histogram buckets.
-//! - [`install_otlp`] (feature `otlp`): export spans to an OpenTelemetry
-//!   collector.
+//! - [`otlp_layer`] (feature `otlp`): a tracing layer that exports spans to
+//!   an OpenTelemetry collector, to compose with the program's own layers;
+//!   [`install_otlp`] installs it alone.
 //! - [`install_test_recorder`] and [`install_test_subscriber`]: an
 //!   in-memory metrics recorder and span subscriber, for tests that check a
 //!   metric moved or a span was recorded.
@@ -27,7 +28,7 @@ mod recorder;
 mod subscriber;
 
 #[cfg(feature = "otlp")]
-pub use otlp::{OtlpGuard, install_otlp};
+pub use otlp::{OtlpGuard, install_otlp, otlp_layer};
 #[cfg(feature = "prometheus")]
 pub use prometheus::{
     COUNT_BUCKETS, LATENCY_BUCKETS, SIZE_BUCKETS, install_prometheus, prometheus_builder,

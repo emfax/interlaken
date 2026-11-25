@@ -9,10 +9,12 @@ license.workspace = true
 [dependencies]
 cedar-policy.workspace = true
 smol_str.workspace = true
+stacker = "0.1.25"
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+corosensei = "0.3"
 
 [lints]
 workspace = true

@@ -11,7 +11,7 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 | SQL | planned as a front end that lowers into the IR; until then, statements are [IR text](../ir/syntax.md) or plans built with the IR's Rust builder |
 | A network protocol | none: Interlaken is embedded, and clients call the Rust API in-process |
 | GraphQL | planned as a front end; the IR's `nest` and `unnest` operators and `apply` decorrelation already exist for it |
-| Replication | single node only; replication with Raft is planned |
+| Sharding | a cluster is one Raft group holding the whole database (see [Running a cluster](../operations/clusters.md)); data isn't split across groups, and a member's certificates can't be replaced without restarting it |
 | User-defined functions | only built-in functions; WASM functions are designed (ADR-0029) but not built |
 
 ### Data definition
@@ -59,7 +59,10 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 
 See [Configuration](../operations/configuration.md) for every setting.
 
-Two further limits are behaviours rather than settings:
+Three further limits are behaviours rather than settings:
 
 - **`Session::query` collects every row** of a result in memory, outside any budget. Use `query_stream` for large results (see [Streaming results](../transactions/streaming.md)).
 - **DDL conflicts broadly:** a transaction that ran DDL conflicts with every concurrent transaction that wrote anything, whichever tables they touched, and one of them fails with `40001` (see [Tables and column types](../ddl/tables.md#transactions-and-concurrency)).
+- **Stack:** a statement runs on the stack of the task that polls it, and resolving, securing and planning recurse with the depth of the plan. An ordinary statement under Cedar policies needs about 32 KiB of stack in an optimized build and about 384 KiB unoptimized. Give threads and fibers that run statements at least 1 MiB; Tokio's worker threads have 2 MiB.
+  - **Cedar** refuses to evaluate with less than 100 KiB of stack left, as the [`stacker`](https://docs.rs/stacker) crate measures it, and `stacker` knows only the OS thread's stack. When it reports less than 256 KiB left, Interlaken runs Cedar on a 2 MiB stack of its own, which `stacker` measures correctly. That covers threads that are nearly out of stack, and fibers and coroutines (such as the stack a WASM runtime polls host calls on) mapped below the thread's stack, where `stacker` would report none left.
+  - **A fiber mapped above the thread's stack** looks to `stacker` as if it has plenty left, so Cedar runs in place and only the fiber's own size limits it.

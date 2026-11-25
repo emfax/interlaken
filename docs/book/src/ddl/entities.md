@@ -72,6 +72,8 @@ An `EntitySpec` names:
 
 - **`name`:** the entity type, as policies write it (`User`, `Doc`). It is unique, and each table backs at most one entity type.
 - **`table` and `key`:** the backing table, and the column whose value identifies each entity. `EntityUid::long("User", 2)` is the user whose `id` is 2, and `EntityUid::str` is for text keys.
+  - **Key types:** the key column must be `int2`, `int4`, `int8` or `text`, as Cedar's entity IDs are `Long` or `String`. Rows whose key has another type never become entities, so no policy can grant access to them.
+  - **UUID keys:** for UUIDs, use a `text` key column and fill it with `(cast (call gen_random_uuid) text)`.
 - **`attributes`:** the columns policies can read, each under an attribute name.
   - `AttributeSpec::new("dept")` exposes the column of the same name.
   - `AttributeSpec::reference("owner", "owner", "User")` declares that the column holds the key of a `User`, so policies can follow it: `resource.owner.dept` is the department of the document's owner.
