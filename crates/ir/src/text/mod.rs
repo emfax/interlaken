@@ -17,6 +17,8 @@
 //!
 //! ```text
 //! plan     (plan REL [:schema-version N])
+//! DDL      (create-table ...), (create-index ...) and the other schema
+//!          changes in the `ddl` module's grammar (ADR-0043)
 //! REL      (get TABLE [:as A] [:bind B])
 //!          (filter REL EXPR)
 //!          (project REL ITEM... [:bind B])
@@ -60,6 +62,7 @@
 
 mod api;
 mod catalog;
+mod ddl;
 mod error;
 pub(crate) mod literal;
 pub(crate) mod pretty;
@@ -68,7 +71,8 @@ pub(crate) mod sexp;
 pub(crate) mod write;
 
 pub use api::{
-    parse_expr, parse_plan, parse_rel, parse_type, print_expr, print_plan, print_rel, print_type,
+    ScriptStatement, parse_expr, parse_plan, parse_rel, parse_script, parse_statement, parse_type,
+    print_expr, print_plan, print_rel, print_script, print_statement, print_type,
 };
 pub use catalog::parse_catalog;
 pub use error::ParseError;

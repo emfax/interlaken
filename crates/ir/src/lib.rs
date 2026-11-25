@@ -31,6 +31,7 @@
 
 pub mod builder;
 pub mod catalog;
+pub mod ddl;
 mod expr;
 pub mod interp;
 pub mod logic;

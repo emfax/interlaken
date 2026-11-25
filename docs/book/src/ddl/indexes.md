@@ -47,6 +47,13 @@ session
 # }
 ```
 
+In IR text, a key column is a bare name (ascending, NULLs last), or `(asc COLUMN)` or `(desc COLUMN)`, with `:nulls first` or `:nulls last` to change the NULL order:
+
+```ir
+(create-index docs_by_owner_text :table docs owner (desc updated))
+(create-index docs_title :table docs title :unique true :nones-distinct false)
+```
+
 An `IndexSpec` has:
 
 - **`name`:** unique across the database, not just the table. Names starting with `sys_` are reserved. A duplicate name fails with `42P07`.
@@ -57,7 +64,7 @@ An `IndexSpec` has:
 - **`nones_distinct`:** for a unique index, `true` keeps that behaviour. `false` treats NULLs as equal to each other, as Postgres's `NULLS NOT DISTINCT` does, so a second row with a NULL `slug` fails with `23505`.
   - Creating a unique index over existing duplicates fails with `23505`.
 
-Creating an index fills it from the table's existing rows in the same statement. Indexes are maintained by every later insert, update and delete. `drop_index(name)` removes one. Index DDL needs `admin` and changes the schema version, like all DDL (see [Tables and column types](tables.md#transactions-and-concurrency)).
+Creating an index fills it from the table's existing rows in the same statement. Indexes are maintained by every later insert, update and delete. `drop_index(name)`, or `(drop-index NAME)`, removes one. Index DDL needs `admin` and changes the schema version, like all DDL (see [Tables and column types](tables.md#transactions-and-concurrency)).
 
 ## When the planner uses an index
 

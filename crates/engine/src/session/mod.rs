@@ -5,11 +5,13 @@ mod connection;
 mod engine;
 mod pipeline;
 mod result;
+mod script;
 mod stream;
 mod usage;
 
 pub use connection::Session;
 pub use engine::{Engine, EngineOptions};
 pub use result::QueryResult;
+pub use script::{ScriptEntry, ScriptReport};
 pub use stream::QueryStream;
 pub use usage::Usage;

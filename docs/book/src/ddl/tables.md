@@ -1,6 +1,6 @@
 # Tables and column types
 
-Tables are created and changed through `Session` methods, not IR text. DDL is transactional: each operation runs as one statement, in the open transaction or in its own, and commits or rolls back with the transaction like any other write. Only principals with the `admin` privilege can run DDL; anyone else gets `42501`. The principal that created the database is its first administrator (see [Privileges](../security/privileges.md)).
+Tables are created and changed through `Session` methods, or with DDL statements in IR text, which run through `Session::query` like any statement and do exactly what the methods do (see [Schema scripts](scripts.md)). DDL is transactional: each operation runs as one statement, in the open transaction or in its own, and commits or rolls back with the transaction like any other write. Only principals with the `admin` privilege can run DDL; anyone else gets `42501`. The principal that created the database is its first administrator (see [Privileges](../security/privileges.md)).
 
 ## Creating a table
 
@@ -31,7 +31,17 @@ session
 # }
 ```
 
-A `TableSpec` has:
+In IR text, the same table is:
+
+```ir
+(create-table notes
+  (column id int8)
+  (column title (option text))
+  (column tags (option (array text)))
+  (primary-key id))
+```
+
+A `TableSpec`, or the parts of `create-table`, has:
 
 - **`name`:**
   - It must not be empty.
@@ -53,6 +63,10 @@ Rows are stored in primary key order, and primary key lookups and ranges are the
 session.add_column("docs", &ColumnSpec::new("summary", parse_type("(option text)")?)).await?;
 ```
 
+```ir
+(add-column docs summary (option text))
+```
+
 The new column goes at the end, and existing rows read it as NULL:
 - An added column must have an optional type, since there are no column defaults to fill existing rows; adding a column of plain type fails with `42P16`.
 - A column name that already exists fails with `42701`.
@@ -64,6 +78,8 @@ There is no way yet to drop, rename or retype a column, or to rename a table.
 ```rust,ignore
 session.drop_table("docs").await?;
 ```
+
+In IR text, `(drop-table docs)`.
 
 This drops the table with its rows and indexes:
 - A table backing an entity type or holding a membership can't be dropped; remove those declarations first (see [Entities and memberships](entities.md)).

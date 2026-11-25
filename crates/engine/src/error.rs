@@ -95,6 +95,25 @@ pub enum EngineError {
     /// A table a change feed follows was dropped or replaced (ADR-0040).
     #[error("table {0} was dropped while a change feed followed it")]
     TableDropped(String),
+    /// The statement is valid but can't be used here, such as DDL given
+    /// to `prepare` (ADR-0043).
+    #[error("not supported: {0}")]
+    NotSupported(String),
+    /// A statement of a script failed (ADR-0043); its SQLSTATE is the
+    /// failure's.
+    #[error("statement {index} ({form}) at {line}:{column}: {source}")]
+    Script {
+        /// The statement's 1-based position in the script.
+        index: usize,
+        /// Its head word, such as `create-index`.
+        form: String,
+        /// The line it starts on.
+        line: u32,
+        /// The column it starts at.
+        column: u32,
+        /// Why it failed.
+        source: Box<EngineError>,
+    },
     /// A wait for a commit to become visible on this node timed out (ADR-0040).
     #[error("commit {0} is not visible on this node yet")]
     NotVisible(interlaken_storage::Timestamp),
@@ -158,6 +177,8 @@ impl EngineError {
             Self::TransactionInProgress => "25001",
             Self::NoTransaction => "25P01",
             Self::NotVisible(_) => "57014",
+            Self::NotSupported(_) => "0A000",
+            Self::Script { source, .. } => source.sqlstate(),
             Self::TableDropped(_) => "42P01",
             Self::ProposalNotFound(_)
             | Self::NotPending(_)

@@ -31,6 +31,7 @@
 - [Entities and memberships](ddl/entities.md)
 - [Foreign keys](ddl/foreign-keys.md)
 - [Namespaces](ddl/namespaces.md)
+- [Schema scripts](ddl/scripts.md)
 
 # Security
 

@@ -111,8 +111,9 @@ permit (principal is Service, action == Action::"read", resource);"#,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Assert a principal type can't take an entity type's name, and an entity
-/// type replaces a principal type of the same name.
+/// Assert a principal type can't take an entity type's name, redeclaring
+/// one changes nothing, and an entity type replaces a principal type of the
+/// same name.
 async fn names_are_exclusive() {
     let dir = tempfile::tempdir().unwrap();
     let engine = database(dir.path()).await;
@@ -124,14 +125,8 @@ async fn names_are_exclusive() {
             .sqlstate(),
         "42P16"
     );
-    assert_eq!(
-        root.declare_principal_type("Admin")
-            .await
-            .unwrap_err()
-            .sqlstate(),
-        "42P16",
-        "declared at creation"
-    );
+    // Declared at creation; declaring it again changes nothing.
+    root.declare_principal_type("Admin").await.unwrap();
     root.create_table(&table("admins", &[("id", "text")], &["id"]))
         .await
         .unwrap();

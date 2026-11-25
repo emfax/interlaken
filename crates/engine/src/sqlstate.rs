@@ -41,7 +41,7 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "0A000",
         "feature_not_supported",
-        "The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it.",
+        "The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it, or DDL was given to `prepare`, `explain` or `query_stream`.",
     ),
     state(
         "21000",

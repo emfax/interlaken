@@ -22,11 +22,12 @@ use std::time::Instant;
 use interlaken_exec::{CascadePlans, ExecContext, Physical, PlanOptions, QueryMemory, plan_with};
 use interlaken_ir::Plan;
 use interlaken_ir::catalog::{Catalog, InMemoryCatalog, cascade_plan, reachable_cascades};
+use interlaken_ir::ddl::{DdlStatement, Statement};
 use interlaken_ir::interp::{Datum, ExecOptions, declared_params};
 use interlaken_ir::optimize::optimize;
 use interlaken_ir::resolve::resolve;
 use interlaken_ir::security::{SecurityContext, secure};
-use interlaken_ir::text::parse_plan;
+use interlaken_ir::text::parse_statement;
 use interlaken_ir::verify::{VerifyOptions, verify};
 use interlaken_ir::{RelSchema, Type};
 use interlaken_storage::Txn;
@@ -75,9 +76,20 @@ pub(crate) struct Prepared {
     pub(crate) cascades: Arc<CascadePlans>,
 }
 
-/// Parse a plan's text.
+/// Parse a plan's text, refusing DDL, which has no plan (ADR-0043).
 pub(crate) fn parse(text: &str) -> Result<Plan, EngineError> {
-    parse_plan(text).map_err(EngineError::Syntax)
+    match parse_statement(text).map_err(EngineError::Syntax)? {
+        Statement::Plan(plan) => Ok(plan),
+        Statement::Ddl(ddl) => Err(not_a_plan(&ddl)),
+    }
+}
+
+/// Return the error for DDL where only a plan can go.
+pub(crate) fn not_a_plan(ddl: &DdlStatement) -> EngineError {
+    EngineError::NotSupported(format!(
+        "({} ...) is DDL, which has no plan; run it with Session::query or Session::execute_script",
+        ddl.form()
+    ))
 }
 
 /// Resolve `plan` (unless already resolved), looking unqualified names up

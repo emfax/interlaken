@@ -88,6 +88,36 @@ pub async fn namespace_exists(txn: &Txn, name: &str) -> Result<bool, EngineError
         .is_some())
 }
 
+/// Return every namespace but `public`, by name, with its owner; `None`
+/// for an owner that doesn't parse.
+///
+/// # Errors
+///
+/// Returns a storage error.
+pub(crate) async fn namespace_owners(
+    txn: &Txn,
+) -> Result<Vec<(String, Option<EntityUid>)>, EngineError> {
+    if catalog::table(txn, NAMESPACES).await?.is_none() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for row in read_all(txn, NAMESPACES, Vec::new()).await? {
+        let name = text_at(&row, 0)?.to_owned();
+        if name == PUBLIC {
+            continue;
+        }
+        let ty = text_at(&row, 1)?;
+        let key = match text_at(&row, 2)?.split_once(':') {
+            Some(("long", v)) => v.parse().ok().map(EntityKey::Long),
+            Some(("str", v)) => Some(EntityKey::Str(v.to_owned())),
+            _ => None,
+        };
+        out.push((name, key.map(|key| EntityUid { ty: ty.into(), key })));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 /// Return `true` if `principal` owns namespace `name`.
 ///
 /// # Errors

@@ -2,7 +2,7 @@
 
 Interlaken has no SQL front end yet. Clients write statements in the *IR text format*: the S-expression form of the engine's typed relational IR. Every query language Interlaken will support lowers to this IR, so it is the most precise way to say what a statement does. It also round-trips: `Session::prepare` and `EXPLAIN` print plans in the same format, and that text can be run again.
 
-A statement is a *plan*: one relational operator tree wrapped in `(plan ...)`.
+A query or DML statement is a *plan*: one relational operator tree wrapped in `(plan ...)`. Schema changes are DDL statements such as `(create-table ...)`, described in [Schema scripts](../ddl/scripts.md).
 
 ```ir
 (plan (project (filter (get docs :as d) (= d.owner 2)) d.id d.title))

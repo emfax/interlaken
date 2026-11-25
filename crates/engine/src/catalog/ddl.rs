@@ -19,13 +19,15 @@ use interlaken_storage::encoding::{Datum, Direction, NullOrder, SortOrder};
 use interlaken_storage::rows::RowScan;
 use interlaken_storage::{ConstraintViolation, Error, Txn, rows};
 
-use super::specs::{ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec};
 use super::tables::{
     ATTRIBUTES, COLUMNS, ENTITIES, FOREIGN_KEY_COLUMNS, FOREIGN_KEYS, FUNCTIONS, MEMBERSHIPS,
     PRINCIPAL_TYPES, bump_schema_version, id_datum, is_engine_table, read_all, stored, text_at,
 };
 use super::types::stored_type;
 use crate::error::EngineError;
+use interlaken_ir::ddl::{
+    ColumnSpec, EntitySpec, ForeignKeySpec, IndexSpec, MembershipSpec, TableSpec,
+};
 
 /// Construct an invalid-definition error.
 fn invalid(message: String) -> EngineError {
@@ -338,14 +340,16 @@ pub async fn declare_entity(txn: &Txn, spec: &EntitySpec) -> Result<(), EngineEr
 
 /// Declare `name` as a principal type with no table (ADR-0042): policies
 /// can name it, as in Cedar's `principal is Admin`, and its principals have
-/// no attributes or ancestors.
+/// no attributes or ancestors. A principal type is only a name, so
+/// declaring one that is already declared changes nothing.
 ///
 /// # Errors
 ///
-/// Returns [`EngineError::InvalidDefinition`] if the name is already a
-/// principal type or an entity type, or isn't an identifier.
+/// Returns [`EngineError::InvalidDefinition`] if the name is an entity
+/// type, or isn't an identifier (in a namespace, `ns.Name`).
 pub async fn declare_principal_type(txn: &Txn, name: &str) -> Result<(), EngineError> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    let bare = super::split_name(name).1;
+    if bare.is_empty() || !bare.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(invalid(format!("{name:?} isn't a principal type name")));
     }
     let entities = stored(txn, ENTITIES).await?;
@@ -373,9 +377,13 @@ pub async fn declare_principal_type(txn: &Txn, name: &str) -> Result<(), EngineE
             .await?
         }
     };
-    rows::insert(txn, &table, vec![Datum::Text(name.to_owned())])
-        .await
-        .map_err(|e| exists_as(e, format!("principal type {name} already exists")))?;
+    if rows::get(txn, &table, &[Datum::Text(name.to_owned())])
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    rows::insert(txn, &table, vec![Datum::Text(name.to_owned())]).await?;
     bump_schema_version(txn).await?;
     Ok(())
 }

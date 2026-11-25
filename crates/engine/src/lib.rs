@@ -38,7 +38,9 @@ pub use feed::{Change, ChangeBatch, ChangeFeed, ChangeFilter, ChangeKind};
 /// cluster, and written as text with `to_string` and read back with `parse`.
 pub use interlaken_storage::Timestamp as CommitTs;
 pub use privileges::{Privilege, Privileges};
-pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session, Usage};
+pub use session::{
+    Engine, EngineOptions, QueryResult, QueryStream, ScriptEntry, ScriptReport, Session, Usage,
+};
 pub use sqlstate::{SQLSTATES, SqlState};
 pub use subscription::Subscription;
 pub use telemetry::{METRICS, describe_metrics};
@@ -84,6 +86,10 @@ mod book {
     /// Data definition: foreign keys.
     #[doc = include_str!("../../../docs/book/src/ddl/foreign-keys.md")]
     struct ForeignKeys;
+
+    /// Data definition: schema scripts.
+    #[doc = include_str!("../../../docs/book/src/ddl/scripts.md")]
+    struct Scripts;
 
     /// Security: privileges.
     #[doc = include_str!("../../../docs/book/src/security/privileges.md")]

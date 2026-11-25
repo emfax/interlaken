@@ -68,6 +68,18 @@ session
 # }
 ```
 
+In IR text, the same declarations are:
+
+```ir,parse
+(declare-entity User :table users :key id (attr name) (attr dept))
+(declare-entity Group :table groups :key id (attr name))
+(declare-entity Doc :table docs :key id (attr title) (attr owner :references User))
+(declare-membership User Group :edges user_groups (member grp)
+                               :closure user_group_closure (descendant ancestor paths))
+```
+
+An attribute held in a column of another name is `(attr NAME COLUMN)`.
+
 An `EntitySpec` names:
 
 - **`name`:** the entity type, as policies write it (`User`, `Doc`). It is unique, and each table backs at most one entity type.
@@ -80,7 +92,7 @@ An `EntitySpec` names:
     A reference isn't checked: a key with no `User` row makes that entity missing, and policies that read its attributes fail. A [foreign key](foreign-keys.md) on the same column makes the key exist, and must refer to the same entity type's key.
   - A NULL column means the attribute is absent, which policies must allow for (see [Writing policies in Cedar](../security/cedar.md)).
 
-Attributes that policies don't need can be left out; policies can't read undeclared columns. Entity declarations change only the catalog: the table and its rows stay as they are. `drop_entity(name)` removes a declaration, unless a membership uses it.
+Attributes that policies don't need can be left out; policies can't read undeclared columns. Entity declarations change only the catalog: the table and its rows stay as they are. `drop_entity(name)`, or `(drop-entity NAME)`, removes a declaration, unless a membership uses it.
 
 ## Memberships
 
@@ -115,7 +127,7 @@ After this, `user_group_closure` holds `(2, 7, 1)`, and a policy granting group 
 
 A membership can relate a type to itself, such as folders in folders. Hierarchies can also span types, such as documents in folders in folders. Each pair is written to the closure table of its two types, so every composition of declared memberships must itself be declared. With `Doc in Folder` and `Folder in Folder`, the transitive `Doc in Folder` pairs go in the `Doc in Folder` closure, which therefore holds a document's every enclosing folder, not just its direct one.
 
-`drop_membership(member, group)` removes a membership's declaration. Its tables and rows stay.
+`drop_membership(member, group)`, or `(drop-membership MEMBER GROUP)`, removes a membership's declaration. Its tables and rows stay.
 
 ## The example database
 

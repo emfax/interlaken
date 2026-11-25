@@ -14,6 +14,15 @@ root.drop_namespace("app", false).await?; // only if it's empty
 root.drop_namespace("app", true).await?;  // drops everything in it
 ```
 
+In IR text:
+
+```ir
+(create-namespace app :owner (entity User 1))
+(set-namespace-owner app (entity User 2))
+(create-table app.todos (column id int8) (column owner int8) (primary-key id))
+(drop-namespace app :cascade true)
+```
+
 - **Names** are identifiers: letters, digits and `_`, not starting with a digit, `engine_` or `sys_`.
 - **`create_namespace` and `drop_namespace`** need `admin`.
 - **`set_namespace_owner`** needs `admin` or the current owner.

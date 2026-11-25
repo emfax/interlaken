@@ -1,7 +1,7 @@
-//! What engine DDL creates, by name.
+//! What DDL creates, by name: the specs both the Rust API and DDL text produce.
 
-use interlaken_ir::Type;
-pub use interlaken_ir::catalog::ReferentialAction;
+use crate::Type;
+pub use crate::catalog::ReferentialAction;
 
 /// A column of a new table.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,7 +157,7 @@ pub struct MembershipSpec {
 /// # Examples
 ///
 /// ```
-/// use interlaken_engine::catalog::{ForeignKeySpec, ReferentialAction};
+/// use interlaken_ir::ddl::{ForeignKeySpec, ReferentialAction};
 ///
 /// let fk = ForeignKeySpec::new("docs_owner", "docs", ["owner"], "users", ["id"])
 ///     .on_delete(ReferentialAction::Cascade);

@@ -25,8 +25,9 @@ use interlaken_ir::catalog::{
     FunctionDef, FunctionKind, FunctionProperties, Volatility, builtin_description,
     builtin_functions,
 };
+use interlaken_ir::ddl::Statement;
 use interlaken_ir::security::{EntityUid, SecurityContext};
-use interlaken_ir::text::{parse_expr, parse_plan, parse_rel, parse_type, print_type};
+use interlaken_ir::text::{parse_expr, parse_rel, parse_statement, parse_type, print_type};
 use interlaken_ir::{DataType, ScalarType};
 use interlaken_storage::catalog::{self, TableDef};
 use interlaken_storage::encoding::{Direction, NullOrder};
@@ -958,7 +959,9 @@ async fn activate_policies(
 ///
 /// - `ir`: each form is a plan that parses, resolves and verifies;
 /// - `ir,parse`: each form parses as a plan, an operator or an expression;
-/// - `ir,error=CODE`: the block is one plan that fails with SQLSTATE `CODE`
+/// - `ir` holding DDL: the block runs as a script in a transaction that is
+///   rolled back (ADR-0043);
+/// - `ir,error=CODE`: the block is one statement that fails with SQLSTATE `CODE`
 ///   (run in a transaction that is rolled back).
 ///
 /// Other fences (`text`, `rust`, `sh`, ...) are not checked here.
@@ -993,13 +996,26 @@ async fn ir_examples_are_valid() {
         let forms = forms(&block.text).unwrap_or_else(|e| panic!("{at}: {e}"));
         assert!(!forms.is_empty(), "{at}: an ir block with no forms");
         if let Some(code) = mode.strip_prefix("error=") {
-            assert_eq!(forms.len(), 1, "{at}: an error example holds one plan");
+            assert_eq!(forms.len(), 1, "{at}: an error example holds one statement");
             session.begin(TxnOptions::default()).await.unwrap();
             let result = session.query(&forms[0], Vec::new()).await;
             session.rollback().unwrap();
             match result {
                 Ok(_) => panic!("{at}: expected SQLSTATE {code}, but the plan ran"),
                 Err(e) => assert_eq!(e.sqlstate(), code, "{at}: {e}"),
+            }
+        } else if mode.is_empty()
+            && forms
+                .iter()
+                .any(|f| matches!(parse_statement(f), Ok(Statement::Ddl(_))))
+        {
+            // DDL runs, as a script in a transaction that is rolled back,
+            // so it can't change the example database.
+            session.begin(TxnOptions::default()).await.unwrap();
+            let result = session.execute_script(&block.text).await;
+            session.rollback().unwrap();
+            if let Err(e) = result {
+                panic!("{at}: {e}");
             }
         } else {
             for form in &forms {
@@ -1010,7 +1026,7 @@ async fn ir_examples_are_valid() {
                         }
                     }
                     "parse" => assert!(
-                        parse_plan(form).is_ok()
+                        parse_statement(form).is_ok()
                             || parse_rel(form).is_ok()
                             || parse_expr(form).is_ok(),
                         "{at}: does not parse: {form}"

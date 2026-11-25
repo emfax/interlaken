@@ -120,7 +120,6 @@ impl Sexp {
 }
 
 /// Read every top-level S-expression in `text`.
-#[cfg(test)]
 pub(crate) fn read_all(text: &str) -> Result<Vec<Sexp>, ParseError> {
     let mut reader = Reader::new(text);
     let mut out = Vec::new();

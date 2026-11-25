@@ -59,6 +59,15 @@ session
 # }
 ```
 
+In IR text, against the example database's `docs` table:
+
+```ir
+(create-index docs_owner :table docs owner)
+(create-foreign-key docs_owner_fk :table docs (columns owner) (references users id) :on-delete set-null)
+```
+
+`:on-delete` is `no-action` (the default), `cascade` or `set-null`, and `:match` is `simple` (the default) or `full`.
+
 A `ForeignKeySpec` has:
 
 - **`name`:** unique among foreign keys. A duplicate fails with `42P16`.

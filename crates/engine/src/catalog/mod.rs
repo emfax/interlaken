@@ -2,10 +2,10 @@
 
 mod cache;
 mod ddl;
+mod dump;
 mod load;
 mod namespaces;
 mod scoped;
-mod specs;
 mod tables;
 mod types;
 
@@ -16,6 +16,11 @@ pub use ddl::{
     declare_principal_type, drop_entity, drop_foreign_key, drop_index, drop_membership,
     drop_principal_type, drop_table, set_function_leakproof,
 };
+pub use dump::schema_statements;
+pub use interlaken_ir::ddl::{
+    AttributeSpec, ColumnSpec, EntitySpec, ForeignKeySpec, IndexKey, IndexSpec, MembershipSpec,
+    ReferentialAction, TableSpec,
+};
 pub use load::load_catalog;
 pub(crate) use namespaces::create_namespaces_table;
 pub use namespaces::{
@@ -24,10 +29,6 @@ pub use namespaces::{
 };
 pub(crate) use scoped::Scoped;
 pub use scoped::{PUBLIC, split_name, stored_name};
-pub use specs::{
-    AttributeSpec, ColumnSpec, EntitySpec, ForeignKeySpec, IndexKey, IndexSpec, MembershipSpec,
-    ReferentialAction, TableSpec,
-};
 pub use tables::{ENGINE_PREFIX, catalog_table_description, is_engine_table};
 pub(crate) use tables::{
     PRIVILEGES, create_catalog_tables, read_all, schema_version, stored, text_at,

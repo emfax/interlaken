@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c9db0ad3de3164a8dbc0a24c739ae9089c0f26433b22a6a84e0c3b1fe2281227 # shrinks to ddl = [CreateIndex(IndexSpec { name: "a", table: "a", columns: [IndexKey { column: "true", descending: false, nulls_first: false }], unique: false, nones_distinct: false })]
+cc 4ee4111bde4e2f02e5fac8761a54553bfc69341767cea210a12bebe8544366ad # shrinks to ddl = CreateIndex(IndexSpec { name: "a", table: "a", columns: [IndexKey { column: "true", descending: false, nulls_first: false }], unique: false, nones_distinct: false })

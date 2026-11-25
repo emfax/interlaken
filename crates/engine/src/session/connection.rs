@@ -9,8 +9,10 @@ use interlaken_exec::{
     execute, explain, explain_analyze,
 };
 use interlaken_ir::catalog::InMemoryCatalog;
+use interlaken_ir::ddl::Statement as IrStatement;
 use interlaken_ir::interp::{Datum, ExecOptions, check_params};
 use interlaken_ir::security::{EntityUid, SecurityContext};
+use interlaken_ir::text::parse_statement;
 use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
 use interlaken_storage::{Freshness, SavepointId, Storage, Txn, TxnOptions};
 use tokio::task::JoinHandle;
@@ -111,6 +113,21 @@ async fn may_change_policies(step: &Step<'_>, proposal: i64) -> Result<(), Engin
     match crate::policy::proposal_scope(step.txn, proposal).await? {
         Some(scope) => may_change(step, &[scope.as_str()]).await,
         None => may_change(step, &[]).await,
+    }
+}
+
+/// Return the stored name of `name`, an index, entity type or foreign key
+/// of a table in `namespace`: such objects are in their table's namespace,
+/// so `name` is unqualified or qualified with that namespace.
+fn child_name(namespace: &str, name: &str) -> Result<String, EngineError> {
+    match name.split_once('.') {
+        None => Ok(catalog::stored_name(namespace, name)),
+        Some((within, rest)) if within == namespace && !rest.contains('.') => {
+            Ok(catalog::stored_name(namespace, rest))
+        }
+        Some(_) => Err(EngineError::InvalidDefinition(format!(
+            "{name} must be in its table's namespace, {namespace}"
+        ))),
     }
 }
 
@@ -674,8 +691,9 @@ impl Session {
         result
     }
 
-    /// Run a query or DML statement given as IR text, with parameters
-    /// `$1`, `$2`, ..., and collect its rows.
+    /// Run a statement given as IR text, with parameters `$1`, `$2`, ...,
+    /// and collect its rows. A DDL statement such as `(create-table ...)`
+    /// (ADR-0043) takes no parameters and returns no columns.
     ///
     /// This collects [`Session::query_stream`]'s batches, so every row is
     /// held at once; stream large results instead.
@@ -691,7 +709,25 @@ impl Session {
         text: &str,
         params: Vec<Datum>,
     ) -> Result<QueryResult, EngineError> {
-        self.query_stream(text, params).await?.collect().await
+        let (started, span) = (Instant::now(), statement_span());
+        let parsed = tracing::info_span!(parent: &span, "interlaken.parse")
+            .in_scope(|| parse_statement(text).map_err(EngineError::Syntax));
+        let timing = (started, started.elapsed(), span);
+        match parsed {
+            Ok(IrStatement::Ddl(ddl)) => self.query_ddl(&ddl, &params).await,
+            Ok(IrStatement::Plan(plan)) => {
+                self.start_stream(Ok(&plan), params, timing)
+                    .await?
+                    .collect()
+                    .await
+            }
+            Err(e) => {
+                self.start_stream(Err(e), params, timing)
+                    .await?
+                    .collect()
+                    .await
+            }
+        }
     }
 
     /// Run a built query or DML plan, resolved or not, with parameters,
@@ -996,6 +1032,36 @@ impl Session {
             .await
     }
 
+    /// Return the user schema as a script of DDL statements that recreates
+    /// it on a new database (ADR-0043): namespaces, principal types, tables
+    /// and indexes, entity types, memberships, foreign keys, then function
+    /// properties. Objects in `public` are named unqualified, so run it with
+    /// the default search path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(session: &mut interlaken_engine::Session) -> Result<(), interlaken_engine::EngineError> {
+    /// let schema = session.schema_text().await?;
+    /// // On another database:
+    /// session.execute_script(&schema).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn schema_text(&mut self) -> Result<String, EngineError> {
+        let statements = self
+            .run(Kind::Query, async |step: &Step<'_>| {
+                catalog::schema_statements(step.txn).await
+            })
+            .await?;
+        let statements: Vec<IrStatement> = statements.into_iter().map(IrStatement::Ddl).collect();
+        Ok(interlaken_ir::text::print_script(&statements))
+    }
+
     /// Create a table.
     ///
     /// # Errors
@@ -1055,7 +1121,7 @@ impl Session {
     pub async fn create_index(&mut self, spec: &IndexSpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
             let table = existing(step, ObjectKind::Table, &spec.table).await?;
-            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            let name = child_name(catalog::namespace_of(&table), &spec.name)?;
             may_change(step, &[catalog::namespace_of(&table)]).await?;
             let spec = IndexSpec {
                 name,
@@ -1089,7 +1155,7 @@ impl Session {
     pub async fn declare_entity(&mut self, spec: &EntitySpec) -> Result<(), EngineError> {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
             let table = existing(step, ObjectKind::Table, &spec.table).await?;
-            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            let name = child_name(catalog::namespace_of(&table), &spec.name)?;
             may_change(step, &[catalog::namespace_of(&table)]).await?;
             let mut spec = spec.clone();
             for attribute in &mut spec.attributes {
@@ -1214,7 +1280,7 @@ impl Session {
         self.run(Kind::Catalog, async |step: &Step<'_>| {
             let table = existing(step, ObjectKind::Table, &spec.table).await?;
             let references = existing(step, ObjectKind::Table, &spec.references).await?;
-            let name = catalog::stored_name(catalog::namespace_of(&table), &spec.name);
+            let name = child_name(catalog::namespace_of(&table), &spec.name)?;
             may_change(
                 step,
                 &[
@@ -1267,8 +1333,6 @@ impl Session {
         .await
     }
 
-    /// Check this session's principal holds `admin`, in an empty
-    /// administrative step.
     /// Create namespace `name`, owned by `owner` (ADR-0042). Its owner can
     /// change its schema and policies without `admin`.
     ///
@@ -1321,6 +1385,8 @@ impl Session {
         .await
     }
 
+    /// Check this session's principal holds `admin`, in an empty
+    /// administrative step.
     #[cfg(feature = "cluster")]
     async fn require_admin(&mut self) -> Result<(), EngineError> {
         self.run(Kind::Admin, async |_step: &Step<'_>| Ok(())).await

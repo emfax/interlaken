@@ -9,7 +9,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | --- | --- | --- |
 | `08007` | `transaction_resolution_unknown` | A commit may or may not have happened: writing it failed, or a replicated database's leader changed while it was in flight. |
 | `08P01` | `protocol_violation` | A statement was run with a different number of parameter values than the parameters it declares. |
-| `0A000` | `feature_not_supported` | The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it. |
+| `0A000` | `feature_not_supported` | The statement uses something not supported yet, or a prepared plan pinned to an older schema version ran after DDL changed it, or DDL was given to `prepare`, `explain` or `query_stream`. |
 | `21000` | `cardinality_violation` | A scalar subquery returned more than one row. |
 | `22003` | `numeric_value_out_of_range` | Arithmetic overflowed, or a value does not fit its target type. |
 | `22004` | `null_value_not_allowed` | An entity attribute a policy needs is absent (`assert_present`), or NULL was passed for a parameter whose type isn't optional. |

@@ -1,12 +1,12 @@
 ---
 id: 0043
 title: DDL as Text
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [ir, engine, catalog]
 feature-flag:
 created: 2026-11-25
-accepted:
-implemented:
+accepted: 2026-11-25
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Implemented, in both phases. The *As implemented* notes after the phases record where the result differs from this design, chiefly: the DDL statement types and specs live in the IR crate; namespace and principal-type operations have forms too; `query_stream` refuses DDL; and redeclaring a principal type changes nothing.
 
 ## Summary
 
@@ -145,6 +145,20 @@ The DDL chapters gain `ir` examples next to the Rust ones. The book test runs DD
 
 - `execute_script` and its report; `schema_text`.
 - The book: DDL examples in IR text, and a section on migration scripts.
+
+### As implemented
+
+- **Where the types live.** The spec structs (`TableSpec`, `IndexSpec`, ...) moved from the engine to `interlaken_ir::ddl`, beside `DdlStatement` and `Statement`, so the IR text reader can produce them. `interlaken_engine::catalog` re-exports them under their old paths.
+- **`parse_plan` stays.** It still accepts only plans. `parse_statement` is added beside it, with `parse_script`, `print_statement` and `print_script`. The engine's own parsing goes through `parse_statement`.
+- **More forms.** ADR-0042's operations got forms too: `create-namespace`, `set-namespace-owner`, `drop-namespace`, `declare-principal-type` and `drop-principal-type`. An owner is written `(entity TYPE KEY)`.
+- **`set-leakproof`** takes its argument types as a plain list, `(set-leakproof lower (text) true)`.
+- **Canonical layout.** The printer puts positional parts before keyword arguments when a statement fits on one line, so `(create-index i :table t a)` prints as `(create-index i a :table t)`. Both forms parse.
+- **Streaming.** `query` runs DDL. `query_stream` refuses it with `0A000`, as `prepare` and `explain` do, since there are no rows to stream. A DDL statement given parameters fails with `08P01`.
+- **Script errors** are `EngineError::Script { index, form, line, column, source }`, with the SQLSTATE of `source`. In an open transaction, a failing statement aborts the transaction as any statement does (ADR-0026); the caller rolls back, or rolls back to a savepoint taken before the script.
+- **Principal types are idempotent.** `schema_text` prints every principal type, including the first administrator's, which every new database already has. So that its output replays, declaring a principal type that is already declared now succeeds and changes nothing, from the Rust API too. Declaring one with an entity type's name still fails with `42P16`.
+- **Child names.** An index, entity type or foreign key named with a namespace (`app.by_owner`) must be in its table's namespace, which `schema_text` relies on; before this, the namespace was added a second time.
+- **What `schema_text` leaves out:** rows, policies, privileges and the owner of `public`. Names in `public` are unqualified, so the script is meant for the default search path.
+- **Testing.** Property tests round-trip every form and scripts of them through print and parse. The engine tests check that text and Rust give the same catalog, that the schema round-trips through a new database, scripts' atomicity and reports, and the errors. The book's `ir` blocks holding DDL run as scripts in a rolled-back transaction.
 
 ## Consequences
 
