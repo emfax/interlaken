@@ -171,6 +171,7 @@ let options = EngineOptions {
 - **TLS.** Endpoints must use TLS. `allow_http()` permits plain `http://` for local testing only.
 - **Endpoints.** `endpoint(...)` points at a service other than AWS, and addresses buckets by path, as MinIO and most self-hosted services need.
 - **Directory stores.** `ObjectStoreConfig::directory(name, path)` keeps objects in a directory, such as a network file system mounted on every node, and serves for testing.
+- **Testing against S3.** `scripts/s3-test.sh` runs the object store tests against moto, an S3 emulator, in Docker, or against a running service named by `INTERLAKEN_TEST_S3_ENDPOINT` and `INTERLAKEN_TEST_S3_BUCKET`. CI runs it on every pull request.
 
 ### Choosing a namespace's store
 

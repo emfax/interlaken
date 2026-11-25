@@ -1,6 +1,7 @@
 # Checks every pull request to main: formatting, clippy, the API docs,
 # dependency licences (deny.toml), the test suite (which also checks the
-# book's examples and generated reference sections) and the book build.
+# book's examples and generated reference sections), the object store tests
+# against an S3 emulator, and the book build.
 #
 # The slow tests and durability checks run nightly instead (nightly.yml).
 name: CI
@@ -35,11 +36,11 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --features interlaken-engine/cluster,interlaken-telemetry/otlp -- -D warnings
+        run: cargo clippy --workspace --all-targets --features interlaken-engine/cluster,interlaken-engine/object-store,interlaken-telemetry/otlp -- -D warnings
       - name: API docs
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --features interlaken-engine/cluster,interlaken-telemetry/otlp
+        run: cargo doc --workspace --no-deps --features interlaken-engine/cluster,interlaken-engine/object-store,interlaken-telemetry/otlp
 
   test:
     name: Test suite
@@ -63,6 +64,32 @@ jobs:
           INTERLAKEN_COMMIT_LOG: "1"
         run: cargo test --release -p interlaken-storage
 
+  object-stores:
+    name: Object stores (S3 emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # moto, an S3 emulator, so the S3 client path is tested on every pull
+    # request (ADR-0044 phase 3); it accepts any credentials.
+    services:
+      s3:
+        image: motoserver/moto:latest
+        ports:
+          - 9000:5000
+    env:
+      INTERLAKEN_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      INTERLAKEN_TEST_S3_BUCKET: interlaken-test
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Create the bucket
+        run: curl -fsS --retry 10 --retry-connrefused --retry-delay 1 -X PUT "$INTERLAKEN_TEST_S3_ENDPOINT/$INTERLAKEN_TEST_S3_BUCKET"
+      - name: Object store tests
+        run: scripts/s3-test.sh
+
   licenses:
     name: Dependency licences
     runs-on: ubuntu-latest
@@ -81,7 +108,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        run: cargo check --workspace --all-targets --features interlaken-engine/cluster,interlaken-telemetry/otlp
+        run: cargo check --workspace --all-targets --features interlaken-engine/cluster,interlaken-engine/object-store,interlaken-telemetry/otlp
 
   book:
     name: Book

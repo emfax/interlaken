@@ -3,7 +3,9 @@
 //! A directory store stands in for S3 everywhere; `s3_compatible_store`
 //! runs against a real S3-compatible service when
 //! `INTERLAKEN_TEST_S3_ENDPOINT` and `INTERLAKEN_TEST_S3_BUCKET` name one,
-//! with credentials from the usual `AWS_*` environment.
+//! with credentials from the usual `AWS_*` environment, and fails rather
+//! than skipping if `INTERLAKEN_TEST_S3_REQUIRED` is set.
+//! `scripts/s3-test.sh` runs it against a local S3 emulator.
 
 #![cfg(feature = "object-store")]
 
@@ -259,6 +261,10 @@ async fn s3_compatible_store() {
         std::env::var("INTERLAKEN_TEST_S3_ENDPOINT"),
         std::env::var("INTERLAKEN_TEST_S3_BUCKET"),
     ) else {
+        assert!(
+            std::env::var_os("INTERLAKEN_TEST_S3_REQUIRED").is_none(),
+            "INTERLAKEN_TEST_S3_REQUIRED is set, but INTERLAKEN_TEST_S3_ENDPOINT or INTERLAKEN_TEST_S3_BUCKET isn't"
+        );
         eprintln!("skipped: INTERLAKEN_TEST_S3_ENDPOINT and INTERLAKEN_TEST_S3_BUCKET are unset");
         return;
     };
