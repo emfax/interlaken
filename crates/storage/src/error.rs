@@ -109,6 +109,21 @@ pub enum Error {
     /// A row violates a table constraint.
     #[error(transparent)]
     Constraint(#[from] ConstraintViolation),
+
+    /// The change log no longer holds the changes after this point, or a
+    /// snapshot install skipped them (ADR-0040): resync from a fresh read,
+    /// then follow from its snapshot.
+    #[error("the change log starts after {floor}; changes after {after} are gone")]
+    ChangeGap {
+        /// Where the reader asked to continue from.
+        after: crate::Timestamp,
+        /// The oldest point the log can continue from.
+        floor: crate::Timestamp,
+    },
+
+    /// The database keeps no change log (`ChangeRetention::Off`).
+    #[error("the change log is off")]
+    ChangesUnavailable,
 }
 
 /// A DDL or catalog error (ADR-0007).
@@ -221,6 +236,7 @@ impl Error {
             Self::WriteSetTooLarge { .. } => "54000",
             Self::CommitOutcomeUnknown(_) => "08007",
             Self::ReplicationUnavailable(_) => "57P03",
+            Self::ChangeGap { .. } | Self::ChangesUnavailable => "55000",
             _ => "XX000",
         }
     }

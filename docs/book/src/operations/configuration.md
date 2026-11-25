@@ -172,4 +172,11 @@ transaction counts as gauges, or `None` for no sampler (ADR-0039).
 Defaults to 10 seconds. With no metrics recorder installed, each
 sample reads a few of fjall's counters and is discarded.
 
+### `change_retention`
+
+Type `ChangeRetention`.
+
+How much of the change log to keep, for change feeds (ADR-0040).
+Defaults to 64 MiB in memory.
+
 <!-- end generated: options -->

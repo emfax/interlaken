@@ -44,8 +44,8 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `42P16` | `invalid_table_definition` | A DDL definition is invalid: an empty or reserved name, a type tables can't hold, a table that backs an entity type, a declaration that is missing, duplicated or doesn't fit the others, or a function overload that doesn't match exactly. |
 | `53200` | `out_of_memory` | An operator needed more memory than the query's budget or the node's pool allows. |
 | `54000` | `program_limit_exceeded` | The transaction's buffered writes exceed `StorageOptions::max_write_set_bytes`. |
-| `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; or a revocation would remove the last administrator. |
-| `57014` | `query_canceled` | The statement ran past its `statement_timeout`. |
+| `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; a revocation would remove the last administrator; or a change feed's position is older than the change log keeps, or the database keeps none. |
+| `57014` | `query_canceled` | The statement ran past its `statement_timeout`, or a wait for a commit to become visible on this node timed out. |
 | `57P03` | `cannot_connect_now` | A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit. |
 | `XX000` | `internal_error` | An internal error: a storage failure, or the stored catalog disagrees with itself. |
 <!-- end generated: sqlstates -->

@@ -92,6 +92,12 @@ pub enum EngineError {
     /// A transaction operation was called with no transaction open.
     #[error("there is no transaction in progress")]
     NoTransaction,
+    /// A table a change feed follows was dropped or replaced (ADR-0040).
+    #[error("table {0} was dropped while a change feed followed it")]
+    TableDropped(String),
+    /// A wait for a commit to become visible on this node timed out (ADR-0040).
+    #[error("commit {0} is not visible on this node yet")]
+    NotVisible(interlaken_storage::Timestamp),
 }
 
 impl EngineError {
@@ -151,6 +157,8 @@ impl EngineError {
             },
             Self::TransactionInProgress => "25001",
             Self::NoTransaction => "25P01",
+            Self::NotVisible(_) => "57014",
+            Self::TableDropped(_) => "42P01",
             Self::ProposalNotFound(_)
             | Self::NotPending(_)
             | Self::Stale { .. }

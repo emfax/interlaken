@@ -52,8 +52,28 @@ impl Timestamp {
     }
 }
 
+/// A timestamp's text form didn't parse.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not a commit timestamp: {0:?}")]
+pub struct ParseTimestampError(pub String);
+
+impl std::str::FromStr for Timestamp {
+    type Err = ParseTimestampError;
+
+    /// Parse a timestamp from the text form [`Display`](fmt::Display) writes.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(ParseTimestampError(text.to_owned()));
+        }
+        text.parse()
+            .map(Self)
+            .map_err(|_| ParseTimestampError(text.to_owned()))
+    }
+}
+
 impl fmt::Display for Timestamp {
-    /// Render the timestamp as its raw decimal value.
+    /// Render the timestamp as its raw decimal value, the stable text form
+    /// clients carry between members (ADR-0040).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }

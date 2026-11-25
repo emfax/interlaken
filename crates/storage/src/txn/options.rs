@@ -35,6 +35,11 @@ pub enum Freshness {
     /// Read this replica's applied state, which may lag the leader. Applies
     /// to read-only transactions; read-write ones are always fresh.
     Local,
+    /// Read this replica's applied state once it includes the commit at
+    /// this timestamp, waiting until it does (ADR-0040): read-your-writes
+    /// across members without a round trip to the leader. Applies to
+    /// read-only transactions; read-write ones are always fresh.
+    AtLeast(crate::Timestamp),
 }
 
 /// Options for [`Storage::begin`](crate::Storage::begin).

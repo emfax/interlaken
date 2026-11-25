@@ -11,7 +11,7 @@ use crate::gc::{GcContext, GcCounters, GcReport, GcStats, GcTask};
 use crate::pool::StoragePool;
 use crate::replica::{CommitPath, Replica, ReplicaState, Validation};
 use crate::sampler::Sampler;
-use crate::{Engine, Freshness, Result, Timestamp, Txn, TxnOptions};
+use crate::{ChangeRetention, Engine, Error, Freshness, Result, Timestamp, Txn, TxnOptions};
 
 /// Entry point to the transactional storage layer.
 pub trait Storage: Send + Sync + 'static {
@@ -38,6 +38,25 @@ impl Durability {
             Self::Sync => "sync",
             Self::Buffered => "buffered",
         }
+    }
+}
+
+/// Keeps versions newer than a timestamp from version GC while it lives
+/// ([`FjallStorage::pin_history`], ADR-0040).
+pub struct HistoryPin(crate::commit::SnapshotPin);
+
+impl HistoryPin {
+    /// Return the timestamp versions are kept after.
+    #[must_use]
+    pub fn ts(&self) -> Timestamp {
+        self.0.ts()
+    }
+}
+
+impl std::fmt::Debug for HistoryPin {
+    /// Render the pin's timestamp.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("HistoryPin").field(&self.0.ts()).finish()
     }
 }
 
@@ -96,6 +115,9 @@ pub struct StorageOptions {
     /// Defaults to 10 seconds. With no metrics recorder installed, each
     /// sample reads a few of fjall's counters and is discarded.
     pub metrics_interval: Option<Duration>,
+    /// How much of the change log to keep, for change feeds (ADR-0040).
+    /// Defaults to 64 MiB in memory.
+    pub change_retention: ChangeRetention,
 }
 
 impl Default for StorageOptions {
@@ -116,6 +138,7 @@ impl Default for StorageOptions {
             memtable_bytes: DEFAULT_MEMTABLE_BYTES,
             commit_log: std::env::var_os("INTERLAKEN_COMMIT_LOG").is_some_and(|v| v == "1"),
             metrics_interval: Some(Duration::from_secs(10)),
+            change_retention: ChangeRetention::DEFAULT,
         }
     }
 }
@@ -276,8 +299,14 @@ impl FjallStorage {
         let engine = Engine::open_with(path, options.max_journal_bytes, options.memtable_bytes)?;
         // Entries committed to the log but not applied before the last
         // close or crash are applied first, whichever path follows.
-        let (last, last_index) = engine.replay_log()?;
-        let clock = Arc::new(CommitClock::new(last));
+        let durable_changes = matches!(
+            options.change_retention,
+            crate::ChangeRetention::Durable { .. }
+        );
+        let (last, last_index) = engine.replay_log(durable_changes)?;
+        let changes = engine.open_changes(options.change_retention, last)?;
+        let clock = Arc::new(CommitClock::with_changes(last, changes));
+        clock.raise_gc_floor(engine.gc_watermark()?);
         let pool = Arc::new(StoragePool::start(
             &engine,
             options.pool_threads,
@@ -328,6 +357,125 @@ impl FjallStorage {
     #[must_use]
     pub fn visible_ts(&self) -> Timestamp {
         self.shared.clock.visible_ts()
+    }
+
+    /// Return a future that resolves once [`visible_ts`](Self::visible_ts)
+    /// passes `ts`: once a commit after `ts` is visible (ADR-0040). It
+    /// waits indefinitely.
+    pub fn wait_after(&self, ts: Timestamp) -> crate::WaitVisible {
+        self.shared
+            .clock
+            .wait_visible(ts.successor().unwrap_or(Timestamp::MAX))
+    }
+
+    /// Begin a read-only transaction whose snapshot is `ts`, a past commit,
+    /// rather than the visible timestamp (ADR-0040): the state just after
+    /// that commit. Change feeds use it to read rows as they were when they
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ChangeGap`] if version GC may already have removed
+    /// versions the snapshot needs, or `ts` isn't visible yet. Hold a
+    /// [`HistoryPin`] at or before `ts` to keep them.
+    pub fn begin_at(&self, ts: Timestamp, options: TxnOptions) -> Result<Txn> {
+        let clock = &self.shared.clock;
+        let pin = clock
+            .pin_at(ts, self.shared.limits.max_transaction_age)
+            .ok_or(Error::ChangeGap {
+                after: ts,
+                floor: clock.gc_floor(),
+            })?;
+        Ok(Txn::with_pin(self.shared.clone(), options.read_only(), pin))
+    }
+
+    /// Begin a read-only transaction whose snapshot is just before the
+    /// commit at `ts` (ADR-0040): the state that commit changed.
+    ///
+    /// # Errors
+    ///
+    /// As for [`begin_at`](Self::begin_at).
+    pub fn begin_before(&self, ts: Timestamp, options: TxnOptions) -> Result<Txn> {
+        let before = Timestamp::from_raw(ts.into_raw().saturating_sub(1));
+        self.begin_at(before, options)
+    }
+
+    /// Keep every version newer than `ts` from version GC until the pin is
+    /// dropped (ADR-0040), so [`begin_at`](Self::begin_at) can read at any
+    /// commit from `ts` on. Unlike a transaction's snapshot, it doesn't
+    /// expire: drop it once it's no longer needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ChangeGap`] if GC may already have removed versions
+    /// newer than `ts`.
+    pub fn pin_history(&self, ts: Timestamp) -> Result<HistoryPin> {
+        let clock = &self.shared.clock;
+        clock
+            .pin_at(ts, Duration::MAX)
+            .map(HistoryPin)
+            .ok_or(Error::ChangeGap {
+                after: ts,
+                floor: clock.gc_floor(),
+            })
+    }
+
+    /// Return the oldest point the change log can continue from: reading
+    /// changes after any timestamp at or past it misses nothing (ADR-0040).
+    #[must_use]
+    pub fn change_floor(&self) -> Timestamp {
+        self.shared.clock.changes().floor()
+    }
+
+    /// Return up to `max` committed transactions' row changes after
+    /// `after`, in commit order, up to the visible timestamp (ADR-0040).
+    /// An empty result means nothing newer is visible yet; wait with
+    /// [`wait_after`](Self::wait_after).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ChangeGap`] if the change log no longer reaches back to
+    ///   `after`.
+    /// - [`Error::ChangesUnavailable`] if the database keeps no change log.
+    /// - A storage error reading the durable log.
+    pub async fn read_changes(
+        &self,
+        after: Timestamp,
+        max: usize,
+    ) -> Result<Vec<Arc<crate::ChangeEntry>>> {
+        let changes = self.shared.clock.changes();
+        if changes.retention() == crate::ChangeRetention::Off {
+            return Err(Error::ChangesUnavailable);
+        }
+        let upto = self.visible_ts();
+        if let Some(entries) = changes.memory_after(after, upto, max) {
+            return Ok(entries);
+        }
+        let gap = || Error::ChangeGap {
+            after,
+            floor: changes.floor(),
+        };
+        if !changes.durable() || after < changes.floor() {
+            return Err(gap());
+        }
+        let entries = self
+            .shared
+            .pool
+            .run(move |engine: &Engine| engine.read_changes(after, upto, max))
+            .await??;
+        // Trimming may have run while reading.
+        if after < changes.floor() {
+            return Err(gap());
+        }
+        Ok(entries)
+    }
+
+    /// Return a future that resolves once [`visible_ts`](Self::visible_ts)
+    /// is at least `ts`: on a replica, once the commit at `ts` has been
+    /// applied here (ADR-0040). It waits indefinitely; bound it with a
+    /// timeout.
+    pub fn wait_visible(&self, ts: Timestamp) -> crate::WaitVisible {
+        self.shared.clock.wait_visible(ts)
     }
 
     /// Return the commit pipeline counters accumulated since the database was opened.
@@ -388,10 +536,13 @@ impl Storage for FjallStorage {
     /// Begin a transaction at the current visible timestamp; no storage
     /// call is needed. On a replicated database a fresh transaction first
     /// waits until this replica has applied everything committed before it
-    /// began.
+    /// began, and a read-only one at [`Freshness::AtLeast`] until it has
+    /// applied the given commit.
     async fn begin(&self, options: TxnOptions) -> Result<Txn> {
-        if options.freshness == Freshness::Fresh || !options.read_only {
-            self.shared.commit.read_barrier().await?;
+        match options.freshness {
+            Freshness::AtLeast(ts) if options.read_only => self.wait_visible(ts).await,
+            Freshness::Local if options.read_only => {}
+            _ => self.shared.commit.read_barrier().await?,
         }
         Ok(Txn::begin(self.shared.clone(), options))
     }

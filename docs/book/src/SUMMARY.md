@@ -49,6 +49,7 @@
 - [Statements, atomicity and savepoints](transactions/statements.md)
 - [Streaming results](transactions/streaming.md)
 - [Timeouts and cancellation](transactions/timeouts.md)
+- [Change feeds and read-your-writes](transactions/change-feeds.md)
 
 # Operations
 

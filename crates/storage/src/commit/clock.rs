@@ -1,11 +1,15 @@
 //! The visibility watermark and the registry of open snapshots.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crate::Timestamp;
+use crate::changes::ChangeLog;
 
 /// `visible_ts` plus the snapshots of every open transaction (ADR-0004, ADR-0008).
 ///
@@ -22,6 +26,20 @@ pub(crate) struct CommitClock {
     pinned: Mutex<Pins>,
     /// Pins revoked for exceeding the maximum age.
     expired: AtomicU64,
+    /// Tasks waiting for `visible` to reach a timestamp (ADR-0040).
+    waiters: Mutex<Waiters>,
+    /// The change log, recorded before each publish (ADR-0040).
+    changes: ChangeLog,
+    /// The newest GC watermark any pass has used: snapshots older than it
+    /// may have lost versions, so none can be pinned (ADR-0040).
+    gc_floor: AtomicU64,
+}
+
+/// Tasks waiting for the visible timestamp, keyed by a unique number.
+#[derive(Debug, Default)]
+struct Waiters {
+    by_id: BTreeMap<u64, (Timestamp, Waker)>,
+    next_id: u64,
 }
 
 /// The pin registry.
@@ -42,13 +60,82 @@ pub(crate) struct PinState {
 }
 
 impl CommitClock {
-    /// Construct a clock whose visible timestamp is `last`, which is already durable.
+    /// Construct a clock whose visible timestamp is `last`, which is
+    /// already durable, with no change log.
+    #[cfg(test)]
     pub(crate) fn new(last: Timestamp) -> Self {
+        Self::with_changes(
+            last,
+            ChangeLog::new(crate::ChangeRetention::Off, last, last, Vec::new()),
+        )
+    }
+
+    /// Construct a clock whose visible timestamp is `last`, which is
+    /// already durable, recording into `changes`.
+    pub(crate) fn with_changes(last: Timestamp, changes: ChangeLog) -> Self {
         Self {
             visible: AtomicU64::new(last.into_raw()),
             pinned: Mutex::new(Pins::default()),
             expired: AtomicU64::new(0),
+            waiters: Mutex::new(Waiters::default()),
+            changes,
+            gc_floor: AtomicU64::new(0),
         }
+    }
+
+    /// Raise the GC floor to `ts`: versions older than it may be collected.
+    pub(crate) fn raise_gc_floor(&self, ts: Timestamp) {
+        self.gc_floor.fetch_max(ts.into_raw(), Ordering::AcqRel);
+    }
+
+    /// Return the GC floor: the oldest snapshot that can still be pinned.
+    pub(crate) fn gc_floor(&self) -> Timestamp {
+        Timestamp::from_raw(self.gc_floor.load(Ordering::Acquire))
+    }
+
+    /// Return the watermark a GC pass may collect below, as
+    /// [`horizon`](Self::horizon) does, and raise the GC floor to it under
+    /// the same registry lock, so [`pin_at`](Self::pin_at) either registers
+    /// its pin first, holding the watermark down, or sees the new floor.
+    pub(crate) fn gc_horizon(&self) -> Timestamp {
+        let mut pins = self.pins();
+        let watermark = self.horizon_locked(&mut pins);
+        self.raise_gc_floor(watermark);
+        watermark
+    }
+
+    /// Pin a snapshot at `ts`, which may be older than the visible
+    /// timestamp, for at most `max_age`; `None` if GC may already have
+    /// collected versions it needs (ADR-0040).
+    pub(crate) fn pin_at(
+        self: &Arc<Self>,
+        ts: Timestamp,
+        max_age: Duration,
+    ) -> Option<SnapshotPin> {
+        let mut pins = self.pins();
+        if ts < self.gc_floor() || ts > self.visible_ts() {
+            return None;
+        }
+        let id = pins.next_id;
+        pins.next_id += 1;
+        let taken = Instant::now();
+        let state = Arc::new(PinState {
+            taken,
+            deadline: taken.checked_add(max_age),
+            revoked: AtomicBool::new(false),
+        });
+        pins.by_snapshot.insert((ts, id), Arc::clone(&state));
+        Some(SnapshotPin {
+            clock: Arc::clone(self),
+            ts,
+            id,
+            state,
+        })
+    }
+
+    /// Return the change log.
+    pub(crate) fn changes(&self) -> &ChangeLog {
+        &self.changes
     }
 
     /// Return the timestamp new snapshots read at.
@@ -85,7 +172,27 @@ impl CommitClock {
     ///
     /// Only the sequencer calls this, with increasing timestamps.
     pub(crate) fn publish(&self, ts: Timestamp) {
+        // Stored under the waiters' lock, so a waiter that checked the old
+        // value has registered before this wakes the satisfied ones.
+        let mut waiters = self.waiters.lock().unwrap_or_else(PoisonError::into_inner);
         self.visible.store(ts.into_raw(), Ordering::Release);
+        waiters.by_id.retain(|_, (target, waker)| {
+            if *target <= ts {
+                waker.wake_by_ref();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Return a future that resolves once the visible timestamp is at least `ts`.
+    pub(crate) fn wait_visible(self: &Arc<Self>, ts: Timestamp) -> WaitVisible {
+        WaitVisible {
+            clock: Arc::clone(self),
+            ts,
+            id: None,
+        }
     }
 
     /// Revoke expired pins and return the oldest snapshot any open or future
@@ -94,8 +201,13 @@ impl CommitClock {
     /// Everything at or below the result that is shadowed by a newer version
     /// at or below it is invisible to every live snapshot.
     pub(crate) fn horizon(&self) -> Timestamp {
-        let now = Instant::now();
         let mut pins = self.pins();
+        self.horizon_locked(&mut pins)
+    }
+
+    /// Compute [`horizon`](Self::horizon) with the registry locked.
+    fn horizon_locked(&self, pins: &mut Pins) -> Timestamp {
+        let now = Instant::now();
         let expired: Vec<(Timestamp, u64)> = pins
             .by_snapshot
             .iter()
@@ -123,6 +235,7 @@ impl CommitClock {
     /// expired ones do.
     pub(crate) fn revoke_before(&self, ts: Timestamp) {
         let mut pins = self.pins();
+        self.raise_gc_floor(ts);
         let older: Vec<(Timestamp, u64)> = pins
             .by_snapshot
             .keys()
@@ -265,5 +378,71 @@ mod tests {
         assert!(!new.is_expired());
         assert_eq!(clock.active(), (1, Some(Timestamp::from_raw(9))));
         assert_eq!(clock.expired_count(), 1);
+    }
+}
+
+/// A future that resolves once the visible timestamp reaches a target
+/// (ADR-0040). Dropping it unregisters it.
+#[derive(Debug)]
+#[must_use = "futures do nothing unless polled"]
+pub struct WaitVisible {
+    /// The clock to watch.
+    clock: Arc<CommitClock>,
+    /// The timestamp to wait for.
+    ts: Timestamp,
+    /// The registration among the clock's waiters, once registered.
+    id: Option<u64>,
+}
+
+impl Future for WaitVisible {
+    type Output = ();
+
+    /// Resolve if the target is visible; otherwise register to be woken.
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        if this.clock.visible_ts() >= this.ts {
+            this.unregister();
+            return Poll::Ready(());
+        }
+        let mut waiters = this
+            .clock
+            .waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Checked again under the lock that `publish` stores under.
+        if this.clock.visible_ts() >= this.ts {
+            if let Some(id) = this.id.take() {
+                waiters.by_id.remove(&id);
+            }
+            return Poll::Ready(());
+        }
+        let id = *this.id.get_or_insert_with(|| {
+            let id = waiters.next_id;
+            waiters.next_id += 1;
+            id
+        });
+        waiters.by_id.insert(id, (this.ts, cx.waker().clone()));
+        Poll::Pending
+    }
+}
+
+impl WaitVisible {
+    /// Remove this future from the clock's waiters, if it is registered.
+    fn unregister(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.clock
+                .waiters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .by_id
+                .remove(&id);
+        }
+    }
+}
+
+impl Drop for WaitVisible {
+    /// Unregister a future dropped before it resolved.
+    fn drop(&mut self) {
+        self.unregister();
     }
 }

@@ -18,6 +18,9 @@ pub struct QueryResult {
     pub batches: Vec<RecordBatch>,
     /// What the statement cost (ADR-0039).
     pub usage: Usage,
+    /// The commit timestamp of a statement that ran in its own (implicit)
+    /// transaction and wrote something (ADR-0040); `None` otherwise.
+    pub commit_ts: Option<crate::CommitTs>,
 }
 
 impl QueryResult {

@@ -24,6 +24,7 @@
 //!   unique and NOT NULL constraints (ADR-0003 row format, ADR-0007).
 
 pub mod catalog;
+mod changes;
 mod commit;
 pub mod encoding;
 mod engine;
@@ -39,7 +40,8 @@ pub mod telemetry;
 mod timestamp;
 mod txn;
 
-pub use commit::{CommitRequest, CommitStats};
+pub use changes::{ChangeEntry, ChangeRetention, ChangeWrite};
+pub use commit::{CommitRequest, CommitStats, Prior, WaitVisible};
 pub use engine::{Engine, FORMAT_VERSION};
 pub use error::{CatalogError, Conflict, ConstraintViolation, Error, Result};
 pub use gc::{GcReport, GcStats};
@@ -47,6 +49,6 @@ pub use scan::{
     DEFAULT_SCAN_LIMIT_BYTES, DEFAULT_SCAN_LIMIT_ROWS, Key, KeyRange, RowFilter, ScanBatch,
     ScanRequest,
 };
-pub use storage::{Durability, FjallStorage, Storage, StorageMetrics, StorageOptions};
-pub use timestamp::Timestamp;
+pub use storage::{Durability, FjallStorage, HistoryPin, Storage, StorageMetrics, StorageOptions};
+pub use timestamp::{ParseTimestampError, Timestamp};
 pub use txn::{CommitInfo, Freshness, Isolation, SavepointId, Txn, TxnOptions};

@@ -97,6 +97,20 @@ impl<'a> Overlay<'a> {
         self.written.insert(key, None);
         Ok(())
     }
+
+    /// Buffer a write of a row's `key`, which held a row before if `existed` (ADR-0040).
+    fn put_row(&mut self, key: Key, value: Bytes, existed: bool) -> Result<()> {
+        self.txn.put_row(key.clone(), value.clone(), existed)?;
+        self.written.insert(key, Some(value));
+        Ok(())
+    }
+
+    /// Buffer a delete of a row's `key`.
+    fn delete_row(&mut self, key: Key) -> Result<()> {
+        self.txn.delete_row(key.clone())?;
+        self.written.insert(key, None);
+        Ok(())
+    }
 }
 
 /// What an insert writes for one row, computed before any read.
@@ -192,7 +206,7 @@ pub async fn insert_many(txn: &Txn, table: &TableDef, rows: Vec<Row>) -> Result<
         if let Some(((index, _), _)) = exclusive.zip(&found[1..]).find(|(_, f)| f.is_some()) {
             return Err(unique_violation(index));
         }
-        overlay.put(p.key, p.encoded)?;
+        overlay.put_row(p.key, p.encoded, false)?;
         for (_, entry) in p.entries {
             overlay.put(entry.key, entry.value)?;
         }
@@ -239,7 +253,7 @@ pub async fn delete_many(txn: &Txn, table: &TableDef, pks: &[Vec<Datum>]) -> Res
         for (_, entry) in index_entries(table, &old)? {
             overlay.delete(entry.key)?;
         }
-        overlay.delete(key)?;
+        overlay.delete_row(key)?;
         deleted.push(true);
     }
     Ok(deleted)
@@ -352,8 +366,9 @@ pub async fn update_many(
         if let Some((index, _)) = unique_probes.zip(found).find(|(_, f)| f.is_some()) {
             return Err(unique_violation(index));
         }
-        if new_key != old_key {
-            overlay.delete(old_key)?;
+        let moved = new_key != old_key;
+        if moved {
+            overlay.delete_row(old_key)?;
         }
         for ((_, old), (_, new)) in old_entries.iter().zip(&new_entries) {
             if old == new {
@@ -364,7 +379,7 @@ pub async fn update_many(
             }
             overlay.put(new.key.clone(), new.value.clone())?;
         }
-        overlay.put(new_key, encoded)?;
+        overlay.put_row(new_key, encoded, !moved)?;
         replaced.push(true);
     }
     Ok(replaced)

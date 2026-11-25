@@ -12,12 +12,52 @@
 //! ```text
 //! entry := index:u64 first_ts:u64 txn_count:u32 txn*
 //! txn   := write_count:u32 write*
-//! write := key_len:u32 key tag:u8 (value_len:u32 value)?   ; tag 1 = put, 0 = delete
+//! write := key_len:u32 key tag:u8 (value_len:u32 value)?
 //! ```
+//!
+//! The tag's low bit is 1 for a put (a value follows) and 0 for a delete;
+//! the next two bits are the key's [`Prior`] state (ADR-0040): 0 unknown,
+//! 1 existed, 2 absent. Entries written before ADR-0040 have tags 0 and 1,
+//! which read as unknown.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{Error, Result, Timestamp};
+
+/// Whether a key held a row before the transaction that wrote it
+/// (ADR-0040), which tells an insert from an update and a delete from the
+/// undoing of the transaction's own insert.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Prior {
+    /// Not recorded: a raw write, not through the row layer.
+    #[default]
+    Unknown,
+    /// The key held a row before the transaction.
+    Existed,
+    /// The key held no row before the transaction.
+    Absent,
+}
+
+impl Prior {
+    /// Return the state's two-bit code.
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Existed => 1,
+            Self::Absent => 2,
+        }
+    }
+
+    /// Return the state for a two-bit code, or `None` if it isn't one.
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::Unknown,
+            1 => Self::Existed,
+            2 => Self::Absent,
+            _ => return None,
+        })
+    }
+}
 
 /// One write of a logged transaction: a key and the value it leaves, or `None` for a delete.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,6 +66,8 @@ pub(crate) struct LogWrite {
     pub(crate) key: Bytes,
     /// The value written, or `None` for a delete.
     pub(crate) value: Option<Bytes>,
+    /// Whether the key held a row before the transaction.
+    pub(crate) prior: Prior,
 }
 
 /// One commit group, as the log holds it.
@@ -63,6 +105,14 @@ impl LogEntry {
             .flat_map(|(writes, ts)| writes.iter().map(move |w| (Timestamp::from_raw(ts), w)))
     }
 
+    /// Return the change log entries of the entry's transactions (ADR-0040).
+    pub(crate) fn changes(&self) -> Vec<std::sync::Arc<crate::changes::ChangeEntry>> {
+        crate::changes::entries_from(
+            self.versions()
+                .map(|(ts, w)| (ts, &w.key, w.value.as_ref(), w.prior)),
+        )
+    }
+
     /// Encode the entry.
     pub(crate) fn encode(&self) -> Bytes {
         let mut out = BytesMut::new();
@@ -74,13 +124,14 @@ impl LogEntry {
             for write in writes {
                 out.put_u32(u32::try_from(write.key.len()).expect("key length fits u32"));
                 out.put_slice(&write.key);
+                let prior = write.prior.code() << 1;
                 match &write.value {
                     Some(value) => {
-                        out.put_u8(1);
+                        out.put_u8(prior | 1);
                         out.put_u32(u32::try_from(value.len()).expect("value length fits u32"));
                         out.put_slice(value);
                     }
-                    None => out.put_u8(0),
+                    None => out.put_u8(prior),
                 }
             }
         }
@@ -119,12 +170,13 @@ impl LogEntry {
             for _ in 0..write_count {
                 let key = take(&mut buf)?;
                 need(&buf, 1)?;
-                let value = match buf.get_u8() {
+                let tag = buf.get_u8();
+                let prior = Prior::from_code(tag >> 1).ok_or_else(corrupt)?;
+                let value = match tag & 1 {
                     0 => None,
-                    1 => Some(take(&mut buf)?),
-                    _ => return Err(corrupt()),
+                    _ => Some(take(&mut buf)?),
                 };
-                writes.push(LogWrite { key, value });
+                writes.push(LogWrite { key, value, prior });
             }
             txns.push(writes);
         }
@@ -148,6 +200,11 @@ mod tests {
         LogWrite {
             key: Bytes::copy_from_slice(key.as_bytes()),
             value: value.map(|v| Bytes::copy_from_slice(v.as_bytes())),
+            prior: if key == "b" {
+                Prior::Existed
+            } else {
+                Prior::Unknown
+            },
         }
     }
 

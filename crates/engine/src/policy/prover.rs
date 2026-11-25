@@ -9,10 +9,11 @@ use interlaken_storage::{Storage, Txn, TxnOptions};
 
 use super::document::PolicyDocument;
 use super::proposals::{Proposal, pending_proposals};
-use super::tables::{load_policies, policy_settings};
+use super::tables::{PROPOSALS_TABLE, load_policies, policy_settings};
 use super::verify::{GateResult, record_verification, verifications};
 use crate::catalog::load_catalog;
 use crate::error::EngineError;
+use crate::feed::ChangeFilter;
 use crate::session::Engine;
 
 /// Something that can run the proof gates on a policy change.
@@ -89,16 +90,16 @@ async fn prove_once<P: Prover>(engine: &Engine, prover: &P) -> Result<Vec<i64>, 
     Ok(proved)
 }
 
-/// Run `prover` on `engine`'s pending proposals whenever the node applies
-/// new commits, until `stop` resolves (ADR-0030 phase 2).
+/// Run `prover` on `engine`'s pending proposals whenever one is submitted
+/// or changed, until `stop` resolves (ADR-0030 phase 2, ADR-0040).
 ///
 /// On a cluster member, proposals submitted on any node arrive by
 /// replication, and the results commit through the leader like any other
 /// write, so one prover node serves the whole cluster. On a single node it
-/// proves proposals submitted locally. The node is checked every `poll`:
-/// a check that finds no new commits costs nothing, so the prover wakes
-/// only for commits it hasn't seen. Conflicts, a missing leader and
-/// unknown commit outcomes are retried on the next check.
+/// proves proposals submitted locally. The prover follows the proposals
+/// table's change feed, so it wakes only when a proposal changes; without
+/// a change log it checks every `poll` instead. Conflicts, a missing leader
+/// and unknown commit outcomes are retried after `poll`.
 ///
 /// # Errors
 ///
@@ -110,20 +111,60 @@ pub async fn watch_proposals<P: Prover>(
     stop: impl Future<Output = ()>,
 ) -> Result<(), EngineError> {
     let mut stop = std::pin::pin!(stop);
-    let mut seen = None;
+    // Whether proposals may have changed since the last successful proof.
+    let mut dirty = true;
+    let mut feed = None;
+    // Without a change log, poll the visible timestamp instead.
+    let mut polling = false;
+    let mut proved_at = None;
     loop {
+        if !polling && feed.is_none() {
+            let filter = ChangeFilter::tables([PROPOSALS_TABLE]).keys_only();
+            match engine.changes(filter, None).await {
+                Ok(opened) => {
+                    feed = Some(opened);
+                    // Anything submitted before the feed began.
+                    dirty = true;
+                }
+                Err(error) if retryable(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if dirty {
+            let visible = engine.visible_ts();
+            match prove_once(engine, prover).await {
+                Ok(_) => {
+                    dirty = false;
+                    proved_at = Some(visible);
+                }
+                Err(error) if retryable(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let wait = async {
+            match feed.as_mut() {
+                Some(open) if !dirty => match open.next().await {
+                    Some(Ok(_)) => dirty = true,
+                    Some(Err(EngineError::Storage(
+                        interlaken_storage::Error::ChangesUnavailable,
+                    ))) => {
+                        feed = None;
+                        polling = true;
+                    }
+                    // A gap: follow again from now, and prove what's pending.
+                    Some(Err(_)) | None => feed = None,
+                },
+                _ => {
+                    tokio::time::sleep(poll).await;
+                    if polling && proved_at != Some(engine.visible_ts()) {
+                        dirty = true;
+                    }
+                }
+            }
+        };
         tokio::select! {
             () = &mut stop => return Ok(()),
-            () = tokio::time::sleep(poll) => {}
-        }
-        let visible = engine.storage().visible_ts();
-        if seen == Some(visible) {
-            continue;
-        }
-        match prove_once(engine, prover).await {
-            Ok(_) => seen = Some(visible),
-            Err(error) if retryable(&error) => {}
-            Err(error) => return Err(error),
+            () = wait => {}
         }
     }
 }

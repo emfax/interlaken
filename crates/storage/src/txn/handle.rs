@@ -10,7 +10,7 @@ use tracing::Instrument;
 use super::read_set::ReadSet;
 use super::write_buffer::{WriteBuffer, WriteOp};
 use super::{Isolation, TxnOptions};
-use crate::commit::{CommitRequest, SnapshotPin};
+use crate::commit::{CommitRequest, Prior, SnapshotPin};
 use crate::encoding::{EncodeError, MAX_TUPLE_LEN};
 use crate::engine::mvcc::{self, ScanJob};
 use crate::scan::{Key, KeyRange, ScanBatch, ScanRequest};
@@ -72,6 +72,11 @@ impl Txn {
     /// Construct a transaction reading at the current visible timestamp.
     pub(crate) fn begin(shared: Arc<Shared>, options: TxnOptions) -> Self {
         let pin = shared.clock.pin(shared.limits.max_transaction_age);
+        Self::with_pin(shared, options, pin)
+    }
+
+    /// Begin a transaction reading at `pin`'s snapshot.
+    pub(crate) fn with_pin(shared: Arc<Shared>, options: TxnOptions, pin: SnapshotPin) -> Self {
         let snapshot = pin.ts();
         Self(Arc::new(TxnInner {
             shared,
@@ -308,7 +313,24 @@ impl Txn {
     /// Returns [`Error::ReadOnlyTransaction`] in a read-only transaction, or
     /// [`Error::Encode`] if the key is too long to store.
     pub fn put(&self, key: Key, value: Bytes) -> Result<()> {
-        self.write(key, WriteOp::Put(value))
+        self.write(key, WriteOp::Put(value), Prior::Unknown)
+    }
+
+    /// Buffer a write of a row's key, recording whether the key held a row
+    /// before (ADR-0040): the row layer knows, and the change log reports
+    /// inserts and updates from it.
+    pub(crate) fn put_row(&self, key: Key, value: Bytes, existed: bool) -> Result<()> {
+        let prior = if existed {
+            Prior::Existed
+        } else {
+            Prior::Absent
+        };
+        self.write(key, WriteOp::Put(value), prior)
+    }
+
+    /// Buffer a delete of a row's key, which held a row (ADR-0040).
+    pub(crate) fn delete_row(&self, key: Key) -> Result<()> {
+        self.write(key, WriteOp::Delete, Prior::Existed)
     }
 
     /// Buffer a write deleting `key`.
@@ -318,7 +340,7 @@ impl Txn {
     /// Returns [`Error::ReadOnlyTransaction`] in a read-only transaction, or
     /// [`Error::Encode`] if the key is too long to store.
     pub fn delete(&self, key: Key) -> Result<()> {
-        self.write(key, WriteOp::Delete)
+        self.write(key, WriteOp::Delete, Prior::Unknown)
     }
 
     /// Register a key read outside [`get_many`](Self::get_many) and [`scan`](Self::scan).
@@ -509,7 +531,7 @@ impl Txn {
     }
 
     /// Buffer a write after checking it is allowed.
-    fn write(&self, key: Key, op: WriteOp) -> Result<()> {
+    fn write(&self, key: Key, op: WriteOp, prior: Prior) -> Result<()> {
         if self.0.options.read_only {
             return Err(Error::ReadOnlyTransaction);
         }
@@ -527,7 +549,7 @@ impl Txn {
             return Err(Error::WriteSetTooLarge { limit });
         }
         let (statement, snapshot) = (state.statement, state.snapshot);
-        state.writes.write(key, op, statement, snapshot);
+        state.writes.write(key, op, statement, snapshot, prior);
         Ok(())
     }
 

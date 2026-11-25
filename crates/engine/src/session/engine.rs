@@ -306,6 +306,89 @@ impl Engine {
         Session::new(self.clone(), context)
     }
 
+    /// Return the timestamp of the last commit visible on this node: on a
+    /// replica, the last one applied here (ADR-0040).
+    #[must_use]
+    pub fn visible_ts(&self) -> crate::CommitTs {
+        self.inner.storage.visible_ts()
+    }
+
+    /// Wait until the commit at `ts` is visible on this node, for at most
+    /// `timeout` (ADR-0040).
+    ///
+    /// A client that committed on one member and continues on another
+    /// passes the commit's timestamp here, or begins its next transaction
+    /// with [`Freshness::AtLeast`](interlaken_storage::Freshness::AtLeast),
+    /// to read its own writes. On a single node a commit is visible as soon
+    /// as it returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotVisible`] (SQLSTATE `57014`) after `timeout`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(engine: &interlaken_engine::Engine, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// let ts: interlaken_engine::CommitTs = token.parse()?;
+    /// engine.wait_visible(ts, std::time::Duration::from_secs(2)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_visible(
+        &self,
+        ts: crate::CommitTs,
+        timeout: std::time::Duration,
+    ) -> Result<(), EngineError> {
+        tokio::time::timeout(timeout, self.inner.storage.wait_visible(ts))
+            .await
+            .map_err(|_| EngineError::NotVisible(ts))
+    }
+
+    /// Follow committed changes to the tables `filter` selects, in commit
+    /// order, after `from`, or after the last visible commit if `from` is
+    /// `None` (ADR-0040).
+    ///
+    /// Each [`ChangeBatch`](crate::ChangeBatch) is one committed transaction.
+    /// A program that saves each batch's `commit_ts` after handling it, and
+    /// resumes from it, sees every commit at least once. To start from a
+    /// consistent copy, read the tables in a read-only transaction and
+    /// follow from its [`Session::snapshot_ts`](crate::Session::snapshot_ts).
+    ///
+    /// The feed reads below policies: it is for the embedding program's own
+    /// use. How far back it can resume depends on
+    /// [`StorageOptions::change_retention`](interlaken_storage::StorageOptions::change_retention).
+    ///
+    /// # Errors
+    ///
+    /// Returns SQLSTATE `42P01` if a named table doesn't exist, or a storage error.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(engine: &interlaken_engine::Engine) -> Result<(), interlaken_engine::EngineError> {
+    /// use interlaken_engine::{ChangeFilter, ChangeKind};
+    ///
+    /// let mut feed = engine.changes(ChangeFilter::tables(["orders"]), None).await?;
+    /// while let Some(batch) = feed.next().await {
+    ///     let batch = batch?;
+    ///     for change in &batch.changes {
+    ///         if change.kind == ChangeKind::Delete {
+    ///             println!("{} {:?} deleted at {}", change.table, change.key, batch.commit_ts);
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn changes(
+        &self,
+        filter: crate::ChangeFilter,
+        from: Option<crate::CommitTs>,
+    ) -> Result<crate::ChangeFeed, EngineError> {
+        crate::ChangeFeed::open(self.inner.storage.clone(), filter, from).await
+    }
+
     /// Return the underlying storage.
     #[must_use]
     pub fn storage(&self) -> &FjallStorage {

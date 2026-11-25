@@ -176,6 +176,7 @@ mod tests {
                     key: k(w),
                     op: WriteOp::Delete,
                     snapshot: ts(snapshot),
+                    prior: crate::commit::Prior::Unknown,
                 })
                 .collect(),
         }

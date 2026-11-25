@@ -46,6 +46,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::changes::ChangeRetention;
 use crate::commit::{CommitClock, CommitHistory, CommitRequest, LogEntry, LogWrite};
 use crate::engine::{Engine, ExportCursor, Staged, Staging};
 use crate::pool::StoragePool;
@@ -220,6 +221,16 @@ impl Replica {
     pub async fn apply(&self, batch: Option<Bytes>, meta: Vec<(Vec<u8>, Vec<u8>)>) -> Result<()> {
         let entry = batch.map(|b| LogEntry::decode(&b)).transpose()?;
         let written = entry.clone();
+        let changes = self.state.clock.changes();
+        let entries = match &entry {
+            Some(entry) if changes.retention() != ChangeRetention::Off => entry.changes(),
+            _ => Vec::new(),
+        };
+        let durable = if changes.durable() {
+            entries.clone()
+        } else {
+            Vec::new()
+        };
         self.state
             .pool
             .run(move |engine: &Engine| match &written {
@@ -229,8 +240,9 @@ impl Replica {
                         .map(|(ts, w)| (ts, &w.key[..], w.value.as_deref())),
                     Some(entry.last_ts()),
                     &meta,
+                    &durable,
                 ),
-                None => engine.apply_versions(std::iter::empty(), None, &meta),
+                None => engine.apply_versions(std::iter::empty(), None, &meta, &[]),
             })
             .await??;
         if let Some(entry) = entry {
@@ -247,6 +259,7 @@ impl Replica {
             }
             validation.applied(entry.last_ts(), self.state.clock.horizon());
             drop(validation);
+            self.state.clock.changes().record(&entries);
             self.state.clock.publish(entry.last_ts());
         }
         Ok(())
@@ -417,6 +430,9 @@ impl Replica {
         drop(validation);
         // Only current data arrived: older snapshots can't be served here.
         self.state.clock.revoke_before(last);
+        // The commits the snapshot covers were never applied here: a change
+        // feed reading across them gets a gap (ADR-0040).
+        self.state.clock.changes().reset(last);
         self.state.clock.publish(last);
     }
 }
@@ -668,6 +684,7 @@ impl Proposer {
                         .map(|w| LogWrite {
                             key: w.key.clone(),
                             value: w.op.value().cloned(),
+                            prior: w.prior,
                         })
                         .collect(),
                 );

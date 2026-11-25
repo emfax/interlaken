@@ -437,3 +437,126 @@ async fn a_cluster_keeps_a_single_node_database() {
         assert_eq!(load_catalog(&txn).await.unwrap().schema_version(), version);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Assert a commit's timestamp carries read-your-writes to another member:
+/// waiting for it there, or beginning at `AtLeast`, sees the write without
+/// a round trip to the leader (ADR-0040).
+async fn commit_timestamps_cross_members() {
+    let pki = Pki::new();
+    let dirs = [
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    ];
+    let [first, second, third] = three(&pki, &dirs).await;
+    session(&first, admin())
+        .create_table(&table("t", &[("id", "int8")], &["id"]))
+        .await
+        .unwrap();
+    for id in 0..20 {
+        let ts = session(&second, admin())
+            .query(
+                &format!("(plan (insert t (values (columns a) (row {id})) (columns id)))"),
+                Vec::new(),
+            )
+            .await
+            .unwrap()
+            .commit_ts
+            .expect("a writing statement commits");
+        let token = ts.to_string();
+        // Another member, given only the token.
+        let ts: interlaken_engine::CommitTs = token.parse().unwrap();
+        let reader = if id % 2 == 0 { &third } else { &first };
+        let mut s = session(reader, admin());
+        if id % 4 < 2 {
+            reader
+                .wait_visible(ts, Duration::from_secs(5))
+                .await
+                .unwrap();
+            s.begin(
+                TxnOptions::default()
+                    .read_only()
+                    .freshness(interlaken_storage::Freshness::Local),
+            )
+            .await
+            .unwrap();
+        } else {
+            s.begin(
+                TxnOptions::default()
+                    .read_only()
+                    .freshness(interlaken_storage::Freshness::AtLeast(ts)),
+            )
+            .await
+            .unwrap();
+        }
+        let rows = s.query("(plan (get t))", Vec::new()).await.unwrap().rows();
+        assert!(
+            rows.contains(&vec![Datum::Int8(id)]),
+            "row {id} on the reader"
+        );
+        s.commit().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Assert change feeds on every member deliver the same batches with the
+/// same timestamps, across a leader change (ADR-0040).
+async fn change_feeds_agree_across_members() {
+    use interlaken_engine::ChangeFilter;
+
+    let pki = Pki::new();
+    let dirs = [
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    ];
+    let members = three(&pki, &dirs).await;
+    session(&members[0], admin())
+        .create_table(&table("t", &[("id", "int8"), ("n", "int8")], &["id"]))
+        .await
+        .unwrap();
+    let start = members[0].visible_ts();
+    let insert = |id: i64| {
+        format!("(plan (insert t (values (columns a b) (row {id} {id})) (columns id n)))")
+    };
+    for id in 0..10 {
+        session(&members[(id as usize) % 3], admin())
+            .query(&insert(id), Vec::new())
+            .await
+            .unwrap();
+    }
+    let leader = members[0].cluster_status().unwrap().leader.unwrap();
+    let target = [1, 2, 3].into_iter().find(|&id| id != leader).unwrap();
+    session(&members[0], admin())
+        .transfer_leadership(target)
+        .await
+        .unwrap();
+    for id in 10..20 {
+        session(&members[(id as usize) % 3], admin())
+            .query(&insert(id), Vec::new())
+            .await
+            .unwrap();
+    }
+    let mut seen = Vec::new();
+    for member in &members {
+        let mut feed = member
+            .changes(ChangeFilter::tables(["t"]), Some(start))
+            .await
+            .unwrap();
+        let mut batches = Vec::new();
+        for _ in 0..20 {
+            let batch = tokio::time::timeout(Duration::from_secs(10), feed.next())
+                .await
+                .expect("a batch")
+                .unwrap()
+                .unwrap();
+            batches.push((batch.commit_ts, batch.changes));
+        }
+        seen.push(batches);
+    }
+    assert_eq!(seen[0], seen[1]);
+    assert_eq!(seen[0], seen[2]);
+    let keys: Vec<Datum> = seen[0].iter().map(|(_, c)| c[0].key[0].clone()).collect();
+    assert_eq!(keys, (0..20).map(Datum::Int8).collect::<Vec<_>>());
+}

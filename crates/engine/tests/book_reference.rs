@@ -473,6 +473,7 @@ fn configuration() -> String {
         memtable_bytes,
         commit_log: _,
         metrics_interval,
+        change_retention,
     } = StorageOptions::default();
     let count = |n: usize| {
         let s = n.to_string();
@@ -525,6 +526,15 @@ fn configuration() -> String {
         (
             "metrics_interval",
             metrics_interval.map_or("none".to_owned(), duration),
+        ),
+        (
+            "change_retention",
+            match change_retention {
+                interlaken_storage::ChangeRetention::Memory { bytes: n } => {
+                    format!("{} in memory", bytes(n))
+                }
+                other => format!("{other:?}"),
+            },
         ),
     ];
     let mut out = String::new();

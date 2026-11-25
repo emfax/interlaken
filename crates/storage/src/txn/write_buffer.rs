@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 
 use crate::Timestamp;
-use crate::commit::WriteIntent;
+use crate::commit::{Prior, WriteIntent};
 use crate::scan::{Key, KeyRange};
 
 /// A buffered write.
@@ -46,6 +46,9 @@ struct Entry {
     earlier: Option<WriteOp>,
     /// Snapshot of the statement that first wrote the key, for validation.
     snapshot: Timestamp,
+    /// Whether the key held a row before the transaction, as its first
+    /// write knew it (ADR-0040).
+    prior: Prior,
 }
 
 impl Entry {
@@ -79,7 +82,18 @@ pub(crate) struct WriteBuffer {
 
 impl WriteBuffer {
     /// Record a write to `key` made by `statement` reading at `snapshot`.
-    pub(crate) fn write(&mut self, key: Key, op: WriteOp, statement: u64, snapshot: Timestamp) {
+    ///
+    /// `prior` says whether the key held a row before the write; only the
+    /// key's first write in the transaction records it, since later ones
+    /// see the transaction's own writes.
+    pub(crate) fn write(
+        &mut self,
+        key: Key,
+        op: WriteOp,
+        statement: u64,
+        snapshot: Timestamp,
+        prior: Prior,
+    ) {
         self.bytes = self.bytes_after(&key, &op);
         let previous = self.entries.get(&key).cloned();
         if self.recording {
@@ -100,6 +114,7 @@ impl WriteBuffer {
                 latest_statement: statement,
                 earlier: None,
                 snapshot,
+                prior,
             },
         };
         self.entries.insert(key, entry);
@@ -185,6 +200,7 @@ impl WriteBuffer {
                 key,
                 op: entry.latest,
                 snapshot: entry.snapshot,
+                prior: entry.prior,
             })
             .collect()
     }
@@ -218,7 +234,7 @@ mod tests {
     /// Assert a statement never sees its own writes but the next one does.
     fn current_statement_writes_are_invisible() {
         let mut buf = WriteBuffer::default();
-        buf.write(key("a"), put("1"), 0, ts(0));
+        buf.write(key("a"), put("1"), 0, ts(0), Prior::Unknown);
         assert_eq!(buf.visible(b"a", 0), None);
         assert_eq!(buf.visible(b"a", 1), Some(&put("1")));
     }
@@ -227,9 +243,9 @@ mod tests {
     /// Assert an overwrite in a later statement hides behind the earlier value until the statement ends.
     fn overwrite_keeps_earlier_value_for_current_statement() {
         let mut buf = WriteBuffer::default();
-        buf.write(key("a"), put("1"), 0, ts(1));
-        buf.write(key("a"), put("2"), 2, ts(5));
-        buf.write(key("a"), WriteOp::Delete, 2, ts(5));
+        buf.write(key("a"), put("1"), 0, ts(1), Prior::Unknown);
+        buf.write(key("a"), put("2"), 2, ts(5), Prior::Unknown);
+        buf.write(key("a"), WriteOp::Delete, 2, ts(5), Prior::Unknown);
         assert_eq!(buf.visible(b"a", 2), Some(&put("1")));
         assert_eq!(buf.visible(b"a", 3), Some(&WriteOp::Delete));
         let intents = buf.into_intents();
@@ -242,9 +258,9 @@ mod tests {
     /// Assert range listings respect bounds and statement visibility.
     fn visible_range_filters() {
         let mut buf = WriteBuffer::default();
-        buf.write(key("a"), put("1"), 0, ts(0));
-        buf.write(key("b"), WriteOp::Delete, 0, ts(0));
-        buf.write(key("c"), put("3"), 1, ts(0));
+        buf.write(key("a"), put("1"), 0, ts(0), Prior::Unknown);
+        buf.write(key("b"), WriteOp::Delete, 0, ts(0), Prior::Unknown);
+        buf.write(key("c"), put("3"), 1, ts(0), Prior::Unknown);
         let rows = buf.visible_range(&KeyRange::all(), Some(1));
         assert_eq!(
             rows,
@@ -260,22 +276,22 @@ mod tests {
     /// Assert rollback restores overwritten and removes newly written keys, across statements.
     fn rollback_restores_previous_state() {
         let mut buf = WriteBuffer::default();
-        buf.write(key("a"), put("1"), 0, ts(1));
+        buf.write(key("a"), put("1"), 0, ts(1), Prior::Unknown);
         let outer = buf.mark();
-        buf.write(key("a"), put("2"), 1, ts(2));
+        buf.write(key("a"), put("2"), 1, ts(2), Prior::Unknown);
         let inner = buf.mark();
-        buf.write(key("b"), put("3"), 2, ts(3));
+        buf.write(key("b"), put("3"), 2, ts(3), Prior::Unknown);
         buf.rollback_to(inner);
         assert_eq!(buf.visible(b"b", 9), None);
         assert_eq!(buf.visible(b"a", 9), Some(&put("2")));
-        buf.write(key("b"), put("4"), 2, ts(3));
+        buf.write(key("b"), put("4"), 2, ts(3), Prior::Unknown);
         assert_eq!(buf.bytes(), 4);
         buf.rollback_to(outer);
         assert_eq!(buf.visible(b"a", 9), Some(&put("1")));
         assert_eq!(buf.visible(b"b", 9), None);
         assert_eq!(buf.bytes(), 2, "only a=1 is left");
         buf.clear_undo();
-        buf.write(key("c"), put("5"), 3, ts(3));
+        buf.write(key("c"), put("5"), 3, ts(3), Prior::Unknown);
         assert!(buf.undo.is_empty());
     }
 }

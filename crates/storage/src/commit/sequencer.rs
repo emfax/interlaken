@@ -24,6 +24,7 @@
 //! already holds them, since they come first in the log. Every few thousand
 //! entries a compaction thread syncs and removes the applied entries.
 
+use crate::changes::{ChangeRetention, entries_from};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -264,6 +265,18 @@ impl State {
             return self.propose(accepted, next, started, conflicts);
         }
         let validated = Instant::now();
+        let changes = self.clock.changes();
+        let entries = if changes.retention() == ChangeRetention::Off {
+            Vec::new()
+        } else {
+            entries_from(accepted.iter().flat_map(|(ts, submission)| {
+                submission
+                    .request
+                    .writes
+                    .iter()
+                    .map(|w| (*ts, &w.key, w.op.value(), w.prior))
+            }))
+        };
         let written = self.engine.commit_group(
             next,
             accepted.iter().flat_map(|(ts, submission)| {
@@ -273,6 +286,7 @@ impl State {
                     .iter()
                     .map(|w| (*ts, &w.key[..], w.op.value().map(|v| &v[..])))
             }),
+            if changes.durable() { &entries } else { &[] },
             self.config.durability,
         );
         let write_time = validated.elapsed();
@@ -280,6 +294,7 @@ impl State {
             Ok(()) => {
                 let committed = accepted.len() as u64;
                 self.last = next;
+                self.clock.changes().record(&entries);
                 self.clock.publish(next);
                 for (ts, submission) in accepted {
                     let _ = submission.reply.send(Ok(ts));
@@ -327,6 +342,7 @@ impl State {
                         .map(|w| LogWrite {
                             key: w.key.clone(),
                             value: w.op.value().cloned(),
+                            prior: w.prior,
                         })
                         .collect()
                 })
@@ -378,8 +394,16 @@ fn apply(
     to_compact: &flume::Sender<u64>,
 ) {
     while let Ok(Logged { entry, replies }) = logged.recv() {
-        match engine.apply_entry(&entry) {
+        let changes = clock.changes();
+        let entries = if changes.retention() == ChangeRetention::Off {
+            Vec::new()
+        } else {
+            entry.changes()
+        };
+        let durable = if changes.durable() { &entries[..] } else { &[] };
+        match engine.apply_entry(&entry, durable) {
             Ok(()) => {
+                changes.record(&entries);
                 clock.publish(entry.last_ts());
                 for (ts, reply) in replies {
                     let _ = reply.send(Ok(ts));

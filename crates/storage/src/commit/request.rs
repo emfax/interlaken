@@ -8,7 +8,7 @@
 //!            write_count:u32 write*
 //! set     := key_count:u32 bytes* range_count:u32 (bound bound)*
 //! bound   := 0 | 1 bytes | 2 bytes          ; unbounded, included, excluded
-//! write   := bytes (0 | 1 bytes) snapshot:u64   ; delete, or put with a value
+//! write   := bytes tag:u8 bytes? snapshot:u64   ; as a log write's tag: a value follows a put
 //! bytes   := len:u32 byte*
 //! ```
 
@@ -16,6 +16,7 @@ use std::ops::Bound;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use super::log::Prior;
 use crate::scan::{Key, KeyRange};
 use crate::txn::{ReadSet, WriteOp};
 use crate::{Error, Result, Timestamp};
@@ -30,6 +31,8 @@ pub(crate) struct WriteIntent {
     /// Snapshot of the statement that first wrote the key. A commit after
     /// this timestamp that also wrote the key is a lost update.
     pub(crate) snapshot: Timestamp,
+    /// Whether the key held a row before the transaction (ADR-0040).
+    pub(crate) prior: Prior,
 }
 
 /// A transaction ready for validation: its snapshots, what it read and
@@ -165,10 +168,11 @@ impl CommitRequest {
         out.put_u32(u32::try_from(self.writes.len()).expect("write count fits u32"));
         for write in &self.writes {
             put_bytes(&mut out, &write.key);
+            let prior = write.prior.code() << 1;
             match &write.op {
-                WriteOp::Delete => out.put_u8(0),
+                WriteOp::Delete => out.put_u8(prior),
                 WriteOp::Put(value) => {
-                    out.put_u8(1);
+                    out.put_u8(prior | 1);
                     put_bytes(&mut out, value);
                 }
             }
@@ -192,13 +196,19 @@ impl CommitRequest {
         let mut writes = Vec::new();
         for _ in 0..get_u32(&mut buf)? {
             let key = get_bytes(&mut buf)?;
-            let op = match get_u8(&mut buf)? {
+            let tag = get_u8(&mut buf)?;
+            let prior = Prior::from_code(tag >> 1).ok_or_else(malformed)?;
+            let op = match tag & 1 {
                 0 => WriteOp::Delete,
-                1 => WriteOp::Put(get_bytes(&mut buf)?),
-                _ => return Err(malformed()),
+                _ => WriteOp::Put(get_bytes(&mut buf)?),
             };
             let snapshot = Timestamp::from_raw(get_u64(&mut buf)?);
-            writes.push(WriteIntent { key, op, snapshot });
+            writes.push(WriteIntent {
+                key,
+                op,
+                snapshot,
+                prior,
+            });
         }
         if buf.has_remaining() || writes.is_empty() {
             return Err(malformed());
@@ -238,11 +248,13 @@ mod tests {
                     key: Bytes::from_static(b"k"),
                     op: WriteOp::Put(Bytes::from_static(b"v")),
                     snapshot: Timestamp::from_raw(8),
+                    prior: Prior::Absent,
                 },
                 WriteIntent {
                     key: Bytes::from_static(b"d"),
                     op: WriteOp::Delete,
                     snapshot: Timestamp::from_raw(9),
+                    prior: Prior::Existed,
                 },
             ],
         };

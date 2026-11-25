@@ -93,6 +93,7 @@ mod tests {
             .commit_group(
                 Timestamp::from_raw(ts),
                 [(Timestamp::from_raw(ts), key, value)],
+                &[],
                 crate::Durability::Buffered,
             )
             .unwrap();

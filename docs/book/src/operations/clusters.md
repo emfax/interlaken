@@ -87,6 +87,7 @@ A member cut off from the majority can't commit or begin fresh transactions; bot
 
 - **`Freshness::Fresh`** (the default): linearizable, as described above. Serializable transactions stay strictly serializable across the cluster.
 - **`Freshness::Local`**: the member's applied state, with no request to the leader. It may lag by the replication delay, but it never goes backwards for a session and always includes the session's own commits. It applies to read-only transactions; read-write ones are always fresh.
+- **`Freshness::AtLeast(ts)`**: the member's applied state once it includes the commit at `ts`, waiting for it if necessary. A client that committed on another member passes that commit's timestamp to read its own write without a request to the leader (see [Change feeds and read-your-writes](../transactions/change-feeds.md)). It applies to read-only transactions.
 
 ## Durability
 

@@ -13,6 +13,7 @@ use super::meta::{
 };
 use super::snapshot::{self, Decoder, Event, ExportCursor};
 use super::stored::{StoredValue, decode_stored, encode_stored};
+use crate::changes::{ChangeEntry, durable_key};
 use crate::commit::LogEntry;
 use crate::encoding::{split_versioned_key, versioned_key};
 use crate::telemetry;
@@ -35,6 +36,10 @@ const META_KEYSPACE: &str = "meta";
 const LOG_KEYSPACE: &str = "raftlog";
 /// Name of the keyspace holding a replica's Raft log entries by index (ADR-0037).
 const REPLICA_LOG_KEYSPACE: &str = "replica_log";
+/// The keyspace of the durable change log (ADR-0040).
+const CHANGES_KEYSPACE: &str = "changes";
+/// The `meta` key of the durable change log's floor (ADR-0040).
+pub(super) const CHANGES_FLOOR_KEY: &[u8] = b"changes_floor";
 /// Name of the keyspace that held stored snapshots before data generations
 /// (ADR-0037 phase 4); removed on open.
 const OLD_SNAPSHOT_KEYSPACE: &str = "replica_snapshot";
@@ -60,6 +65,8 @@ pub struct Engine {
     meta: Keyspace,
     log: Keyspace,
     replica_log: Keyspace,
+    /// The durable change log, by commit timestamp (ADR-0040).
+    pub(super) changes: Keyspace,
     /// Memtable size for keyspaces created later, such as data generations.
     memtable_bytes: u64,
 }
@@ -201,6 +208,7 @@ impl Engine {
         let data = db.keyspace(&data_name(generation), create)?;
         let log = db.keyspace(LOG_KEYSPACE, create)?;
         let replica_log = db.keyspace(REPLICA_LOG_KEYSPACE, create)?;
+        let changes = db.keyspace(CHANGES_KEYSPACE, create)?;
         let engine = Self {
             db,
             data: Arc::new(RwLock::new(DataKeyspace {
@@ -210,6 +218,7 @@ impl Engine {
             meta,
             log,
             replica_log,
+            changes,
             memtable_bytes,
         };
 
@@ -279,10 +288,14 @@ impl Engine {
     /// group survives a process crash. Without a persist mode fjall leaves
     /// the batch in its in-process journal buffer, where a crash loses it:
     /// the F4 crash harness caught exactly that (ADR-0005).
+    ///
+    /// `changes` are written to the durable change log in the same batch
+    /// (ADR-0040); pass none unless the log is durable.
     pub(crate) fn commit_group<'a>(
         &self,
         last: Timestamp,
         writes: impl IntoIterator<Item = (Timestamp, &'a [u8], Option<&'a [u8]>)>,
+        changes: &[Arc<ChangeEntry>],
         durability: Durability,
     ) -> Result<()> {
         let mode = match durability {
@@ -294,7 +307,113 @@ impl Engine {
         for (ts, key, value) in writes {
             batch.insert(&data, versioned_key(key, ts), encode_stored(value));
         }
+        self.batch_changes(&mut batch, changes);
         batch.insert(&self.meta, LAST_COMMIT_TS_KEY, encode_timestamp(last));
+        batch.commit()?;
+        Ok(())
+    }
+
+    /// Add `changes` to `batch` in the durable change log.
+    fn batch_changes(&self, batch: &mut fjall::OwnedWriteBatch, changes: &[Arc<ChangeEntry>]) {
+        for entry in changes {
+            batch.insert(&self.changes, durable_key(entry.ts), entry.encode());
+        }
+    }
+
+    /// Add to `batch` the removal of every durable change, and a floor of `last`.
+    fn batch_reset_changes(
+        &self,
+        batch: &mut fjall::OwnedWriteBatch,
+        last: Timestamp,
+    ) -> Result<()> {
+        for item in self.changes.iter() {
+            batch.remove(&self.changes, item.key()?);
+        }
+        batch.insert(&self.meta, CHANGES_FLOOR_KEY, encode_timestamp(last));
+        Ok(())
+    }
+
+    /// Open the change log keeping `retention`, given the last commit
+    /// (ADR-0040).
+    ///
+    /// A durable log reloads its index from the `changes` keyspace, with a
+    /// floor first set to the last commit when the log is new. Any other
+    /// log starts empty, and removes durable changes a previous open left,
+    /// so a later durable open can't mistake them for a complete history.
+    pub(crate) fn open_changes(
+        &self,
+        retention: crate::changes::ChangeRetention,
+        last: Timestamp,
+    ) -> Result<crate::changes::ChangeLog> {
+        use crate::changes::{ChangeLog, ChangeRetention, decode_durable_key};
+        let stored_floor = self
+            .meta
+            .get(CHANGES_FLOOR_KEY)?
+            .map(|v| decode_timestamp(&v, "changes_floor is not 8 bytes"))
+            .transpose()?;
+        if !matches!(retention, ChangeRetention::Durable { .. }) {
+            if stored_floor.is_some() {
+                let mut batch = self.db.batch();
+                for item in self.changes.iter() {
+                    batch.remove(&self.changes, item.key()?);
+                }
+                batch.remove(&self.meta, CHANGES_FLOOR_KEY);
+                batch.commit()?;
+            }
+            return Ok(ChangeLog::new(retention, last, last, Vec::new()));
+        }
+        let Some(floor) = stored_floor else {
+            let mut batch = self.db.batch().durability(Some(PersistMode::SyncAll));
+            batch.insert(&self.meta, CHANGES_FLOOR_KEY, encode_timestamp(last));
+            batch.commit()?;
+            return Ok(ChangeLog::new(retention, last, last, Vec::new()));
+        };
+        let mut index = Vec::new();
+        for item in self.changes.iter() {
+            let (key, value) = item.into_inner()?;
+            let ts = decode_durable_key(&key)?;
+            let micros = value
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_be_bytes)
+                .ok_or(Error::CorruptMeta("malformed change log entry"))?;
+            index.push((ts, (key.len() + value.len()) as u64, micros));
+        }
+        Ok(ChangeLog::new(retention, last, floor, index))
+    }
+
+    /// Return up to `max` durable change entries after `after` and at or
+    /// before `upto`, in commit order (ADR-0040).
+    pub(crate) fn read_changes(
+        &self,
+        after: Timestamp,
+        upto: Timestamp,
+        max: usize,
+    ) -> Result<Vec<Arc<ChangeEntry>>> {
+        let Some(start) = after.into_raw().checked_add(1) else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for item in self
+            .changes
+            .range(start.to_be_bytes()..=upto.into_raw().to_be_bytes())
+            .take(max)
+        {
+            let (key, value) = item.into_inner()?;
+            let ts = crate::changes::decode_durable_key(&key)?;
+            out.push(Arc::new(ChangeEntry::decode(ts, &value)?));
+        }
+        Ok(out)
+    }
+
+    /// Remove the durable change entries up to and including `through`,
+    /// and raise the floor to it, in one batch (ADR-0040).
+    pub(crate) fn trim_changes(&self, through: Timestamp) -> Result<()> {
+        let mut batch = self.db.batch();
+        for item in self.changes.range(..=through.into_raw().to_be_bytes()) {
+            batch.remove(&self.changes, item.key()?);
+        }
+        batch.insert(&self.meta, CHANGES_FLOOR_KEY, encode_timestamp(through));
         batch.commit()?;
         Ok(())
     }
@@ -333,10 +452,12 @@ impl Engine {
     /// `last_commit_ts` and `last_applied_index` in `meta`, in one batch.
     ///
     /// The batch isn't synced: the log entry is the durable record, and
-    /// replaying it on open restores anything a crash loses.
-    pub(crate) fn apply_entry(&self, entry: &LogEntry) -> Result<()> {
+    /// replaying it on open restores anything a crash loses. `changes` are
+    /// written to the durable change log in the same batch (ADR-0040).
+    pub(crate) fn apply_entry(&self, entry: &LogEntry, changes: &[Arc<ChangeEntry>]) -> Result<()> {
         let data = self.data();
         let mut batch = self.db.batch();
+        self.batch_changes(&mut batch, changes);
         for (ts, write) in entry.versions() {
             batch.insert(
                 &data,
@@ -368,7 +489,10 @@ impl Engine {
     ///
     /// Returns [`Error::CorruptMeta`] for a malformed entry or a gap in the
     /// log, or [`Error::Fjall`] if a read or write fails.
-    pub(crate) fn replay_log(&self) -> Result<(Timestamp, u64)> {
+    ///
+    /// With `durable_changes`, each entry's changes are written to the
+    /// durable change log as it is applied (ADR-0040).
+    pub(crate) fn replay_log(&self, durable_changes: bool) -> Result<(Timestamp, u64)> {
         let applied = self.last_applied_index()?;
         let mut last_index = applied;
         for item in self.log.range((applied + 1).to_be_bytes()..) {
@@ -376,7 +500,12 @@ impl Engine {
             if entry.index != last_index + 1 {
                 return Err(Error::CorruptMeta("gap in the commit log"));
             }
-            self.apply_entry(&entry)?;
+            let changes = if durable_changes {
+                entry.changes()
+            } else {
+                Vec::new()
+            };
+            self.apply_entry(&entry, &changes)?;
             last_index = entry.index;
         }
         // The highest index ever logged, so new entries never reuse one.
@@ -409,14 +538,19 @@ impl Engine {
     /// Write versions to `data`, with `last_commit_ts` set to `last` and the
     /// `meta` entries given, in one unsynced batch: a replica applying a
     /// committed Raft entry, whose log is the durable record (ADR-0037).
+    ///
+    /// `changes` are written to the durable change log in the same batch
+    /// (ADR-0040).
     pub(crate) fn apply_versions<'a>(
         &self,
         writes: impl IntoIterator<Item = (Timestamp, &'a [u8], Option<&'a [u8]>)>,
         last: Option<Timestamp>,
         meta: &[(Vec<u8>, Vec<u8>)],
+        changes: &[Arc<ChangeEntry>],
     ) -> Result<()> {
         let data = self.data();
         let mut batch = self.db.batch();
+        self.batch_changes(&mut batch, changes);
         for (ts, key, value) in writes {
             batch.insert(&data, versioned_key(key, ts), encode_stored(value));
         }
@@ -731,6 +865,9 @@ impl Engine {
         for (key, value) in &staged.meta {
             batch.insert(&self.meta, key.as_slice(), value.as_slice());
         }
+        // The commits the snapshot covers were never applied here, so the
+        // durable change log restarts at its last commit (ADR-0040).
+        self.batch_reset_changes(&mut batch, staged.last)?;
         batch.commit()?;
         let old = std::mem::replace(
             &mut *self.data.write().unwrap_or_else(PoisonError::into_inner),
@@ -940,6 +1077,7 @@ mod tests {
                     vec![LogWrite {
                         key: bytes::Bytes::copy_from_slice(k.as_bytes()),
                         value: v.map(|v| bytes::Bytes::copy_from_slice(v.as_bytes())),
+                        prior: crate::commit::Prior::Unknown,
                     }]
                 })
                 .collect(),
@@ -966,7 +1104,7 @@ mod tests {
                 .append_log(&entry(1, 1, &[("a", Some("1"))]), Durability::Sync)
                 .unwrap();
             engine
-                .apply_entry(&entry(1, 1, &[("a", Some("1"))]))
+                .apply_entry(&entry(1, 1, &[("a", Some("1"))]), &[])
                 .unwrap();
             // Committed to the log; the process stops before applying them.
             engine
@@ -981,7 +1119,10 @@ mod tests {
             assert_eq!(engine.last_applied_index().unwrap(), 1);
         }
         let engine = Engine::open(dir.path()).unwrap();
-        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(4), 3));
+        assert_eq!(
+            engine.replay_log(false).unwrap(),
+            (Timestamp::from_raw(4), 3)
+        );
         assert_eq!(engine.last_applied_index().unwrap(), 3);
         for (key, ts, value) in [
             ("b", 2, Some(&b"2"[..])),
@@ -996,7 +1137,10 @@ mod tests {
             assert_eq!(stored, encode_stored(value), "{key}@{ts}");
         }
         // Replaying again changes nothing.
-        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(4), 3));
+        assert_eq!(
+            engine.replay_log(false).unwrap(),
+            (Timestamp::from_raw(4), 3)
+        );
     }
 
     #[test]
@@ -1009,7 +1153,7 @@ mod tests {
             for i in 1..=5 {
                 let e = entry(i, i, &[("k", Some("v"))]);
                 engine.append_log(&e, Durability::Sync).unwrap();
-                engine.apply_entry(&e).unwrap();
+                engine.apply_entry(&e, &[]).unwrap();
             }
             engine.compact_log(3).unwrap();
             assert_eq!(logged(&engine), [4, 5]);
@@ -1018,7 +1162,10 @@ mod tests {
         }
         let engine = Engine::open(dir.path()).unwrap();
         // Applied index 5 is kept in `meta`, so new entries continue after it.
-        assert_eq!(engine.replay_log().unwrap(), (Timestamp::from_raw(5), 5));
+        assert_eq!(
+            engine.replay_log(false).unwrap(),
+            (Timestamp::from_raw(5), 5)
+        );
     }
 
     #[test]
@@ -1030,7 +1177,7 @@ mod tests {
             .append_log(&entry(2, 1, &[("k", Some("v"))]), Durability::Sync)
             .unwrap();
         assert!(matches!(
-            engine.replay_log(),
+            engine.replay_log(false),
             Err(Error::CorruptMeta("gap in the commit log"))
         ));
     }
@@ -1096,7 +1243,7 @@ mod tests {
         ];
         for (at, key, value) in writes {
             engine
-                .apply_versions([(at, key, value)], Some(at), &[])
+                .apply_versions([(at, key, value)], Some(at), &[], &[])
                 .unwrap();
         }
         engine
@@ -1110,7 +1257,12 @@ mod tests {
         let other_dir = tempfile::tempdir().unwrap();
         let other = Engine::open(other_dir.path()).unwrap();
         other
-            .apply_versions([(ts(1), &b"stale"[..], Some(&b"z"[..]))], Some(ts(1)), &[])
+            .apply_versions(
+                [(ts(1), &b"stale"[..], Some(&b"z"[..]))],
+                Some(ts(1)),
+                &[],
+                &[],
+            )
             .unwrap();
         assert_eq!(other.import(&snapshot).unwrap(), ts(5));
         let versions: Vec<(Vec<u8>, u64, Vec<u8>)> = other

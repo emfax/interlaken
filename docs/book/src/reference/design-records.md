@@ -73,7 +73,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0031 | Engine sessions and the storage-backed catalog | implemented |
 | 0035 | Enforced foreign keys | implemented |
 | 0039 | Telemetry and cost attribution | implemented |
-| 0040 | Change feed and commit visibility | proposal |
+| 0040 | Change feed and commit visibility | implemented |
 | 0042 | Namespaces and scoped policies | proposal |
 | 0043 | DDL as text | proposal |
 | 0044 | File system | proposal |

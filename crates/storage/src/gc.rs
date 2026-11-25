@@ -125,7 +125,7 @@ impl GcContext {
 
     /// Run one pass from an async caller, within its span.
     async fn pass_async(&self) -> Result<GcReport> {
-        let watermark = self.clock.horizon();
+        let watermark = self.clock.gc_horizon();
         let mut report = GcReport {
             watermark,
             ..GcReport::default()
@@ -148,6 +148,12 @@ impl GcContext {
         self.pool
             .run_low(move |engine| engine.set_gc_watermark(watermark))
             .await??;
+        if let Some(through) = self.clock.changes().durable_trim(now_micros()) {
+            self.pool
+                .run_low(move |engine| engine.trim_changes(through))
+                .await??;
+            self.clock.changes().trimmed(through);
+        }
         self.counters.record(&report);
         Ok(report)
     }
@@ -170,7 +176,7 @@ impl GcContext {
 
     /// Run one pass from the GC thread, within its span.
     fn pass_blocking_inner(&self, stop: &flume::Receiver<()>) -> Result<Option<GcReport>> {
-        let watermark = self.clock.horizon();
+        let watermark = self.clock.gc_horizon();
         let mut report = GcReport {
             watermark,
             ..GcReport::default()
@@ -192,6 +198,11 @@ impl GcContext {
         }
         self.pool
             .run_low_blocking(move |engine| engine.set_gc_watermark(watermark))??;
+        if let Some(through) = self.clock.changes().durable_trim(now_micros()) {
+            self.pool
+                .run_low_blocking(move |engine| engine.trim_changes(through))??;
+            self.clock.changes().trimmed(through);
+        }
         self.counters.record(&report);
         Ok(Some(report))
     }
@@ -252,4 +263,12 @@ impl Drop for GcTask {
             let _ = thread.join();
         }
     }
+}
+
+/// Return the current time in microseconds since the Unix epoch, which
+/// change log retention compares commit times with (ADR-0040).
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
 }

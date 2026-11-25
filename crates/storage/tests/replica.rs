@@ -363,3 +363,39 @@ async fn snapshots_stream_in_chunks() {
     );
     assert_eq!(get(&other_storage, "k00").await, Some(Bytes::new()));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert installing a snapshot raises the change log's floor to its last
+/// commit, so a reader positioned before it gets a gap (ADR-0040).
+async fn snapshot_installs_open_a_change_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (storage, replica, captured) = open(dir.path());
+    let r = request(&storage, &captured, "k", "v").await;
+    let (batch, _) = replica.proposer().propose(&[r]);
+    replica.apply(batch, Vec::new()).await.unwrap();
+    let snapshot = replica
+        .capture()
+        .await
+        .unwrap()
+        .export(Vec::new())
+        .await
+        .unwrap();
+
+    let other_dir = tempfile::tempdir().unwrap();
+    let (other_storage, other, _) = open(other_dir.path());
+    let before = other_storage.visible_ts();
+    other_storage.read_changes(before, 10).await.unwrap();
+    other.import(snapshot).await.unwrap();
+    assert!(matches!(
+        other_storage.read_changes(before, 10).await,
+        Err(Error::ChangeGap { .. })
+    ));
+    assert_eq!(other_storage.change_floor(), other.visible_ts());
+    assert!(
+        other_storage
+            .read_changes(other.visible_ts(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

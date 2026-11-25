@@ -54,13 +54,6 @@ Entry format:
 - **Size:** About 2–4 days, depending on the conditional-branch design.
 - **Status:** open
 
-### prover-subscriptions: Provers that watch replicated proposals
-- **Origin:** ADR-0030 phase 2
-- **Why:** `prove_pending` must be called. With replication, prover nodes should run it whenever a proposal arrives.
-- **When:** With Raft.
-- **Size:** About 1–2 days once change notifications exist.
-- **Status:** open
-
 ### interp-text-formats: Widen the reference interpreter's text input formats
 - **Origin:** ADR-0021 phase 3, I3
 - **Why:** Casts from text accept only ISO dates and timestamps, hex `bytea` and a basic set of booleans, and `jsonb` is stored unvalidated. Postgres accepts more. Since E2 the executor's cast kernels call the interpreter's `cast_value` for text, so widening it widens both at once.
@@ -104,6 +97,13 @@ Entry format:
 - **Status:** open
 
 ## Done
+
+### prover-subscriptions: Provers that watch replicated proposals
+- **Origin:** ADR-0030 phase 2
+- **Why:** `prove_pending` must be called. With replication, prover nodes should run it whenever a proposal arrives.
+- **When:** With Raft.
+- **Size:** About 1–2 days once change notifications exist.
+- **Status:** done (ADR-0040 phase 3: `watch_proposals` follows the proposals table's change feed and proves after each batch; without a change log it polls)
 
 ### array-element-nullability: Convert between array element nullabilities
 - **Origin:** writing the book's types chapter

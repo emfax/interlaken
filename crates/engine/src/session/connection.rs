@@ -12,7 +12,7 @@ use interlaken_ir::catalog::InMemoryCatalog;
 use interlaken_ir::interp::{Datum, ExecOptions, check_params};
 use interlaken_ir::security::{EntityUid, SecurityContext};
 use interlaken_ir::{DataType, Plan, QualifiedName, SchemaVersion};
-use interlaken_storage::{SavepointId, Storage, Txn, TxnOptions};
+use interlaken_storage::{Freshness, SavepointId, Storage, Txn, TxnOptions};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
@@ -299,7 +299,35 @@ impl Session {
         if self.txn.is_some() {
             return Err(EngineError::TransactionInProgress);
         }
-        let txn = self.engine.inner.storage.begin(options).await?;
+        let begun = self.engine.inner.storage.begin(options);
+        let txn = match (options.freshness, self.statement_timeout) {
+            // Waiting for a commit is bounded by the statement timeout.
+            (Freshness::AtLeast(ts), Some(timeout)) => tokio::time::timeout(timeout, begun)
+                .await
+                .map_err(|_| EngineError::NotVisible(ts))??,
+            _ => begun.await?,
+        };
+        self.install(txn);
+        Ok(())
+    }
+
+    /// Open a transaction on `txn`, which storage has begun: for reading at
+    /// a past snapshot (ADR-0040).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::TransactionInProgress`] if one is open.
+    pub(crate) async fn begin_on(&mut self, txn: Txn) -> Result<(), EngineError> {
+        self.settle().await?;
+        if self.txn.is_some() {
+            return Err(EngineError::TransactionInProgress);
+        }
+        self.install(txn);
+        Ok(())
+    }
+
+    /// Make `txn` the open transaction.
+    fn install(&mut self, txn: Txn) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX));
@@ -321,7 +349,6 @@ impl Session {
             policies_dirty: false,
         });
         self.usage = Usage::default();
-        Ok(())
     }
 
     /// Commit the open transaction, or roll it back if it is aborted.
@@ -331,11 +358,69 @@ impl Session {
     /// Returns [`EngineError::NoTransaction`] if none is open, or the
     /// commit's error (a serialization failure is SQLSTATE `40001`; the
     /// caller decides whether to retry).
-    pub async fn commit(&mut self) -> Result<(), EngineError> {
+    ///
+    /// On success, returns the commit's timestamp (ADR-0040), or `None` if
+    /// the transaction wrote nothing. Another member of the cluster can
+    /// wait for it with [`Engine::wait_visible`](crate::Engine::wait_visible).
+    pub async fn commit(&mut self) -> Result<Option<crate::CommitTs>, EngineError> {
         self.settle().await?;
         let open = self.txn.take().ok_or(EngineError::NoTransaction)?;
-        open.exec.commit().await?;
-        Ok(())
+        Ok(open.exec.commit().await?)
+    }
+
+    /// Return the engine the session belongs to.
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    /// Follow `table`'s committed changes as this session's principal may
+    /// see them, after `from`, or after the last visible commit if `from`
+    /// is `None` (ADR-0040).
+    ///
+    /// Each batch is one committed transaction's changes to rows the
+    /// principal can read before or after it, read through this session's
+    /// policies with the policies and entities of each commit: a row that
+    /// becomes readable arrives as an insert, and one that stops being
+    /// readable leaves as a delete. Rows carry the session's column masks.
+    /// The subscription runs in a session of its own, with this session's
+    /// request context, and doesn't use this session's transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns SQLSTATE `42P01` if the table doesn't exist, or `55000` if
+    /// `from` is older than the change log or version GC reaches back.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn run(session: &interlaken_engine::Session) -> Result<(), interlaken_engine::EngineError> {
+    /// let mut subscription = session.subscribe("docs", None).await?;
+    /// while let Some(batch) = subscription.next().await {
+    ///     for change in batch?.changes {
+    ///         println!("{:?} {:?}", change.kind, change.key);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe(
+        &self,
+        table: &str,
+        from: Option<crate::CommitTs>,
+    ) -> Result<crate::Subscription, EngineError> {
+        let session = self.engine.session(self.context.clone());
+        crate::Subscription::open(session, table, from).await
+    }
+
+    /// Return the snapshot the open transaction reads at, or `None` if no
+    /// transaction is open (ADR-0040). Under READ COMMITTED it is the
+    /// current statement's.
+    ///
+    /// Reading tables in a read-only transaction and then following a change
+    /// feed from its snapshot sees every change exactly once.
+    #[must_use]
+    pub fn snapshot_ts(&self) -> Option<crate::CommitTs> {
+        self.txn.as_ref().map(|open| open.exec.snapshot())
     }
 
     /// Roll the open transaction back.
@@ -449,7 +534,7 @@ impl Session {
             return result;
         }
         match result {
-            Ok(value) => self.commit().await.map(|()| value),
+            Ok(value) => self.commit().await.map(|_| value),
             Err(e) => {
                 self.rollback()?;
                 Err(e)
@@ -744,7 +829,7 @@ impl Session {
         &mut self,
         statement: Statement,
         implicit: bool,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Option<crate::CommitTs>, EngineError> {
         let released = self.open().and_then(|open| {
             open.exec
                 .release_statement(statement)
@@ -757,9 +842,9 @@ impl Session {
             return Err(e);
         }
         if implicit {
-            self.commit().await?;
+            return self.commit().await;
         }
-        Ok(())
+        Ok(None)
     }
 
     /// End a streamed statement that failed: undo its writes and abort the

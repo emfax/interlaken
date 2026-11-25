@@ -7,8 +7,10 @@ mod request;
 mod sequencer;
 mod stats;
 
+pub use clock::WaitVisible;
 pub(crate) use clock::{CommitClock, SnapshotPin};
 pub(crate) use history::CommitHistory;
+pub use log::Prior;
 pub(crate) use log::{LogEntry, LogWrite};
 pub use request::CommitRequest;
 pub(crate) use request::WriteIntent;

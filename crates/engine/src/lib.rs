@@ -21,18 +21,26 @@ mod attribution;
 mod authz;
 pub mod catalog;
 mod error;
+mod feed;
 pub mod policy;
 pub mod privileges;
 mod session;
 mod sqlstate;
+mod subscription;
 mod telemetry;
 
 pub use attribution::Attribution;
 pub use authz::{EntityData, LoadedEntities, load_entities, load_principal};
 pub use error::EngineError;
+pub use feed::{Change, ChangeBatch, ChangeFeed, ChangeFilter, ChangeKind};
+
+/// A commit timestamp (ADR-0040): ordered, the same on every member of a
+/// cluster, and written as text with `to_string` and read back with `parse`.
+pub use interlaken_storage::Timestamp as CommitTs;
 pub use privileges::{Privilege, Privileges};
 pub use session::{Engine, EngineOptions, QueryResult, QueryStream, Session, Usage};
 pub use sqlstate::{SQLSTATES, SqlState};
+pub use subscription::Subscription;
 pub use telemetry::{METRICS, describe_metrics};
 
 /// The README's examples, compiled and run as doc tests so they stay correct.
@@ -56,6 +64,10 @@ mod book {
     /// The IR text language: parameters and prepared plans.
     #[doc = include_str!("../../../docs/book/src/ir/parameters.md")]
     struct Parameters;
+
+    /// Transactions: change feeds and read-your-writes.
+    #[doc = include_str!("../../../docs/book/src/transactions/change-feeds.md")]
+    struct ChangeFeeds;
 
     /// Data definition: tables.
     #[doc = include_str!("../../../docs/book/src/ddl/tables.md")]

@@ -200,12 +200,12 @@ pub const SQLSTATES: &[SqlState] = &[
     state(
         "55000",
         "object_not_in_prerequisite_state",
-        "A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; or a revocation would remove the last administrator.",
+        "A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; a revocation would remove the last administrator; or a change feed's position is older than the change log keeps, or the database keeps none.",
     ),
     state(
         "57014",
         "query_canceled",
-        "The statement ran past its `statement_timeout`.",
+        "The statement ran past its `statement_timeout`, or a wait for a commit to become visible on this node timed out.",
     ),
     state(
         "57P03",

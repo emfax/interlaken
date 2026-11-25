@@ -1,12 +1,12 @@
 ---
 id: 0040
 title: Change Feed and Commit Visibility
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, engine, replication]
 feature-flag:
 created: 2026-11-25
-accepted:
-implemented:
+accepted: 2026-11-25
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,10 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Implemented, in four phases. Each phase's *As implemented* notes record where the result differs from this design, chiefly:
+- `CommitTs` is storage's `Timestamp`, with a decimal text form;
+- `ChangeRetention::Off` makes feeds unavailable rather than live-only;
+- subscriptions read rows at the commit's own snapshot, with that moment's policies, rather than with current policies.
 
 ## Summary
 
@@ -194,6 +197,8 @@ Decisions are made with the policies and entities current when each change is de
 - **Subscriptions:** a principal receives only the rows, columns and deletes it may read.
 - **Cost:** ADR-0039's instrumentation-cost test, run with `Memory` and `Durable`, reports the commit throughput each costs.
 
+As implemented, the power-loss case with `Durable`, the simulation tests with feeds, and the cost test aren't built yet: the cluster test checks identical batches across a leader change, and the cost was measured once by hand (phase 2's notes).
+
 ## Implementation Phases
 
 ### Phase 1: timestamps and waiting
@@ -202,11 +207,27 @@ Decisions are made with the policies and entities current when each change is de
 - `Session::snapshot_ts()`.
 - The `visible_ts` watch, `Engine::visible_ts`, `Engine::wait_visible` and `Freshness::AtLeast`.
 
+#### As implemented (phase 1)
+
+- **`CommitTs` is an alias** for storage's `Timestamp` (`interlaken_engine::CommitTs`), not a wrapper, so `Freshness::AtLeast` in storage's `TxnOptions` takes it directly. Its text form is the decimal value `Display` already wrote, parsed back by a new `FromStr`; base 32 would have changed `Display` for no gain.
+- **The `visible_ts` watch** is a small waiter registry in `CommitClock`, not a `tokio::sync::watch`: the storage crate doesn't depend on Tokio. `publish` stores the new value under the registry's lock and wakes the waiters it satisfies, so a waiter that checked the old value is always woken. `FjallStorage::wait_visible(ts)` and `wait_after(ts)` return its future; `Engine::wait_visible` adds the timeout.
+- **`Freshness::AtLeast`** applies to read-only transactions, as `Local` does; read-write ones stay fresh, which also includes every acknowledged commit. `Session::begin` bounds the wait with the session's statement timeout, if one is set, failing with `NotVisible` (`57014`).
+- **Snapshots:** `Session::snapshot_ts()` returns the open transaction's snapshot, under READ COMMITTED the current statement's.
+
 ### Phase 2: the change log
 
 - `ChangeRetention`, the in-memory log, the `changes` keyspace and trimming.
 - Insert and update marked in `WriteOp` and the log entry format.
 - Recording from the sequencer, the commit log and replica apply; floors on snapshot install.
+
+#### As implemented (phase 2)
+
+- **Recording:** the change log lives in `CommitClock` beside the waiters. Every path records its entries before publishing their timestamps: the sequencer's group commit, the commit log's apply thread and a replica's apply. Index entries, and keys outside the row layout, are left out when the entry is built.
+- **Prior state, not a flag on `Put`:** the write buffer records, from each key's first write in a transaction, whether the key held a row before (`Prior::{Existed, Absent, Unknown}`); the row layer supplies it through `Txn::put_row` and `delete_row`. Later writes keep the first one's answer, so a delete then insert of one key is an update, and an insert then delete is no change. Raw `put` and `delete` record `Unknown`. The commit request and log entry encodings carry it in the write tag's next two bits; entries written before read as `Unknown`.
+- **`Off` disables feeds:** with no log, `read_changes` fails with `ChangesUnavailable` (`55000`). A live-only mode would need a buffer anyway, which is what `Memory` is.
+- **Durable entries** are written in the same fjall batch as the commit on all three paths, including replaying the commit log on open. Their keys are commit timestamps; values hold the commit time for age-based trimming. The floor is stored in `meta` (`changes_floor`), and the index of entry sizes and times is rebuilt from the keyspace on open. An open that doesn't keep a durable log removes one a previous open left, so a later durable open can't see a hole in it. The memory part also caches recent durable entries, up to 64 MiB.
+- **Snapshot installs** remove durable entries and set the floor in the batch that switches generations, then reset the memory part before publishing.
+- **Cost**, measured on 32 concurrent writers of one 100-byte row each with buffered durability, three rounds: the default `Memory` log is within noise of `Off` (about 2% either way); `Durable` costs about 25% of commit throughput. The instrumentation-cost test doesn't cover it yet.
 
 ### Phase 3: the feed
 
@@ -214,9 +235,24 @@ Decisions are made with the policies and entities current when each change is de
 - The prover on the feed.
 - The book: a chapter on change feeds and read-your-writes.
 
+#### As implemented (phase 3)
+
+- **`Engine::changes` is async,** since it resolves table names in a read-only transaction. A feed reads `PAGE` (256) entries at a time and waits with `wait_after` when it has caught up.
+- **Decoding** uses storage's catalog (`catalog::tables`), not the engine's, since a change needs only the stored definition. Writes to storage's system tables (IDs below 100) mark a catalog change: the feed forgets its definitions and checks that each filtered name still has the ID it had, ending with `TableDropped` (`42P01`) otherwise. A system table's writes sort first in an entry, so a column added in the same transaction is known before the rows that use it are decoded.
+- **`ChangeFilter::all()`** leaves out tables named `engine_` or `sys_`; naming one explicitly follows it, which is how the prover follows `engine_policy_proposals`.
+- **The prover** follows that table with `keys_only`, proving once when its feed opens and after each batch. A gap reopens the feed; with no change log it falls back to checking `visible_ts` every `poll`.
+- **Errors end the feed:** after one, `next()` returns `None`.
+
 ### Phase 4: session subscriptions
 
 - `Session::subscribe` with privileges, row and column policies, and deletes checked against the old row.
+
+#### As implemented (phase 4)
+
+- **Two reads per commit instead of `authorize`:** for each batch, the subscription reads the changed keys through the session's own secured query, once at the snapshot just before the commit (`FjallStorage::begin_before`) and once at the commit (`begin_at`), and compares: visible after and not before is an insert, both an update, before only a delete. Row policies, column policies, masks and entity paths all apply exactly as in queries, and a principal sees rows arrive and leave as their access changes, not only as they're inserted and deleted. `PolicyProvider::authorize` isn't used on the engine's read path, and would have needed every entity a policy reaches loaded up front.
+- **Policies of the commit, not current ones:** each read uses the snapshot's own policies and entities, which is more consistent than the design's current policies, and makes a policy change apply to later commits only.
+- **Old rows come from MVCC,** kept by a `HistoryPin` at the subscription's position: a pin that doesn't expire, moved up after each batch. The clock's *GC floor* is the newest watermark any GC pass used; a snapshot older than it can't be pinned, so `subscribe` fails with `55000` if `from` is older. A pin holds back GC only for versions newer than it, so an idle subscription holds nothing back.
+- **No separate privilege:** what a principal can read is decided by policies alone, as for queries. A denied column without a mask fails the subscription with `42501`, as a query reading it would.
 
 ## Consequences
 

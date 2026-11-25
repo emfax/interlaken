@@ -80,7 +80,7 @@ pub async fn insert(txn: &Txn, table: &TableDef, row: Row) -> Result<()> {
         return Err(unique_violation(index));
     }
 
-    txn.put(key, encoded)?;
+    txn.put_row(key, encoded, false)?;
     for (_, entry) in entries {
         txn.put(entry.key, entry.value)?;
     }
@@ -136,8 +136,9 @@ pub async fn update(txn: &Txn, table: &TableDef, pk: &[Datum], row: Row) -> Resu
         return Err(unique_violation(index));
     }
 
-    if new_key != old_key {
-        txn.delete(old_key)?;
+    let moved = new_key != old_key;
+    if moved {
+        txn.delete_row(old_key)?;
     }
     for (old, (_, new)) in changed {
         if old.key != new.key {
@@ -145,7 +146,8 @@ pub async fn update(txn: &Txn, table: &TableDef, pk: &[Datum], row: Row) -> Resu
         }
         txn.put(new.key.clone(), new.value.clone())?;
     }
-    txn.put(new_key, encoded)?;
+    // A changed primary key moves the row to a key that held none.
+    txn.put_row(new_key, encoded, !moved)?;
     Ok(true)
 }
 
@@ -166,7 +168,7 @@ pub async fn delete(txn: &Txn, table: &TableDef, pk: &[Datum]) -> Result<bool> {
     for (_, entry) in index_entries(table, &old)? {
         txn.delete(entry.key)?;
     }
-    txn.delete(key)?;
+    txn.delete_row(key)?;
     Ok(true)
 }
 

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use arrow_array::RecordBatch;
 use interlaken_ir::catalog::Catalog;
 use interlaken_ir::interp::{Datum, ExecOptions};
-use interlaken_storage::{SavepointId, Txn};
+use interlaken_storage::{SavepointId, Timestamp, Txn};
 
 use crate::error::ExecError;
 use crate::exec::{ExecContext, collect};
@@ -296,13 +296,22 @@ impl Transaction {
     /// Returns [`ExecError::TransactionAborted`] after rolling back an aborted
     /// transaction, or the storage error of a failed commit (a serialization
     /// failure is SQLSTATE `40001`; the caller decides whether to retry).
-    pub async fn commit(self) -> Result<(), ExecError> {
+    ///
+    /// On success, returns the commit timestamp, or `None` if the
+    /// transaction wrote nothing.
+    pub async fn commit(self) -> Result<Option<Timestamp>, ExecError> {
         if self.aborted {
             self.txn.abort();
             return Err(ExecError::TransactionAborted);
         }
-        self.txn.commit().await?;
-        Ok(())
+        Ok(self.txn.commit().await?.commit_ts)
+    }
+
+    /// Return the snapshot timestamp the transaction reads at; under READ
+    /// COMMITTED, the current statement's.
+    #[must_use]
+    pub fn snapshot(&self) -> Timestamp {
+        self.txn.snapshot()
     }
 
     /// Roll the whole transaction back.

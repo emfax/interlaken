@@ -193,6 +193,8 @@ pub struct QueryStream<'s> {
     rows_returned: u64,
     /// The statement's usage, once it has ended.
     usage: Option<Usage>,
+    /// The implicit transaction's commit timestamp, once it has committed.
+    commit_ts: Option<crate::CommitTs>,
 }
 
 impl<'s> QueryStream<'s> {
@@ -221,6 +223,7 @@ impl<'s> QueryStream<'s> {
             kind: run.kind,
             rows_returned: 0,
             usage: None,
+            commit_ts: None,
         }
     }
 
@@ -229,6 +232,14 @@ impl<'s> QueryStream<'s> {
     #[must_use]
     pub fn usage(&self) -> Option<Usage> {
         self.usage
+    }
+
+    /// Return the commit timestamp of a statement that ran in its own
+    /// (implicit) transaction and wrote something, once it has ended
+    /// (ADR-0040); `None` otherwise.
+    #[must_use]
+    pub fn commit_ts(&self) -> Option<crate::CommitTs> {
+        self.commit_ts
     }
 
     /// End the statement's accounting: compute its usage, record its
@@ -334,7 +345,8 @@ impl<'s> QueryStream<'s> {
                     .finish_statement(statement, self.implicit)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(commit_ts) => {
+                        self.commit_ts = commit_ts;
                         self.account(Outcome::Ok, written, None);
                         None
                     }
@@ -375,6 +387,7 @@ impl<'s> QueryStream<'s> {
             types: std::mem::take(&mut self.types),
             batches,
             usage: self.usage.unwrap_or_default(),
+            commit_ts: self.commit_ts,
         })
     }
 }

@@ -41,7 +41,7 @@ async fn transfer(session: &mut Session) -> Result<(), EngineError> {
                 }
                 // Retry from the start, with a fresh snapshot.
             }
-            other => return other,
+            other => return other.map(|_commit_ts| ()),
         }
     }
 }
