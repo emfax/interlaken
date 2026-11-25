@@ -8,8 +8,9 @@ use interlaken_storage::encoding::Datum;
 use interlaken_storage::rows::{self, RowScan};
 use interlaken_storage::{Storage, Txn, TxnOptions};
 
-use super::chunks::CHUNKS;
+use super::chunks::{CHUNKS, TRASH, size_of, trash_object, written_of};
 use super::settings::FILE_NAMESPACES;
+use super::stores::FileStores;
 use crate::catalog::stored_name;
 use crate::{Engine, EngineError};
 
@@ -23,6 +24,9 @@ pub struct Collected {
     pub chunks: u64,
     /// Their bytes.
     pub bytes: u64,
+    /// Objects deleted from object stores, including those of chunks
+    /// collected earlier or of dropped namespaces.
+    pub objects: u64,
 }
 
 /// Return every row of `table` (a storage table name), or none if it
@@ -69,17 +73,17 @@ async fn collect_namespace(
     };
     let mut collected = Collected::default();
     for chunk in all_rows(txn, CHUNKS, vec![Datum::Text(namespace.to_owned())]).await? {
-        let (Some(Datum::Text(hash)), Some(Datum::Bytea(bytes)), Some(Datum::Int8(written))) =
-            (chunk.get(1), chunk.get(2), chunk.get(3))
-        else {
+        let Some(Datum::Text(hash)) = chunk.get(1) else {
             continue;
         };
-        if referenced.contains(hash) || *written >= cutoff {
+        if referenced.contains(hash) || written_of(&chunk) >= cutoff {
             continue;
         }
+        // An object is deleted only once this commits, from the trash.
+        trash_object(txn, &chunk).await?;
         rows::delete(txn, &table, &chunk[..2]).await?;
         collected.chunks += 1;
-        collected.bytes += bytes.len() as u64;
+        collected.bytes += size_of(&chunk);
     }
     Ok(collected)
 }
@@ -133,6 +137,38 @@ impl Engine {
                 }
             }
         }
+        total.objects = empty_trash(storage, &self.inner.file_stores).await?;
         Ok(total)
     }
+}
+
+/// Delete every object in the trash, and its trash entry once it is gone.
+/// Return how many were deleted.
+///
+/// Objects reach the trash only when the last chunk row referring to them
+/// is deleted, and every staging writes an object of its own, so nothing
+/// can refer to them again.
+async fn empty_trash(
+    storage: &interlaken_storage::FjallStorage,
+    stores: &FileStores,
+) -> Result<u64, EngineError> {
+    let entries = {
+        let txn = storage.begin(TxnOptions::default().read_only()).await?;
+        all_rows(&txn, TRASH, Vec::new()).await?
+    };
+    let mut deleted = 0;
+    for entry in entries {
+        let (Some(Datum::Text(store)), Some(Datum::Text(object))) = (entry.first(), entry.get(1))
+        else {
+            continue;
+        };
+        stores.delete(store, object).await?;
+        let txn = storage.begin(TxnOptions::default()).await?;
+        if let Some(table) = catalog::table(&txn, TRASH).await? {
+            rows::delete(&txn, &table, &entry).await?;
+        }
+        txn.commit().await?;
+        deleted += 1;
+    }
+    Ok(deleted)
 }

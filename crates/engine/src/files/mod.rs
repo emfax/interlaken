@@ -7,6 +7,7 @@ mod meta;
 mod path;
 mod reader;
 mod settings;
+mod stores;
 mod writer;
 
 pub use chunks::CHUNK_SIZE;
@@ -18,4 +19,6 @@ pub use path::MAX_NAME_BYTES;
 pub use reader::FileReader;
 pub(crate) use settings::forget as forget_file_namespace;
 pub use settings::{FileOptions, FileUsage};
+pub(crate) use stores::FileStores;
+pub use stores::{FileStore, ObjectStoreConfig, ObjectStoreLocation};
 pub use writer::FileWriter;

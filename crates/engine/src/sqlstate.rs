@@ -233,6 +233,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit.",
     ),
     state(
+        "58030",
+        "io_error",
+        "An object store holding file content failed: an upload, download or deletion didn't succeed, or its client couldn't be configured.",
+    ),
+    state(
         "58P01",
         "undefined_file",
         "No file or directory is at the path, or the principal may not read it or a directory above it.",

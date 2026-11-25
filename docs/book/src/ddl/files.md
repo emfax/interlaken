@@ -37,7 +37,7 @@ session
         &FileOptions {
             owner_type: Some("User".into()),
             quota_bytes: Some(10 << 30),
-            quota_files: None,
+            ..FileOptions::default()
         },
     )
     .await?;
@@ -137,8 +137,60 @@ Content no file refers to stays until `Engine::collect_files(grace)` removes it.
 
 Run it periodically with a `grace` longer than any write, together with the transaction it finishes in, can take. An hour is a reasonable default. Equal content is stored once per namespace, and writing it again refreshes the chunk, so reusing content is safe.
 
-## Storage
+## Where content is kept
 
-Chunks are stored in the engine table `engine_fs_chunks`, keyed by namespace and hash. Raft replicates them, and snapshots carry them. Values of 64 KiB or more are kept apart from keys on disk, so compactions don't rewrite file content. A database created before this keeps its old layout until a snapshot install rebuilds its data.
+By default, chunks are stored in the engine table `engine_fs_chunks`, keyed by namespace and hash. Raft replicates them, and snapshots carry them. Values of 64 KiB or more are kept apart from keys on disk, so compactions don't rewrite file content. A database created before this keeps its old layout until a snapshot install rebuilds its data.
 
-Every file's content passes through Raft, which costs replication traffic and disk writes in proportion to the content stored. Keeping content in object storage instead is designed (ADR-0044 phase 3) but not built.
+Every file's content then passes through Raft, which costs replication traffic and disk writes in proportion to the content stored. A namespace can keep its content in an S3-compatible object store instead, such as AWS S3, MinIO, Ceph or Cloudflare R2. Then only metadata, and a reference to each chunk's object, goes through Raft and into snapshots.
+
+### Configuring object stores
+
+Object stores need the `object-store` cargo feature, which embedded builds don't need. Each node is given the stores it can reach, by name:
+
+```rust,ignore
+use interlaken_engine::files::ObjectStoreConfig;
+
+let options = EngineOptions {
+    object_stores: vec![
+        ObjectStoreConfig::s3("assets", "acme-files").region("eu-west-1"),
+        ObjectStoreConfig::s3("onprem", "files")
+            .endpoint("https://minio.internal:9000"),
+    ],
+    ..EngineOptions::default()
+};
+```
+
+- **The database records only names.** A namespace's store name and key prefix are replicated, and so is the cluster's default store name. A store's endpoint, bucket and region are configuration on each node. Every node that serves a namespace must have its store configured; a node without it fails file operations there with `42P16`, and everything else keeps working.
+- **Credentials come only from the node's environment,** by the standard AWS chain:
+  - the instance's or pod's role;
+  - a web identity token file (`AWS_WEB_IDENTITY_TOKEN_FILE` with `AWS_ROLE_ARN`);
+  - container credentials;
+  - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+
+  There is no way to give keys in the configuration, so they are never replicated, logged or put in a snapshot. Prefer roles and token files, whose credentials are short-lived. Environment variables hold a long-lived key that child processes inherit and debugging tools can read, which suits development and simple on-prem setups.
+- **TLS.** Endpoints must use TLS. `allow_http()` permits plain `http://` for local testing only.
+- **Endpoints.** `endpoint(...)` points at a service other than AWS, and addresses buckets by path, as MinIO and most self-hosted services need.
+- **Directory stores.** `ObjectStoreConfig::directory(name, path)` keeps objects in a directory, such as a network file system mounted on every node, and serves for testing.
+
+### Choosing a namespace's store
+
+```rust,ignore
+use interlaken_engine::files::{FileOptions, FileStore};
+
+session.set_default_file_store(Some("assets")).await?;  // admin
+session.enable_files("app", &FileOptions::default()).await?;  // uses assets
+session
+    .enable_files("audit", &FileOptions { store: FileStore::Database, ..FileOptions::default() })
+    .await?;
+```
+
+- **Choosing a store.** `FileOptions::store` is `Default` (the cluster's default store, or the database if there is none), `Database`, or `Object(name)`. The choice is fixed when files are enabled: changing the default later doesn't move existing namespaces, and moving a namespace between stores isn't supported yet.
+- **The default store.** `set_default_file_store` needs `admin`, and refuses a store this node isn't configured with.
+- **Key prefixes.** Objects are keyed `PREFIX/HASH-SUFFIX`, where the prefix is the namespace's name unless `FileOptions::prefix` says otherwise. Each staging of a chunk writes an object of its own, so collecting a chunk's old object never races with staging the same content again. Equal content written while a chunk is stored reuses its object.
+
+### Consistency and failures
+
+- **Writes.** A chunk's object is uploaded before the chunk is recorded, and a file refers only to recorded chunks. So a committed file never refers to an object that isn't there. A failed upload fails the write with `58030` and leaves no metadata.
+- **Reads.** Readers fetch each chunk's object and check it against its hash. A missing or altered object fails with `XX001`.
+- **Collection.** Collection deletes objects only after the chunks that referred to them are gone. Their keys wait in the engine table `engine_fs_trash` until their deletion succeeds, so a crash or a failed deletion is retried by the next collection. Dropping a namespace puts its objects in the trash the same way.
+- **Policies.** Interlaken's policies decide who may read a file through the engine. Anyone holding the bucket's credentials can read every object directly, so give each cluster its own credentials with access to its bucket and prefix only, and turn on the bucket's encryption at rest.

@@ -66,6 +66,13 @@ Type `usize`. Default: 1,000.
 The most distinct attribution keys; sessions with new keys beyond
 it count as `other`, which bounds the metrics' series.
 
+### `object_stores`
+
+Type `Vec<ObjectStoreConfig>`. Default: none.
+
+The object stores this node can keep file content in, by name
+(ADR-0044). Credentials come from the environment, never from here.
+
 ## `StorageOptions`
 
 ### `pool_threads`

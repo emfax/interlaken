@@ -5,10 +5,9 @@ use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use interlaken_storage::FjallStorage;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
-use super::chunks::{self, CHUNK_SIZE};
+use super::chunks::{CHUNK_SIZE, ChunkStore};
 use super::meta::FileMeta;
 use crate::EngineError;
 
@@ -22,10 +21,8 @@ type Loading = Pin<Box<dyn Future<Output = Result<Vec<u8>, EngineError>> + Send>
 /// opened, and loads one chunk at a time, checking each against its hash.
 /// It doesn't borrow the session.
 pub struct FileReader {
-    /// The storage chunks are loaded from.
-    storage: FjallStorage,
-    /// The namespace the file is in.
-    namespace: String,
+    /// Where chunks are loaded from.
+    chunks: ChunkStore,
     /// The file's metadata.
     meta: FileMeta,
     /// The read position.
@@ -38,10 +35,9 @@ pub struct FileReader {
 
 impl FileReader {
     /// Construct a reader of the file `meta` describes.
-    pub(crate) fn new(storage: FjallStorage, namespace: String, meta: FileMeta) -> Self {
+    pub(crate) fn new(chunks: ChunkStore, meta: FileMeta) -> Self {
         Self {
-            storage,
-            namespace,
+            chunks,
             meta,
             position: 0,
             current: None,
@@ -74,12 +70,8 @@ impl FileReader {
                     self.meta.chunks.len()
                 ))));
             };
-            let storage = self.storage.clone();
-            let namespace = self.namespace.clone();
-            self.loading = Some((
-                index,
-                Box::pin(async move { chunks::load(&storage, &namespace, &hash).await }),
-            ));
+            let chunks = self.chunks.clone();
+            self.loading = Some((index, Box::pin(async move { chunks.load(&hash).await })));
         }
         let (_, loading) = self.loading.as_mut().expect("set above");
         let bytes = ready!(loading.as_mut().poll(cx));

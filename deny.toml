@@ -3,7 +3,7 @@
 # `cargo deny check licenses`; CI runs it on every pull request.
 
 [graph]
-# Optional features (`cluster`, `smt-prover`) bring their own dependencies.
+# Optional features (`cluster`, `smt-prover`, `object-store`) bring their own dependencies.
 all-features = true
 
 [licenses]
@@ -23,3 +23,9 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# Mozilla's root certificates, which the object store's HTTPS client
+# (`object-store` feature) uses to verify servers: a permissive data
+# licence, allowed for this crate only.
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+]

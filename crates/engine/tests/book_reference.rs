@@ -459,6 +459,7 @@ fn configuration() -> String {
         policy_settings,
         attribution,
         attribution_limit,
+        object_stores,
     } = EngineOptions::default();
     let StorageOptions {
         pool_threads: _,
@@ -504,6 +505,14 @@ fn configuration() -> String {
         ),
         ("attribution", format!("`Attribution::{attribution:?}`")),
         ("attribution_limit", count(attribution_limit)),
+        (
+            "object_stores",
+            if object_stores.is_empty() {
+                "none".to_owned()
+            } else {
+                format!("{object_stores:?}")
+            },
+        ),
     ];
     let storage = [
         ("pool_threads", "the number of cores, at least 2".to_owned()),

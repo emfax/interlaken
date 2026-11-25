@@ -18,11 +18,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use interlaken_storage::TxnOptions;
 use interlaken_storage::encoding::Datum as Stored;
 
-use super::chunks;
+use super::chunks::{self, ChunkStore};
 use super::meta::{FileKind, FileMeta, META_COLUMNS, ROOT_ID};
 use super::path::{split, split_last};
 use super::reader::FileReader;
 use super::settings::{self, FileOptions, FileUsage, Settings};
+use super::stores::FileStore;
 use super::writer::FileWriter;
 use crate::catalog::{self, ObjectKind};
 use crate::session::pipeline::Step;
@@ -206,6 +207,7 @@ impl Session {
         namespace: &str,
         options: &FileOptions,
     ) -> Result<(), EngineError> {
+        let stores = self.file_stores();
         let settings = self
             .run(Kind::Catalog, async |step: &Step<'_>| {
                 may_change(step, &[namespace]).await?;
@@ -235,7 +237,26 @@ impl Session {
                     owner_key_type,
                     quota_bytes: options.quota_bytes,
                     quota_files: options.quota_files,
+                    object: match &options.store {
+                        FileStore::Database => None,
+                        FileStore::Object(name) => Some(name.clone()),
+                        FileStore::Default => settings::default_store(step.txn).await?,
+                    }
+                    .map(|store| {
+                        let prefix = options
+                            .prefix
+                            .clone()
+                            .unwrap_or_else(|| namespace.to_owned());
+                        (store, prefix)
+                    }),
                 };
+                if let Some((store, _)) = &settings.object
+                    && !stores.has(store)
+                {
+                    return Err(EngineError::InvalidDefinition(format!(
+                        "object store {store} isn't configured on this node"
+                    )));
+                }
                 settings::store(step.txn, &settings).await?;
                 Ok(settings)
             })
@@ -326,6 +347,44 @@ impl Session {
         })
         .await
     }
+
+    /// Set the cluster's default file store: the object store, by name,
+    /// that namespaces enabled from now on keep their content in unless
+    /// they say otherwise, or `None` for the database. Every node must be
+    /// configured with the store. Namespaces already enabled keep theirs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::PermissionDenied`] without `admin`, or
+    /// [`EngineError::InvalidDefinition`] if this node isn't configured
+    /// with the store.
+    pub async fn set_default_file_store(&mut self, store: Option<&str>) -> Result<(), EngineError> {
+        if let Some(store) = store
+            && !self.file_stores().has(store)
+        {
+            return Err(EngineError::InvalidDefinition(format!(
+                "object store {store} isn't configured on this node"
+            )));
+        }
+        self.run(Kind::Admin, async |step: &Step<'_>| {
+            may_change(step, &[]).await?;
+            settings::set_default_store(step.txn, store).await
+        })
+        .await
+    }
+
+    /// Return the cluster's default file store: an object store's name, or
+    /// `None` for the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error.
+    pub async fn default_file_store(&mut self) -> Result<Option<String>, EngineError> {
+        self.run(Kind::Query, async |step: &Step<'_>| {
+            settings::default_store(step.txn).await
+        })
+        .await
+    }
 }
 
 /// Map an error from writing a node at `path` to a file system error.
@@ -398,6 +457,25 @@ impl Files<'_> {
                 settings::usage(step.txn, &namespace).await
             })
             .await
+    }
+
+    /// Return where the namespace's chunks go.
+    fn chunk_store(&self) -> ChunkStore {
+        ChunkStore {
+            storage: self.session.storage(),
+            stores: self.session.file_stores(),
+            namespace: self.settings.namespace.clone(),
+            object: self.settings.object.clone(),
+        }
+    }
+
+    /// Return the object store holding the namespace's content, if any.
+    #[must_use]
+    pub fn object_store(&self) -> Option<&str> {
+        self.settings
+            .object
+            .as_ref()
+            .map(|(store, _)| store.as_str())
     }
 
     /// Return the qualified name of the nodes table.
@@ -700,10 +778,10 @@ impl Files<'_> {
         let limit = usage.quota_bytes.map(|quota| {
             quota.saturating_sub(usage.bytes) + existing.as_ref().map_or(0, |(_, size)| *size)
         });
-        let storage = self.session.storage();
+        let chunks = self.chunk_store();
         Ok(FileWriter::new(
             self,
-            storage,
+            chunks,
             path.to_owned(),
             parent.id,
             name,
@@ -794,11 +872,7 @@ impl Files<'_> {
         if meta.is_dir() {
             return Err(EngineError::WrongFileKind(format!("{path} is a directory")));
         }
-        Ok(FileReader::new(
-            self.session.storage(),
-            self.settings.namespace.clone(),
-            meta,
-        ))
+        Ok(FileReader::new(self.chunk_store(), meta))
     }
 
     /// Return the whole content of file `path`.

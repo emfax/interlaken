@@ -1055,6 +1055,11 @@ impl Session {
         self.engine.inner.storage.clone()
     }
 
+    /// Return the object stores this node can keep file content in.
+    pub(crate) fn file_stores(&self) -> Arc<crate::files::FileStores> {
+        Arc::clone(&self.engine.inner.file_stores)
+    }
+
     /// Return the privileges the session's principal holds.
     ///
     /// # Errors

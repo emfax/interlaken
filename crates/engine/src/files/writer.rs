@@ -5,10 +5,9 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use interlaken_storage::FjallStorage;
 use tokio::io::AsyncWrite;
 
-use super::chunks::{self, CHUNK_SIZE};
+use super::chunks::{CHUNK_SIZE, ChunkStore};
 use super::fs::Files;
 use super::meta::FileMeta;
 use super::settings::Settings;
@@ -29,8 +28,8 @@ pub struct FileWriter<'a> {
     session: &'a mut Session,
     /// The namespace's file settings.
     settings: Settings,
-    /// The storage chunks are staged in.
-    storage: FjallStorage,
+    /// Where chunks are staged.
+    chunks: ChunkStore,
     /// The path written, for errors.
     path: String,
     /// The id of the directory the file goes in.
@@ -46,7 +45,7 @@ pub struct FileWriter<'a> {
     /// The chunk being staged, if any.
     staging: Option<Staging>,
     /// The hashes of the chunks staged so far.
-    chunks: Vec<String>,
+    staged: Vec<String>,
     /// The hash of the whole content so far.
     hasher: blake3::Hasher,
     /// The bytes written so far.
@@ -57,7 +56,7 @@ impl<'a> FileWriter<'a> {
     /// Construct a writer of `name` in directory `parent`.
     pub(crate) fn new(
         files: &'a mut Files<'_>,
-        storage: FjallStorage,
+        chunks: ChunkStore,
         path: String,
         parent: String,
         name: String,
@@ -68,7 +67,7 @@ impl<'a> FileWriter<'a> {
         Self {
             session: &mut *files.session,
             settings,
-            storage,
+            chunks,
             path,
             parent,
             name,
@@ -76,7 +75,7 @@ impl<'a> FileWriter<'a> {
             limit,
             buffer: Vec::with_capacity(CHUNK_SIZE),
             staging: None,
-            chunks: Vec::new(),
+            staged: Vec::new(),
             hasher: blake3::Hasher::new(),
             size: 0,
         }
@@ -85,11 +84,8 @@ impl<'a> FileWriter<'a> {
     /// Start staging the buffered chunk.
     fn start_staging(&mut self) {
         let bytes = std::mem::replace(&mut self.buffer, Vec::with_capacity(CHUNK_SIZE));
-        let storage = self.storage.clone();
-        let namespace = self.settings.namespace.clone();
-        self.staging = Some(Box::pin(async move {
-            chunks::stage(&storage, &namespace, bytes).await
-        }));
+        let chunks = self.chunks.clone();
+        self.staging = Some(Box::pin(async move { chunks.stage(bytes).await }));
     }
 
     /// Wait for the chunk being staged, if any, recording its hash.
@@ -97,7 +93,7 @@ impl<'a> FileWriter<'a> {
         if let Some(staging) = self.staging.as_mut() {
             let hash = ready!(staging.as_mut().poll(cx));
             self.staging = None;
-            self.chunks.push(hash?);
+            self.staged.push(hash?);
         }
         Poll::Ready(Ok(()))
     }
@@ -163,7 +159,7 @@ impl<'a> FileWriter<'a> {
             std::future::poll_fn(|cx| self.poll_staged(cx)).await?;
         }
         let hash = self.hasher.finalize().to_hex().to_string();
-        let content = (self.size, hash, std::mem::take(&mut self.chunks));
+        let content = (self.size, hash, std::mem::take(&mut self.staged));
         let mut files = Files {
             session: self.session,
             settings: self.settings,

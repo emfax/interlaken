@@ -51,6 +51,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; a revocation would remove the last administrator; or a change feed's position is older than the change log keeps, or the database keeps none. |
 | `57014` | `query_canceled` | The statement ran past its `statement_timeout`, or a wait for a commit to become visible on this node timed out. |
 | `57P03` | `cannot_connect_now` | A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit. |
+| `58030` | `io_error` | An object store holding file content failed: an upload, download or deletion didn't succeed, or its client couldn't be configured. |
 | `58P01` | `undefined_file` | No file or directory is at the path, or the principal may not read it or a directory above it. |
 | `58P02` | `duplicate_file` | A file or directory is at the path already, perhaps one the principal can't see. |
 | `XX000` | `internal_error` | An internal error: a storage failure, or the stored catalog disagrees with itself. |

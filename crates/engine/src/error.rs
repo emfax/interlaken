@@ -133,6 +133,9 @@ pub enum EngineError {
     /// A write would pass a namespace's file quota (ADR-0044).
     #[error("file quota exceeded: {0}")]
     QuotaExceeded(String),
+    /// An object store holding file content failed (ADR-0044).
+    #[error("{0}")]
+    ObjectStore(String),
     /// A file's content is missing or doesn't match its hash (ADR-0044).
     #[error("file content is corrupt: {0}")]
     FileCorrupt(String),
@@ -207,6 +210,7 @@ impl EngineError {
             Self::InvalidPath(_) => "22023",
             Self::FileCorrupt(_) => "XX001",
             Self::QuotaExceeded(_) => "53400",
+            Self::ObjectStore(_) => "58030",
             Self::Script { source, .. } => source.sqlstate(),
             Self::TableDropped(_) => "42P01",
             Self::ProposalNotFound(_)

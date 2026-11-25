@@ -11,6 +11,7 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 futures.workspace = true
 blake3.workspace = true
+object_store = { workspace = true, optional = true }
 metrics.workspace = true
 interlaken-exec.workspace = true
 interlaken-ir.workspace = true
@@ -28,6 +29,8 @@ tokio.workspace = true
 smt-prover = ["dep:cedar-policy", "dep:cedar-policy-symcc", "tokio/process"]
 # Cluster members: replication over gRPC with mutual TLS (ADR-0037). Never needed by embedded builds.
 cluster = ["dep:interlaken-net", "dep:interlaken-replication"]
+# File content in S3-compatible object storage (ADR-0044 phase 3). Never needed by embedded builds.
+object-store = ["dep:object_store"]
 
 [dev-dependencies]
 rcgen = "=0.14.5"

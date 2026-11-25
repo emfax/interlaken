@@ -4,10 +4,13 @@ use interlaken_storage::catalog::{self, ColumnDef, TableDef, TableSpec};
 use interlaken_storage::encoding::{ColumnType, Datum};
 use interlaken_storage::{Txn, rows};
 
+use super::stores::FileStore;
 use crate::EngineError;
 
 /// The table of namespaces with files, one row each.
 pub(crate) const FILE_NAMESPACES: &str = "engine_fs_namespaces";
+/// The one-row table holding the cluster's default file store.
+pub(crate) const FILE_DEFAULTS: &str = "engine_fs_defaults";
 
 /// How a namespace's files are kept, set by `Session::enable_files`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -23,6 +26,12 @@ pub struct FileOptions {
     /// The most files and directories the namespace may hold, the root
     /// aside; `None` for no limit.
     pub quota_files: Option<u64>,
+    /// Where the namespace's file content is kept: the cluster's default
+    /// store unless this says otherwise. It can't be changed later.
+    pub store: FileStore,
+    /// For an object store, the prefix of the namespace's object keys; the
+    /// namespace's name if `None`.
+    pub prefix: Option<String>,
 }
 
 /// What a namespace's files use, and may use.
@@ -51,6 +60,9 @@ pub(crate) struct Settings {
     pub(crate) quota_bytes: Option<u64>,
     /// The file quota, if any.
     pub(crate) quota_files: Option<u64>,
+    /// The object store holding the namespace's content, and its key
+    /// prefix; `None` for the database.
+    pub(crate) object: Option<(String, String)>,
 }
 
 /// Return the settings table, creating it if this database has none yet.
@@ -70,6 +82,8 @@ pub(crate) async fn settings_table(txn: &Txn) -> Result<TableDef, EngineError> {
                 ColumnDef::new("quota_files", ColumnType::Int8),
                 ColumnDef::new("used_bytes", ColumnType::Int8).not_null(),
                 ColumnDef::new("used_files", ColumnType::Int8).not_null(),
+                ColumnDef::new("store", ColumnType::Text),
+                ColumnDef::new("prefix", ColumnType::Text),
             ],
             primary_key: vec!["namespace".into()],
         },
@@ -115,6 +129,7 @@ pub(crate) async fn load(txn: &Txn, namespace: &str) -> Result<Option<Settings>,
             owner_key_type: optional_text(&row, 2),
             quota_bytes: optional_count(&row, 3),
             quota_files: optional_count(&row, 4),
+            object: optional_text(&row, 7).zip(optional_text(&row, 8)),
         }))
 }
 
@@ -145,6 +160,8 @@ pub(crate) async fn store(txn: &Txn, settings: &Settings) -> Result<(), EngineEr
             settings.quota_files.map_or(Datum::Null, count_datum),
             Datum::Int8(0),
             Datum::Int8(0),
+            text(&settings.object.as_ref().map(|(store, _)| store.clone())),
+            text(&settings.object.as_ref().map(|(_, prefix)| prefix.clone())),
         ],
     )
     .await?;
@@ -253,5 +270,56 @@ pub(crate) async fn set_quota(
     row[3] = bytes.map_or(Datum::Null, count_datum);
     row[4] = files.map_or(Datum::Null, count_datum);
     rows::update(txn, &table, &key, row).await?;
+    Ok(())
+}
+
+/// Return the defaults table, creating it if this database has none yet.
+async fn defaults_table(txn: &Txn) -> Result<TableDef, EngineError> {
+    if let Some(table) = catalog::table(txn, FILE_DEFAULTS).await? {
+        return Ok(table);
+    }
+    Ok(catalog::create_table(
+        txn,
+        TableSpec {
+            name: FILE_DEFAULTS.into(),
+            columns: vec![
+                ColumnDef::new("id", ColumnType::Int8).not_null(),
+                ColumnDef::new("store", ColumnType::Text),
+            ],
+            primary_key: vec!["id".into()],
+        },
+    )
+    .await?)
+}
+
+/// Return the cluster's default file store: an object store's name, or
+/// `None` for the database.
+///
+/// # Errors
+///
+/// Returns a storage error.
+pub(crate) async fn default_store(txn: &Txn) -> Result<Option<String>, EngineError> {
+    let Some(table) = catalog::table(txn, FILE_DEFAULTS).await? else {
+        return Ok(None);
+    };
+    Ok(rows::get(txn, &table, &[Datum::Int8(1)])
+        .await?
+        .and_then(|row| optional_text(&row, 1)))
+}
+
+/// Set the cluster's default file store.
+///
+/// # Errors
+///
+/// Returns a storage error.
+pub(crate) async fn set_default_store(txn: &Txn, store: Option<&str>) -> Result<(), EngineError> {
+    let table = defaults_table(txn).await?;
+    let row = vec![
+        Datum::Int8(1),
+        store.map_or(Datum::Null, |s| Datum::Text(s.to_owned())),
+    ];
+    if !rows::update(txn, &table, &[Datum::Int8(1)], row.clone()).await? {
+        rows::insert(txn, &table, row).await?;
+    }
     Ok(())
 }

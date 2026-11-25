@@ -1,12 +1,12 @@
 ---
 id: 0044
 title: File System
-status: accepted  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [storage, engine, security, replication]
 feature-flag:
 created: 2026-11-25
 accepted: 2026-11-25
-implemented:
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Accepted. Phases 1, 2 and 4 are implemented; phase 3 (object storage) is not. The *As implemented* notes after the phases record where the result differs from this design, chiefly: one entity type, `File`, covers files and directories; chunks live in one engine table rather than a table per namespace; and collection is a call the host makes. Builds on ADR-0040 (change feed) and ADR-0042 (namespaces).
+Implemented, in all four phases, except moving a namespace between stores, which is left for later. The *As implemented* notes after the phases record where the result differs from this design, chiefly: one entity type, `File`, covers files and directories; chunks live in one engine table rather than a table per namespace; collection is a call the host makes; and object stores are S3-compatible only, named in the database but configured on each node, with credentials only from the environment. Builds on ADR-0040 (change feed) and ADR-0042 (namespaces).
 
 ## Summary
 
@@ -199,7 +199,16 @@ Files belong to a namespace (ADR-0042): its owner owns its root, its quota appli
 - **Collection** is `Engine::collect_files(grace)`, which the host calls periodically. There is no background pass. Writers don't touch their chunks while they run, so `grace` must outlast the longest write and the transaction it finishes in.
 - **Key-value separation** applies to `data` keyspaces created from now on, for values of 64 KiB or more. A database made before keeps its layout until a snapshot install creates a new `data` keyspace.
 - **Random values per statement.** File ids are generated with `gen_random_uuid()`. That exposed a bug: every statement of a transaction started from the same random seed, so several inserts in one transaction got the same ids. Each statement now derives its own seed from the transaction's.
-- **Not built:** phase 3, symbolic links, range writes, and separate read caches.
+- **Object stores (phase 3)** are S3-compatible only, through the `object_store` crate behind the engine's `object-store` feature, plus a directory store for shared file systems and tests.
+  - **Configuration.** Each node is given named stores in `EngineOptions::object_stores`. The database records only a namespace's store name and key prefix, and the cluster's default store name, which `set_default_file_store` sets and `enable_files` uses unless `FileOptions::store` says otherwise.
+  - **Credentials** come only from the node's environment, by the standard AWS chain, and are never configured, replicated or logged.
+  - **Keys.** Each staging writes its own object, `PREFIX/HASH-SUFFIX`, rather than one object per hash. So deleting a collected chunk's object can't race with staging the same content again. Chunk rows record the store and key, and their size.
+  - **Collection.** Objects are deleted from a trash table (`engine_fs_trash`) after the rows referring to them are gone, so a crash or failed deletion is retried. Dropping a namespace trashes its objects.
+  - **Failures.** Object store failures are `58030`.
+  - **Testing.** Integration tests use the directory store. One test runs against a real S3-compatible service when the environment names one.
+  - **Not built:** moving a namespace between stores, and caches on each node.
+- **Empty Cedar schemas.** Testing exposed a bug: a database with no entity types generated a Cedar schema whose actions had an empty resource list, which Cedar rejects. So no Cedar policies could be activated before the first entity type was declared. The actions now apply to nothing until there are entity types.
+- **Not built:** symbolic links, range writes, and separate read caches.
 
 ## Consequences
 

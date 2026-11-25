@@ -145,3 +145,24 @@ async fn names_are_exclusive() {
         "42P16"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert Cedar policies activate on a database with no entity types yet,
+/// whose generated schema has no resource types.
+async fn cedar_activates_without_entity_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = support::session::create(dir.path()).await;
+    let mut root = session(&engine, admin());
+    let id = root
+        .submit_policies(
+            &interlaken_engine::policy::PolicyDocument {
+                language: interlaken_engine::policy::PolicyLanguage::Cedar,
+                body: "permit (principal is Admin, action, resource);".into(),
+            },
+            "",
+        )
+        .await
+        .unwrap();
+    root.verify_policies(id).await.unwrap();
+    root.activate_policies(id, true).await.unwrap();
+}

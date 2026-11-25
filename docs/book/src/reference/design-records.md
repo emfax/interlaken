@@ -76,7 +76,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0040 | Change feed and commit visibility | implemented |
 | 0042 | Namespaces and scoped policies | implemented |
 | 0043 | DDL as text | implemented |
-| 0044 | File system | accepted (phases 1, 2 and 4 implemented) |
+| 0044 | File system | implemented |
 
 ## Design documents
 

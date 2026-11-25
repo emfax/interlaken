@@ -141,10 +141,16 @@ pub fn cedar_schema(
         .iter()
         .map(|a| format!("{:?}", a.name()))
         .collect();
-    out.push(format!(
-        "action {} appliesTo {{ principal: [{principals}], resource: [{types}], context: {{ \"time\": Long, \"ip\": String, \"auth_method\": String, \"session_id\": String, \"app\": {app_context} }} }};",
-        actions.join(", ")
-    ));
+    if types.is_empty() {
+        // With no entity types there is nothing to govern, and Cedar
+        // rejects an empty resource list: the actions apply to nothing.
+        out.push(format!("action {};", actions.join(", ")));
+    } else {
+        out.push(format!(
+            "action {} appliesTo {{ principal: [{principals}], resource: [{types}], context: {{ \"time\": Long, \"ip\": String, \"auth_method\": String, \"session_id\": String, \"app\": {app_context} }} }};",
+            actions.join(", ")
+        ));
+    }
     Ok(out.join("\n"))
 }
 

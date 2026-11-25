@@ -14,6 +14,7 @@ use super::connection::Session;
 use crate::attribution::{Attribution, Attributor};
 use crate::catalog::{CatalogCache, create_catalog_tables, schema_version};
 use crate::error::EngineError;
+use crate::files::ObjectStoreConfig;
 use crate::policy::{
     ActivePolicies, PolicyDocument, PolicySettings, VerificationMode, create_policy_tables,
 };
@@ -37,6 +38,9 @@ pub struct EngineOptions {
     /// The most distinct attribution keys; sessions with new keys beyond
     /// it count as `other`, which bounds the metrics' series.
     pub attribution_limit: usize,
+    /// The object stores this node can keep file content in, by name
+    /// (ADR-0044). Credentials come from the environment, never from here.
+    pub object_stores: Vec<ObjectStoreConfig>,
 }
 
 impl Default for EngineOptions {
@@ -55,6 +59,7 @@ impl Default for EngineOptions {
             },
             attribution: Attribution::Off,
             attribution_limit: 1000,
+            object_stores: Vec::new(),
         }
     }
 }
@@ -93,6 +98,8 @@ pub(crate) struct Inner {
     pub(crate) query_budget: usize,
     /// Sessions' attribution keys.
     pub(crate) attributor: Attributor,
+    /// The object stores file content can be kept in (ADR-0044).
+    pub(crate) file_stores: Arc<crate::files::FileStores>,
     /// The cluster this engine is a member of, if any (ADR-0037).
     #[cfg(feature = "cluster")]
     pub(crate) cluster: Option<Arc<interlaken_net::Cluster>>,
@@ -189,6 +196,7 @@ impl Engine {
                 pool: options.node_memory_limit.map(MemoryPool::new),
                 query_budget: options.query_budget,
                 attributor: Attributor::new(options.attribution.clone(), options.attribution_limit),
+                file_stores: Arc::new(crate::files::FileStores::new(&options.object_stores)),
                 #[cfg(feature = "cluster")]
                 cluster: None,
             }),

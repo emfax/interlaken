@@ -137,12 +137,22 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
              can name them, and their principals have no attributes or ancestors."
         }
         "engine_fs_namespaces" => {
-            "Namespaces with files (ADR-0044), and the entity type of their files' owners, \
-             with its key's type. Created when files are first enabled."
+            "Namespaces with files (ADR-0044): the entity type of their files' owners, with its \
+             key's type, their quotas and usage, and the object store and key prefix holding \
+             their content, if any. Created when files are first enabled."
         }
         "engine_fs_chunks" => {
-            "File content (ADR-0044): chunks of up to 1 MiB by namespace and BLAKE3 hash, with \
-             when each was last written. Created when files are first enabled."
+            "File content (ADR-0044): chunks of up to 1 MiB by namespace and BLAKE3 hash, each \
+             holding its bytes or naming the object store and key holding them, with its size \
+             and when it was last written, in microseconds since the epoch. Created when files \
+             are first enabled."
+        }
+        "engine_fs_trash" => {
+            "Objects in object stores that no chunk refers to any more, which collection deletes \
+             (ADR-0044)."
+        }
+        "engine_fs_defaults" => {
+            "One row holding the cluster's default file store, by name (ADR-0044)."
         }
         "engine_policy_set" => {
             "One row holding the active policy set: its version, language and text."

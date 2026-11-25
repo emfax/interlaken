@@ -36,6 +36,8 @@ arrow-select = "60"
 futures = "0.3"
 # Content hashes of file chunks (ADR-0044).
 blake3 = { version = "1", default-features = false, features = ["std"] }
+# File content in S3-compatible object storage (ADR-0044 phase 3).
+object_store = { version = "0.14", default-features = false, features = ["aws", "fs"] }
 # Telemetry facades (ADR-0039): libraries record, the host chooses an exporter.
 metrics = "0.24"
 tracing = "0.1"
