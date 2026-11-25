@@ -2,8 +2,8 @@
 
 #![allow(dead_code)]
 
-use interlaken_net::{DEFAULT_SERVER_NAME, TlsConfig};
-use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, date_time_ymd};
+use interlaken_net::{DEFAULT_SERVER_NAME, TlsConfig, TlsMaterial};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, SanType, date_time_ymd};
 
 /// A certificate authority that issues node certificates.
 pub struct Pki {
@@ -42,6 +42,33 @@ impl Pki {
         let mut tls = other.node();
         tls.ca = self.ca_pem.clone().into_bytes();
         tls
+    }
+
+    /// Return this CA's certificate, PEM-encoded.
+    pub fn ca(&self) -> String {
+        self.ca_pem.clone()
+    }
+
+    /// Return material holding a certificate for URI `uri` (and the
+    /// default DNS name), trusting `trusted` CAs' certificates. With
+    /// `expired_days` set, the certificate expired that many days ago.
+    pub fn member(&self, uri: &str, expired_days: Option<i64>, trusted: &str) -> TlsMaterial {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![DEFAULT_SERVER_NAME.to_owned()]).unwrap();
+        params
+            .subject_alt_names
+            .push(SanType::URI(uri.try_into().unwrap()));
+        if let Some(days) = expired_days {
+            let now = time::OffsetDateTime::now_utc();
+            params.not_before = now - time::Duration::days(days + 30);
+            params.not_after = now - time::Duration::days(days);
+        }
+        let cert = params.signed_by(&key, &self.issuer).unwrap();
+        TlsMaterial {
+            ca: trusted.as_bytes().to_vec(),
+            cert: cert.pem().into_bytes(),
+            key: key.serialize_pem().into_bytes(),
+        }
     }
 
     /// Issue a node certificate, valid now or, if `expired`, only in 2020.

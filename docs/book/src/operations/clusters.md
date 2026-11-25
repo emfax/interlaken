@@ -21,13 +21,45 @@ It brings in the `interlaken-net` crate: gRPC over HTTP/2 through tonic, with TL
 
 ## Certificates
 
-Members authenticate each other with mutual TLS. A member refuses any peer without a certificate signed by the cluster's certificate authority, and refuses expired certificates. Every member needs:
+Members authenticate each other with mutual TLS. A member refuses any peer whose certificate doesn't chain to a trusted certificate authority, whether the peer connects to it or it connects to the peer. Every member needs:
 
-- the CA's certificate;
-- its own certificate, signed by the CA, carrying the DNS name `interlaken` (or the name set in `TlsConfig::server_name`);
+- the trusted CAs' certificates, one or more;
+- its own certificate, signed by one of them;
 - its private key.
 
-All three are PEM files. Every member holds all the data, so certificates don't distinguish members; any member's certificate admits it.
+All three are PEM files. By default a member also requires the DNS name `interlaken` (or the name set in `TlsConfig::server_name`) in its peers' certificates, and refuses expired ones. Every member holds all the data, so with the default, certificates don't distinguish members: any certificate the CA signed with that name admits its holder.
+
+### Member identities
+
+To tie certificates to one cluster and its current members, give each member a certificate naming its node ID in a URI, and check peers with `MemberIdentity`:
+
+```rust,ignore
+use std::sync::Arc;
+use interlaken_net::{MemberIdentity, TlsConfig};
+
+// Node 7's certificate names spiffe://example.org/cluster/c1/node/7.
+let tls = TlsConfig::new(ca_pem, node_cert_pem, node_key_pem)
+    .with_verifier(Arc::new(MemberIdentity::new("spiffe://example.org/cluster/c1/node/")));
+```
+
+A peer is then accepted only if exactly one of its URIs has the prefix, the rest is a node ID, that ID is a voter or learner, and, when this member dialled it, it is the node dialled. One CA can then serve many clusters: a certificate for another cluster's prefix is refused, and so is a removed member's. Before a member has joined it knows no membership, so it accepts any ID with the prefix, so that the leader adding it can connect.
+
+For other rules, implement `PeerVerifier`. It runs during each handshake, after the chain is checked, with the peer's certificate (chain, DNS names, URIs, expiry), the direction, the node dialled and the membership. It must not block.
+
+### Expired certificates
+
+`TlsConfig::with_expired_grace(duration)` keeps a cluster replicating when the service that renews its certificates is down. A peer certificate that expired less than `duration` ago is offered to the verifier instead of refused, provided its CA is valid now. `MemberIdentity` accepts it only from a current member, so a cluster carries on for the grace period while new or removed nodes with expired certificates stay out. The default verifier never accepts one.
+
+### Rotating certificates
+
+`Cluster::rotate_tls(&material)` replaces a member's certificate, key and trusted CAs while it runs; a member embedded in an engine is reached with `Engine::cluster()`. The new material is checked first: the key must match the certificate, and the certificate must chain to one of the CAs. New connections use it at once, the member reconnects to its peers, and peers' connections to it are closed after `ClusterConfig::max_connection_age` (1 hour by default), so every connection is verified again at least that often.
+
+To move to a new CA, give every member both CAs and a certificate from the new one, then, once all have it, the new CA alone.
+
+### What to monitor
+
+- `interlaken_net_certificate_expiry_seconds` is the time until each member's certificate expires. Alert well before zero.
+- `interlaken_net_peer_refused_total` counts refused handshakes by reason: `chain`, `expired`, `name`, `membership`, or a custom verifier's own.
 
 ## Forming a cluster
 
@@ -107,7 +139,7 @@ Under `Durability::Sync`, each member syncs its log and its Raft vote before ack
 | `snapshot_every`, `logs_kept` | 10,000, 1,000 | compact the log every so many entries, keeping the most recent; snapshots themselves are made only when a member needs one, from current data |
 | `snapshot_chunk_bytes` | 1 MiB | the size of the chunks snapshots are sent in; memory used for a snapshot stays near this, whatever the database's size |
 
-`ClusterConfig` itself sets the request deadline between members (5 s), the concurrent requests served per connection (256), and `peers`: addresses that take precedence over the ones membership records, for members reached through a proxy or another network.
+`ClusterConfig` itself sets the request deadline between members (5 s), the concurrent requests served per connection (256), `max_connection_age` (1 hour), and `peers`: addresses that take precedence over the ones membership records, for members reached through a proxy or another network.
 
 ## Policy provers
 

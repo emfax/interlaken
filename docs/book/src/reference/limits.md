@@ -11,7 +11,7 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 | SQL | planned as a front end that lowers into the IR; until then, statements are [IR text](../ir/syntax.md) or plans built with the IR's Rust builder |
 | A network protocol | none: Interlaken is embedded, and clients call the Rust API in-process |
 | GraphQL | planned as a front end; the IR's `nest` and `unnest` operators and `apply` decorrelation already exist for it |
-| Sharding | a cluster is one Raft group holding the whole database (see [Running a cluster](../operations/clusters.md)); data isn't split across groups, and a member's certificates can't be replaced without restarting it |
+| Sharding | a cluster is one Raft group holding the whole database (see [Running a cluster](../operations/clusters.md)); data isn't split across groups |
 | User-defined functions | only built-in functions; WASM functions are designed (ADR-0029) but not built |
 
 ### Data definition

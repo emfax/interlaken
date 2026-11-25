@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 
 use crate::metrics::{Counters, NetMetrics};
 use crate::server::{Limits, serve};
-use crate::tls::TlsConfig;
+use crate::tls::{MembershipView, TlsConfig, TlsMaterial, TlsState};
 use crate::transport::{AddressBook, GrpcTransport};
 
 /// How a cluster member runs.
@@ -42,6 +42,9 @@ pub struct ClusterConfig {
     pub request_timeout: Duration,
     /// Requests served at once on each connection; more are shed.
     pub concurrency: usize,
+    /// How long a peer's connection to this member may live before it is
+    /// closed and the peer must connect, and be verified, again (ADR-0041).
+    pub max_connection_age: Duration,
 }
 
 impl ClusterConfig {
@@ -60,6 +63,7 @@ impl ClusterConfig {
             replica: ReplicaConfig::new(node_id),
             request_timeout: Duration::from_secs(5),
             concurrency: 256,
+            max_connection_age: Duration::from_secs(3600),
         }
     }
 }
@@ -75,6 +79,8 @@ pub struct Cluster {
     advertise: String,
     /// Traffic counters.
     counters: Arc<Counters>,
+    /// The TLS material, verifier and membership view.
+    tls: Arc<TlsState>,
     /// Stops the server.
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// The server and address-book tasks.
@@ -125,9 +131,13 @@ impl Cluster {
         addresses.insert(config.node_id, advertise.clone());
         let book: AddressBook = Arc::new(RwLock::new(addresses));
         let counters = Arc::new(Counters::default());
+        let tls = Arc::new(
+            TlsState::new(&config.tls, config.node_id)
+                .map_err(|e| unavailable("loading the TLS material", &e))?,
+        );
         let transport = GrpcTransport::new(
             Arc::clone(&book),
-            config.tls.client(),
+            Arc::clone(&tls),
             config.request_timeout,
             Arc::clone(&counters),
         );
@@ -138,9 +148,10 @@ impl Cluster {
         let limits = Limits {
             timeout: config.request_timeout,
             concurrency: config.concurrency.max(1),
+            max_connection_age: config.max_connection_age,
         };
         let server = tokio::spawn({
-            let tls = config.tls.server();
+            let tls = Arc::clone(&tls);
             let handler = node.handler();
             let counters = Arc::clone(&counters);
             async move {
@@ -162,8 +173,17 @@ impl Cluster {
             .collect();
         let updater = tokio::spawn({
             let node = Arc::clone(&node);
+            let tls = Arc::clone(&tls);
             async move {
                 loop {
+                    // The verifier checks peers against the membership.
+                    let status = node.status();
+                    tls.set_membership(MembershipView {
+                        known: !status.voters.is_empty(),
+                        voters: status.voters.iter().copied().collect(),
+                        learners: status.learners.iter().copied().collect(),
+                    });
+                    tls.record_expiry();
                     let known = node.addresses();
                     {
                         let mut entries = book.write().unwrap_or_else(PoisonError::into_inner);
@@ -182,6 +202,7 @@ impl Cluster {
             local_addr,
             advertise,
             counters,
+            tls,
             shutdown: Mutex::new(Some(stop)),
             tasks: Mutex::new(vec![server, updater]),
         };
@@ -233,6 +254,27 @@ impl Cluster {
     #[must_use]
     pub fn status(&self) -> ClusterStatus {
         self.node.status()
+    }
+
+    /// Replace this member's certificate and key and the trusted CAs while
+    /// running (ADR-0041).
+    ///
+    /// The new material is checked first: the key must match the
+    /// certificate, and the certificate must chain to one of the CAs. New
+    /// connections use it at once; this member remakes its connections to
+    /// peers, and peers' connections to it are remade within
+    /// [`ClusterConfig::max_connection_age`]. To rotate the CA itself,
+    /// trust the old and new CAs together while certificates move from one
+    /// to the other, then drop the old one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReplicationUnavailable`] naming what is wrong with the
+    /// material, which then isn't used.
+    pub fn rotate_tls(&self, material: &TlsMaterial) -> Result<()> {
+        self.tls
+            .rotate(material)
+            .map_err(|e| unavailable("rotating the TLS material", &e))
     }
 
     /// Return the network counters.

@@ -7,11 +7,12 @@ use std::time::Duration;
 use interlaken_replication::types::NodeId;
 use interlaken_replication::{Request, Response, Transport, TransportError};
 use tonic::codegen::http::uri::PathAndQuery;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Identity};
 
 use crate::codec::BytesCodec;
 use crate::metrics::Counters;
 use crate::telemetry;
+use crate::tls::TlsState;
 
 /// The gRPC method every request goes through.
 pub(crate) const PATH: &str = "/interlaken.Replica/Call";
@@ -26,15 +27,16 @@ pub(crate) type AddressBook = Arc<RwLock<BTreeMap<NodeId, String>>>;
 /// Sends requests to other replicas over gRPC.
 ///
 /// Each peer gets one HTTP/2 connection, made on first use and remade when
-/// its address changes. A request that fails because the connection was
+/// its address changes or the TLS material is rotated. A request that fails because the connection was
 /// refused surely didn't arrive; any other failure might have.
 pub struct GrpcTransport {
     /// Each node's address.
     book: AddressBook,
-    /// Each peer's channel, with the address it connects to.
-    channels: Mutex<HashMap<NodeId, (String, Channel)>>,
-    /// The client side of mutual TLS.
-    tls: ClientTlsConfig,
+    /// Each peer's channel, with the address it connects to and the TLS
+    /// generation it was made with.
+    channels: Mutex<HashMap<NodeId, (String, u64, Channel)>>,
+    /// The TLS material and verifier.
+    tls: Arc<TlsState>,
     /// The deadline for each request.
     timeout: Duration,
     /// Traffic counters.
@@ -72,7 +74,7 @@ impl GrpcTransport {
     /// Construct a transport resolving nodes through `book`.
     pub(crate) fn new(
         book: AddressBook,
-        tls: ClientTlsConfig,
+        tls: Arc<TlsState>,
         timeout: Duration,
         counters: Arc<Counters>,
     ) -> Self {
@@ -94,22 +96,30 @@ impl GrpcTransport {
             .get(&target)
             .cloned()
             .ok_or_else(|| TransportError::NotDelivered(format!("no address for node {target}")))?;
+        let generation = self.tls.generation();
         let mut channels = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((known, channel)) = channels.get(&target)
+        if let Some((known, made, channel)) = channels.get(&target)
             && *known == addr
+            && *made == generation
         {
             return Ok(channel.clone());
         }
         let not_delivered =
             |e: tonic::transport::Error| TransportError::NotDelivered(e.to_string());
+        // This member's current identity; the verifier checks the peer
+        // against the current CAs and the node dialled (ADR-0041).
+        let pem = self.tls.material().pem.clone();
+        let client = ClientTlsConfig::new()
+            .identity(Identity::from_pem(&pem.cert, &pem.key))
+            .domain_name(self.tls.server_name.clone());
         let channel = Endpoint::from_shared(format!("https://{addr}"))
             .map_err(not_delivered)?
-            .tls_config(self.tls.clone())
+            .tls_config_with_verifier(client, self.tls.client_verifier(target))
             .map_err(not_delivered)?
             .connect_timeout(Duration::from_secs(1))
             .timeout(self.timeout)
             .connect_lazy();
-        channels.insert(target, (addr, channel.clone()));
+        channels.insert(target, (addr, generation, channel.clone()));
         Ok(channel)
     }
 

@@ -15,6 +15,10 @@ pub(crate) const REQUESTS: &str = "interlaken_net_requests_total";
 pub(crate) const SERVED_BYTES: &str = "interlaken_net_served_bytes_total";
 /// Requests this replica answers, by kind.
 pub(crate) const SERVED: &str = "interlaken_net_served_total";
+/// Peers refused during the TLS handshake, by reason (ADR-0041).
+pub(crate) const PEER_REFUSED: &str = "interlaken_net_peer_refused_total";
+/// Seconds until this member's certificate expires (ADR-0041).
+pub(crate) const CERTIFICATE_EXPIRY: &str = "interlaken_net_certificate_expiry_seconds";
 
 /// Every metric the transport records.
 pub const METRICS: &[Metric] = &[
@@ -51,5 +55,24 @@ pub const METRICS: &[Metric] = &[
         unit: MetricUnit::Count,
         labels: &["kind"],
         help: "Requests this replica answered, by kind.",
+    },
+    Metric {
+        name: PEER_REFUSED,
+        kind: MetricKind::Counter,
+        unit: MetricUnit::Count,
+        labels: &["reason"],
+        help: "Peers refused during the TLS handshake, in either direction, by reason: \
+               `chain` (no valid chain to a trusted CA, or a CA not valid now), `expired` \
+               (expired beyond the grace period, or refused by the verifier while in it), \
+               `name`, `membership`, or a custom verifier's own.",
+    },
+    Metric {
+        name: CERTIFICATE_EXPIRY,
+        kind: MetricKind::Gauge,
+        unit: MetricUnit::Seconds,
+        labels: &["node"],
+        help: "Seconds until this member's certificate expires; negative once it has. Alert \
+               well before zero: peers accept an expired certificate only within their grace \
+               period, and only from a current member.",
     },
 ];

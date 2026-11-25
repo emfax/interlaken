@@ -24,7 +24,7 @@ An ADR's status is *proposal* while it is under discussion, *accepted* when its 
 | 0009 | Storage correctness testing strategy | implemented |
 | 0037 | Replication with Raft | implemented |
 | 0038 | Streaming snapshots | implemented |
-| 0041 | Peer identity and certificate rotation | proposal |
+| 0041 | Peer identity and certificate rotation | implemented |
 
 ## IR and optimizer
 

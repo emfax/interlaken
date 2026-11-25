@@ -164,6 +164,8 @@ Attribution keys are stored in your metrics system, with whatever access control
 | `interlaken_net_requests_total` | counter | count | `peer`, `kind`, `outcome` | Calls this replica makes to each peer, by kind (`append`, `vote`, `pre_vote`, `commit`, `read_index`, `snapshot_chunk`, `transfer_leader`, `membership`) and outcome (`ok`; `not_delivered`, surely not received; `no_reply`, perhaps received). |
 | `interlaken_net_served_bytes_total` | counter | bytes | `direction` | Bytes of the requests this replica answers: requests `received` and responses `sent`, as encoded. |
 | `interlaken_net_served_total` | counter | count | `kind` | Requests this replica answered, by kind. |
+| `interlaken_net_peer_refused_total` | counter | count | `reason` | Peers refused during the TLS handshake, in either direction, by reason: `chain` (no valid chain to a trusted CA, or a CA not valid now), `expired` (expired beyond the grace period, or refused by the verifier while in it), `name`, `membership`, or a custom verifier's own. |
+| `interlaken_net_certificate_expiry_seconds` | gauge | seconds | `node` | Seconds until this member's certificate expires; negative once it has. Alert well before zero: peers accept an expired certificate only within their grace period, and only from a current member. |
 
 <!-- end generated: metrics -->
 

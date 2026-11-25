@@ -12,14 +12,19 @@ interlaken-storage.workspace = true
 bytes.workspace = true
 metrics.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "net"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { version = "0.1", default-features = false }
 tonic = { version = "=0.14.9", default-features = false, features = ["transport", "router", "codegen", "tls-ring"] }
 
 [dev-dependencies]
 interlaken-telemetry.workspace = true
 rcgen = "=0.14.5"
 tempfile.workspace = true
+time = "0.3"
 tokio = { workspace = true, features = ["io-util", "process"] }
 
 [lints]

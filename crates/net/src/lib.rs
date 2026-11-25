@@ -3,7 +3,9 @@
 //! Replicas talk gRPC over HTTP/2 with mutual TLS, through tonic: every
 //! message goes through one method as postcard bytes, so no protobuf
 //! schema or code generation is involved. Each node's certificate is
-//! signed by the cluster's CA, and peers without one are refused.
+//! signed by a trusted CA, and peers without one are refused; a
+//! [`PeerVerifier`] decides which of the rest to accept, and certificates
+//! can be replaced while running (ADR-0041).
 //!
 //! The server sets a deadline on every request, limits concurrent requests
 //! per connection and sheds the excess. The client keeps one connection
@@ -22,5 +24,8 @@ mod transport;
 
 pub use cluster::{Cluster, ClusterConfig};
 pub use metrics::{NetMetrics, PeerTraffic};
-pub use tls::{DEFAULT_SERVER_NAME, TlsConfig};
+pub use tls::{
+    DEFAULT_SERVER_NAME, Direction, DnsName, MemberIdentity, MembershipView, PeerCertificate,
+    PeerContext, PeerRefused, PeerVerifier, TlsConfig, TlsMaterial,
+};
 pub use transport::GrpcTransport;

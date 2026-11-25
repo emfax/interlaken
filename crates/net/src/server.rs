@@ -4,16 +4,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use interlaken_replication::{Handler, Request};
+use tokio::net::TcpStream;
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
 use tonic::codegen::{BoxFuture, Context, Poll, Service, StdError, http};
 use tonic::server::{NamedService, UnaryService};
-use tonic::transport::server::TcpIncoming;
-use tonic::transport::{Server, ServerTlsConfig};
+use tonic::transport::Server;
 use tonic::{Status, body::Body};
 
 use crate::codec::BytesCodec;
 use crate::metrics::Counters;
 use crate::telemetry;
+use crate::tls::TlsState;
 use crate::transport::{MAX_MESSAGE_BYTES, PATH};
+
+/// How long a peer has to complete the TLS handshake.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Handshaken connections waiting for the server to take them.
+const ACCEPTED_QUEUE: usize = 64;
 
 /// The gRPC service a replica serves: one method taking every request.
 #[derive(Clone)]
@@ -92,27 +100,73 @@ pub(crate) struct Limits {
     pub(crate) timeout: Duration,
     /// Requests served at once on each connection; more are shed.
     pub(crate) concurrency: usize,
+    /// How long a connection may live before the server closes it, so
+    /// peers reconnect and are verified again (ADR-0041).
+    pub(crate) max_connection_age: Duration,
 }
 
-/// Serve `handler` on `listener` with mutual TLS until `shutdown` resolves.
+/// Accept TCP connections on `listener` and complete each one's TLS
+/// handshake in a task of its own, sending the established ones on `ready`,
+/// until the server stops taking them.
+async fn accept(
+    listener: tokio::net::TcpListener,
+    acceptor: TlsAcceptor,
+    ready: tokio::sync::mpsc::Sender<std::io::Result<TlsStream<TcpStream>>>,
+) {
+    loop {
+        let tcp = match listener.accept().await {
+            Ok((tcp, _)) => tcp,
+            Err(error) => {
+                // Out of file descriptors, or similar: back off briefly.
+                eprintln!("interlaken-net: accepting a connection failed: {error}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        if ready.is_closed() {
+            return;
+        }
+        let (acceptor, ready) = (acceptor.clone(), ready.clone());
+        tokio::spawn(async move {
+            // A refused or stalled handshake just closes the connection;
+            // the verifier has counted a refusal.
+            if let Ok(Ok(stream)) =
+                tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await
+            {
+                let _ = ready.send(Ok(stream)).await;
+            }
+        });
+    }
+}
+
+/// Serve `handler` on `listener` with mutual TLS, checked against `tls`'s
+/// current material, until `shutdown` resolves.
 ///
 /// # Errors
 ///
 /// Returns the server's error if TLS can't be set up or serving fails.
 pub(crate) async fn serve(
     listener: tokio::net::TcpListener,
-    tls: ServerTlsConfig,
+    tls: Arc<TlsState>,
     handler: Arc<dyn Handler>,
     counters: Arc<Counters>,
     limits: Limits,
     shutdown: impl std::future::Future<Output = ()>,
-) -> Result<(), tonic::transport::Error> {
-    Server::builder()
-        .tls_config(tls)?
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let acceptor = TlsAcceptor::from(tls.server_config()?);
+    let (ready, accepted) = tokio::sync::mpsc::channel(ACCEPTED_QUEUE);
+    let accepting = tokio::spawn(accept(listener, acceptor, ready));
+    let served = Server::builder()
         .timeout(limits.timeout)
         .concurrency_limit_per_connection(limits.concurrency)
         .load_shed(true)
+        .max_connection_age(limits.max_connection_age)
         .add_service(ReplicaService { handler, counters })
-        .serve_with_incoming_shutdown(TcpIncoming::from(listener), shutdown)
-        .await
+        .serve_with_incoming_shutdown(
+            tokio_stream::wrappers::ReceiverStream::new(accepted),
+            shutdown,
+        )
+        .await;
+    accepting.abort();
+    Ok(served?)
 }

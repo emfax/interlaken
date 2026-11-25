@@ -1,12 +1,12 @@
 ---
 id: 0041
 title: Peer Identity and Certificate Rotation
-status: proposal  # proposal | accepted | implemented | superseded
+status: implemented  # proposal | accepted | implemented | superseded
 tags: [network, replication, security]
 feature-flag:
 created: 2026-11-25
-accepted:
-implemented:
+accepted: 2026-11-25
+implemented: 2026-11-25
 spec-sections: []
 superseded-by:
 ---
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal.
+Implemented, in all three phases at once. The *As implemented* notes after the phases record where the result differs from this design, chiefly: `TlsConfig::ca` stays one field holding one or more CAs; a member's own chain is checked on rotation, not at startup; and every chain's CA must be valid now, not only in the grace period.
 
 ## Summary
 
@@ -172,6 +172,18 @@ cluster.rotate_tls(TlsMaterial { cas: vec![old_ca, new_ca], cert, key })?;
 
 - `Cluster::rotate_tls`.
 - The book's cluster chapter: identities, rotation, the grace period and what to monitor.
+
+### As implemented
+
+- **The acceptor:** the server accepts TCP connections itself and completes each TLS handshake in a task of its own, with a 10-second limit, passing established connections to tonic's `serve_with_incoming_shutdown`. A refused or stalled handshake just closes the connection.
+- **The client** builds each peer's channel with `Endpoint::tls_config_with_verifier`, from the current certificate and key and a verifier that knows the node dialled. Instead of dropping channels on rotation, the TLS state counts rotations, and a channel made before the last one is remade on its next use.
+- **One `ca` field:** `TlsConfig::ca` and `TlsMaterial::ca` hold one or more PEM certificates, one after another, rather than a separate `cas` list; existing configurations hold one. `with_verifier` and `with_expired_grace` set the new fields.
+- **Own chain on rotation only:** `rotate_tls` requires the key to match the certificate and the certificate to chain to one of the CAs, as of the certificate's own validity, so an expired certificate can be loaded during an outage. Opening a cluster checks only the key, so a misconfigured member still starts and is refused by its peers, as the existing tests expect.
+- **CAs valid now, always:** webpki doesn't check trust anchors' dates, and in the grace period checks the chain as of one second before the certificate expired. Every chain's CA, and its intermediates, are therefore checked against the current time separately, with a small reader for certificates' validity dates. A CA past its own expiry is refused in every case, which tonic's configuration didn't do.
+- **Unknown membership:** `MemberIdentity` accepts any ID with its prefix before a membership is known, as designed, but never an expired certificate then.
+- **Metrics:** refusals are counted with the reason `chain` as well (no chain to a trusted CA, or a CA not valid now). The expiry gauge carries a `node` label, like the Raft gauges, since several members can share a process.
+- **Root hints:** the CA names the server offers clients as hints are those at startup. A client presents its one certificate regardless, so a CA rotation doesn't depend on them.
+- **Tests:** unit tests for both verifiers and the date reader; cluster tests for identities across clusters, a removed member refused once its connections age out, a member expired within the grace period kept and beyond it refused, a non-member with an expired certificate refused, rotation to a new CA in two steps while writing, and bad rotations refused. Each asserts the refusal counter grew for the expected reason. Rotation during network faults (the process tests) isn't covered yet.
 
 ## Consequences
 
