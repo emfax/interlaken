@@ -3,13 +3,14 @@
 
 mod connection;
 mod engine;
-mod pipeline;
+pub(crate) mod pipeline;
 mod result;
 mod script;
 mod stream;
 mod usage;
 
 pub use connection::Session;
+pub(crate) use connection::{Kind, may_change};
 pub use engine::{Engine, EngineOptions};
 pub use result::QueryResult;
 pub use script::{ScriptEntry, ScriptReport};

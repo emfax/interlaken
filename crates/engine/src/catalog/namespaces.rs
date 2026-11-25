@@ -184,7 +184,7 @@ fn within(stored: &str, namespace: &str) -> bool {
 /// Drop namespace `name`. Without `cascade` it must be empty; with it,
 /// everything in it goes first: foreign keys (including those of other
 /// namespaces' tables referring to its tables), memberships, entity and
-/// principal types, then tables with their indexes.
+/// principal types, then tables with their indexes, and its files' content.
 ///
 /// # Errors
 ///
@@ -273,6 +273,8 @@ pub async fn drop_namespace(txn: &Txn, name: &str, cascade: bool) -> Result<(), 
         txn.next_statement();
     }
     crate::policy::drop_policy_scope(txn, name).await?;
+    crate::files::drop_namespace_chunks(txn, name).await?;
+    crate::files::forget_file_namespace(txn, name).await?;
     let table = table(txn).await?;
     rows::delete(txn, &table, &[Datum::Text(name.to_owned())]).await?;
     bump_schema_version(txn).await?;

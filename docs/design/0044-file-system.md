@@ -1,11 +1,11 @@
 ---
 id: 0044
 title: File System
-status: proposal  # proposal | accepted | implemented | superseded
+status: accepted  # proposal | accepted | implemented | superseded
 tags: [storage, engine, security, replication]
 feature-flag:
 created: 2026-11-25
-accepted:
+accepted: 2026-11-25
 implemented:
 spec-sections: []
 superseded-by:
@@ -15,7 +15,7 @@ superseded-by:
 
 ## Status
 
-Proposal. Builds on ADR-0040 (change feed) and ADR-0042 (namespaces).
+Accepted. Phases 1, 2 and 4 are implemented; phase 3 (object storage) is not. The *As implemented* notes after the phases record where the result differs from this design, chiefly: one entity type, `File`, covers files and directories; chunks live in one engine table rather than a table per namespace; and collection is a call the host makes. Builds on ADR-0040 (change feed) and ADR-0042 (namespaces).
 
 ## Summary
 
@@ -184,6 +184,22 @@ Files belong to a namespace (ADR-0042): its owner owns its root, its quota appli
 ### Phase 4: the book
 
 - A chapter on files: the API, policies over files, quotas and stores.
+
+### As implemented
+
+- **One entity type.** The engine backs at most one entity type per table, so `File` covers files and directories, with a `kind` attribute (`dir` or `file`). Policies write `resource is app::File` with `resource.kind == "dir"` rather than `resource is Dir`. Every node is a member of its directory through a membership whose edges table is `fs_nodes` itself (`id`, `parent`); the root's NULL parent is no edge. Moving a directory into itself fails as a membership cycle would (`23514`, reported as `22023`).
+- **The root** has the id `root`, so `resource in app::File::"root"` holds for every node. Other ids are generated UUIDs.
+- **Owners.** `owner` holds the creating principal as text. `FileOptions::owner_type` names the entity type whose key goes in `owner_id`, declared as the attribute `owner`, so policies can compare `resource.owner == principal`. Principals of other types leave it NULL.
+- **Timestamps** are the transaction's `now()`, not commit timestamps, which aren't known while the transaction runs.
+- **Chunks** live in the engine table `engine_fs_chunks`, keyed by namespace and hash, rather than in a table per namespace. Clients can't query engine tables, so content is reachable only through a file the principal may read. Staging a chunk that exists refreshes its write time instead of writing it again.
+- **No `attributes` column.** The `jsonb` attributes and `set_attributes` were left out. Applications can keep their own table keyed by node id.
+- **Atomicity.** Each operation that writes metadata runs in the session's transaction, or in one implicit transaction for both its metadata and usage changes. The root row is written directly at `enable_files`, before the table is governed, so active policies that already name the namespace's `File` type don't block it.
+- **Errors** follow section 5. A malformed path, or an attempt to move or remove the root, is `22023`. A file given for a directory, or the reverse, is `42809`. A corrupt or missing chunk is `XX001`.
+- **Quotas** count file sizes, not stored chunk bytes: shared and staged chunks aren't counted. A writer stops when its file would pass the byte quota left at the time it was created, and the exact check happens when it finishes. `Session::set_file_quota` changes quotas.
+- **Collection** is `Engine::collect_files(grace)`, which the host calls periodically. There is no background pass. Writers don't touch their chunks while they run, so `grace` must outlast the longest write and the transaction it finishes in.
+- **Key-value separation** applies to `data` keyspaces created from now on, for values of 64 KiB or more. A database made before keeps its layout until a snapshot install creates a new `data` keyspace.
+- **Random values per statement.** File ids are generated with `gen_random_uuid()`. That exposed a bug: every statement of a transaction started from the same random seed, so several inserts in one transaction got the same ids. Each statement now derives its own seed from the transaction's.
+- **Not built:** phase 3, symbolic links, range writes, and separate read caches.
 
 ## Consequences
 

@@ -75,6 +75,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "An `OFFSET` is negative.",
     ),
     state(
+        "22023",
+        "invalid_parameter_value",
+        "A file path is malformed (ADR-0044): it doesn't start with `/`, has an empty, `.` or `..` name, or would move a directory into itself or move or remove the root.",
+    ),
+    state(
         "22025",
         "invalid_escape_sequence",
         "A `LIKE` pattern ends with an escape character.",
@@ -130,6 +135,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "The transaction stayed open longer than `StorageOptions::max_transaction_age`; versions it needs may have been garbage-collected, so it can't continue.",
     ),
     state(
+        "2BP01",
+        "dependent_objects_still_exist",
+        "A directory to remove still holds files or directories, including ones the principal can't see.",
+    ),
+    state(
         "40001",
         "serialization_failure",
         "The transaction conflicted with a concurrent one, detected when it commits; retry it.",
@@ -172,6 +182,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "An expression has the wrong type for where it is used, or a parameter value is not of its declared type.",
     ),
     state(
+        "42809",
+        "wrong_object_type",
+        "A file was given where a directory is needed, or a directory where a file is.",
+    ),
+    state(
         "42883",
         "undefined_function",
         "No function of that name accepts the argument types.",
@@ -191,6 +206,11 @@ pub const SQLSTATES: &[SqlState] = &[
         "53200",
         "out_of_memory",
         "An operator needed more memory than the query's budget or the node's pool allows.",
+    ),
+    state(
+        "53400",
+        "configuration_limit_exceeded",
+        "A write would pass its namespace's file quota of bytes or files.",
     ),
     state(
         "54000",
@@ -213,8 +233,23 @@ pub const SQLSTATES: &[SqlState] = &[
         "A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit.",
     ),
     state(
+        "58P01",
+        "undefined_file",
+        "No file or directory is at the path, or the principal may not read it or a directory above it.",
+    ),
+    state(
+        "58P02",
+        "duplicate_file",
+        "A file or directory is at the path already, perhaps one the principal can't see.",
+    ),
+    state(
         "XX000",
         "internal_error",
         "An internal error: a storage failure, or the stored catalog disagrees with itself.",
+    ),
+    state(
+        "XX001",
+        "data_corrupted",
+        "A file chunk is missing or doesn't match its BLAKE3 hash.",
     ),
 ];

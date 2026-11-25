@@ -22,6 +22,7 @@ mod authz;
 pub mod catalog;
 mod error;
 mod feed;
+pub mod files;
 pub mod policy;
 pub mod privileges;
 mod session;
@@ -90,6 +91,10 @@ mod book {
     /// Data definition: schema scripts.
     #[doc = include_str!("../../../docs/book/src/ddl/scripts.md")]
     struct Scripts;
+
+    /// Data definition: files.
+    #[doc = include_str!("../../../docs/book/src/ddl/files.md")]
+    struct Files;
 
     /// Security: privileges.
     #[doc = include_str!("../../../docs/book/src/security/privileges.md")]

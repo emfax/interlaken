@@ -961,6 +961,9 @@ async fn activate_policies(
 /// - `ir,parse`: each form parses as a plan, an operator or an expression;
 /// - `ir` holding DDL: the block runs as a script in a transaction that is
 ///   rolled back (ADR-0043);
+/// - `cedar` and `rls`: the policies activate on the example database, or
+///   fail with SQLSTATE `CODE` given `error=CODE`; `ignore` skips policies
+///   written for another schema;
 /// - `ir,error=CODE`: the block is one statement that fails with SQLSTATE `CODE`
 ///   (run in a transaction that is rolled back).
 ///
@@ -978,6 +981,10 @@ async fn ir_examples_are_valid() {
             _ => continue,
         };
         let mode = parts.next().unwrap_or("");
+        if language.is_some() && mode == "ignore" {
+            // Policies over a schema other than the example database's.
+            continue;
+        }
         if let Some(language) = language {
             let at = format!("docs/book/src/{}:{}", block.chapter, block.line);
             let result = activate_policies(&mut session, language, &block.text).await;

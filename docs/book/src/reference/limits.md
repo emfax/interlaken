@@ -20,6 +20,7 @@ Interlaken is pre-1.0. This chapter collects what it doesn't do yet, and the lim
 - **Defaults:** columns have no default values; an omitted column is NULL.
 - **Constraints:** primary keys, unique indexes, NOT NULL and foreign keys. Foreign keys are checked when each statement ends, never deferred to commit, and updates of referenced keys don't cascade. There are no check constraints or sequences.
 - **Views:** none.
+- **Files:** file content is always stored in the database and replicated by Raft; object storage is designed (ADR-0044 phase 3) but not built. There are no links, in-place partial writes or per-file attributes, and unreferenced content stays until the host calls `Engine::collect_files` (see [Files](../ddl/files.md)).
 - **Types tables can't hold:** records, entity references and arrays of arrays (`42P16`). Arrays and `jsonb` can't be key columns, and float columns are never used as index keys.
 
 ### The IR text language

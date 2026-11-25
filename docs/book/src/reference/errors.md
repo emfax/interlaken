@@ -17,6 +17,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `22012` | `division_by_zero` | Division or modulo by zero. |
 | `2201W` | `invalid_row_count_in_limit_clause` | A `LIMIT` is negative. |
 | `2201X` | `invalid_row_count_in_result_offset_clause` | An `OFFSET` is negative. |
+| `22023` | `invalid_parameter_value` | A file path is malformed (ADR-0044): it doesn't start with `/`, has an empty, `.` or `..` name, or would move a directory into itself or move or remove the root. |
 | `22025` | `invalid_escape_sequence` | A `LIKE` pattern ends with an escape character. |
 | `22P02` | `invalid_text_representation` | Text cast to another type is not a valid value of it. |
 | `23502` | `not_null_violation` | A NULL was written to a NOT NULL column: one whose type isn't optional. |
@@ -28,6 +29,7 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `25P01` | `no_active_sql_transaction` | A transaction operation was called with no transaction open. |
 | `25P02` | `in_failed_sql_transaction` | An earlier statement in the transaction failed; only a rollback (to a savepoint or entirely) is accepted. |
 | `25P04` | `transaction_timeout` | The transaction stayed open longer than `StorageOptions::max_transaction_age`; versions it needs may have been garbage-collected, so it can't continue. |
+| `2BP01` | `dependent_objects_still_exist` | A directory to remove still holds files or directories, including ones the principal can't see. |
 | `40001` | `serialization_failure` | The transaction conflicted with a concurrent one, detected when it commits; retry it. |
 | `42000` | `syntax_error_or_access_rule_violation` | The plan failed resolution or verification for a reason without a more specific code. |
 | `42501` | `insufficient_privilege` | The principal may not do this: a column its policies deny, a row its write checks reject, a masked column a write can't carry, an operation that needs a privilege it lacks, or a privileged operator or system table in a client plan. |
@@ -38,14 +40,19 @@ This table is generated from `interlaken_engine::SQLSTATES`. A test checks that 
 | `42704` | `undefined_object` | An index does not exist. |
 | `42725` | `ambiguous_function` | A function call matches more than one overload equally well. |
 | `42804` | `datatype_mismatch` | An expression has the wrong type for where it is used, or a parameter value is not of its declared type. |
+| `42809` | `wrong_object_type` | A file was given where a directory is needed, or a directory where a file is. |
 | `42883` | `undefined_function` | No function of that name accepts the argument types. |
 | `42P01` | `undefined_table` | A table does not exist. |
 | `42P07` | `duplicate_table` | A table or index of that name already exists. |
 | `42P16` | `invalid_table_definition` | A DDL definition is invalid: an empty or reserved name, a type tables can't hold, a table that backs an entity type, a declaration that is missing, duplicated or doesn't fit the others, or a function overload that doesn't match exactly. |
 | `53200` | `out_of_memory` | An operator needed more memory than the query's budget or the node's pool allows. |
+| `53400` | `configuration_limit_exceeded` | A write would pass its namespace's file quota of bytes or files. |
 | `54000` | `program_limit_exceeded` | The transaction's buffered writes exceed `StorageOptions::max_write_set_bytes`. |
 | `55000` | `object_not_in_prerequisite_state` | A policy proposal is missing, not pending, stale, unverified, awaiting a prover, failed a deployment gate or needs confirmation; a revocation would remove the last administrator; or a change feed's position is older than the change log keeps, or the database keeps none. |
 | `57014` | `query_canceled` | The statement ran past its `statement_timeout`, or a wait for a commit to become visible on this node timed out. |
 | `57P03` | `cannot_connect_now` | A replicated database can't commit now: it has no leader, or the leader can't be reached. The transaction didn't commit. |
+| `58P01` | `undefined_file` | No file or directory is at the path, or the principal may not read it or a directory above it. |
+| `58P02` | `duplicate_file` | A file or directory is at the path already, perhaps one the principal can't see. |
 | `XX000` | `internal_error` | An internal error: a storage failure, or the stored catalog disagrees with itself. |
+| `XX001` | `data_corrupted` | A file chunk is missing or doesn't match its BLAKE3 hash. |
 <!-- end generated: sqlstates -->

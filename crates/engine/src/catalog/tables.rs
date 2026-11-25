@@ -136,6 +136,14 @@ pub fn catalog_table_description(name: &str) -> Option<&'static str> {
             "Principal types that no table backs, such as the first administrator's: policies \
              can name them, and their principals have no attributes or ancestors."
         }
+        "engine_fs_namespaces" => {
+            "Namespaces with files (ADR-0044), and the entity type of their files' owners, \
+             with its key's type. Created when files are first enabled."
+        }
+        "engine_fs_chunks" => {
+            "File content (ADR-0044): chunks of up to 1 MiB by namespace and BLAKE3 hash, with \
+             when each was last written. Created when files are first enabled."
+        }
         "engine_policy_set" => {
             "One row holding the active policy set: its version, language and text."
         }

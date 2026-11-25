@@ -970,3 +970,27 @@ async fn the_last_admin_cant_be_revoked() {
         root.grant(&user(1), Privilege::Admin).await.unwrap();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// Assert `gen_random_uuid()` gives new values in each statement of a
+/// transaction, not the same sequence again.
+async fn random_values_differ_between_statements() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = support::session::create(dir.path()).await;
+    let mut root = support::session::session(&engine, support::session::admin());
+    root.create_table(&support::session::table("ids", &[("id", "text")], &["id"]))
+        .await
+        .unwrap();
+    root.begin(Default::default()).await.unwrap();
+    for _ in 0..3 {
+        root.query(
+            "(plan (insert ids (values (columns a) (row (cast (call gen_random_uuid) text))) (columns id)))",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    }
+    root.commit().await.unwrap();
+    let rows = root.query("(plan (get ids))", Vec::new()).await.unwrap();
+    assert_eq!(rows.row_count(), 3);
+}

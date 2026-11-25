@@ -10,6 +10,7 @@ license.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 futures.workspace = true
+blake3.workspace = true
 metrics.workspace = true
 interlaken-exec.workspace = true
 interlaken-ir.workspace = true
@@ -36,6 +37,7 @@ interlaken-telemetry.workspace = true
 interlaken-test-alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 
 [[bench]]
 name = "executor"

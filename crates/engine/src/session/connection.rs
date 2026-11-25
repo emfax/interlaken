@@ -74,7 +74,7 @@ fn statement_kind(node: &Physical) -> &'static str {
 
 /// What a statement may change, which decides the privilege it needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     /// A query or DML statement: governed by policies, no privilege needed.
     Query,
     /// DDL: needs `admin`; the transaction's catalog is then uncommitted.
@@ -88,7 +88,7 @@ enum Kind {
 /// Check that the principal may change the namespaces in `namespaces`:
 /// administrators may change anything, and an owner its own namespaces
 /// (ADR-0042). With no namespaces, only administrators may.
-async fn may_change(step: &Step<'_>, namespaces: &[&str]) -> Result<(), EngineError> {
+pub(crate) async fn may_change(step: &Step<'_>, namespaces: &[&str]) -> Result<(), EngineError> {
     if step.privileges.admin {
         return Ok(());
     }
@@ -143,10 +143,30 @@ struct Open {
     exec: Transaction,
     /// Evaluation settings fixed at the transaction's start.
     options: ExecOptions,
+    /// Statements started so far, which gives each its own random seed.
+    statements: u64,
     /// DDL ran in this transaction.
     catalog_dirty: bool,
     /// A policy change ran in this transaction.
     policies_dirty: bool,
+}
+
+impl Open {
+    /// Return the evaluation settings of the next statement: the
+    /// transaction's `now()`, and a random seed of its own, so
+    /// `random()` and `gen_random_uuid()` don't repeat their values in
+    /// each statement of a transaction.
+    fn statement_options(&mut self) -> ExecOptions {
+        self.statements += 1;
+        // splitmix64 of the statement number spreads nearby numbers apart.
+        let mut z = self.statements.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ExecOptions {
+            seed: self.options.seed ^ z ^ (z >> 31),
+            ..self.options
+        }
+    }
 }
 
 /// A DML statement whose stream was dropped before its end, running to
@@ -420,6 +440,7 @@ impl Session {
         self.txn = Some(Open {
             exec,
             options,
+            statements: 0,
             catalog_dirty: false,
             policies_dirty: false,
         });
@@ -556,7 +577,7 @@ impl Session {
 
     /// Run `body` as one statement of `kind`, in the open transaction or in
     /// its own.
-    async fn run<T>(
+    pub(crate) async fn run<T>(
         &mut self,
         kind: Kind,
         body: impl AsyncFnOnce(&Step<'_>) -> Result<T, EngineError>,
@@ -628,8 +649,11 @@ impl Session {
         let search_path = &self.search_path;
         let timeout = self.statement_timeout;
         let open = self.txn.as_mut().ok_or(EngineError::NoTransaction)?;
-        let (catalog_dirty, policies_dirty, options) =
-            (open.catalog_dirty, open.policies_dirty, open.options);
+        let (catalog_dirty, policies_dirty, options) = (
+            open.catalog_dirty,
+            open.policies_dirty,
+            open.statement_options(),
+        );
         let deadline = timeout.map(|limit| Instant::now() + limit);
         let result = open
             .exec
@@ -855,8 +879,11 @@ impl Session {
         let engine = &self.engine.inner;
         let context = &self.context;
         let search_path = &self.search_path;
-        let (catalog_dirty, policies_dirty, options) =
-            (open.catalog_dirty, open.policies_dirty, open.options);
+        let (catalog_dirty, policies_dirty, options) = (
+            open.catalog_dirty,
+            open.policies_dirty,
+            open.statement_options(),
+        );
         let txn = open.exec.txn();
         let written_before = txn.write_set_bytes();
         let reads = Arc::new(UsageCounters::default());
@@ -1020,6 +1047,12 @@ impl Session {
             }
         })
         .await
+    }
+
+    /// Return the engine's storage, for work outside the session's
+    /// transaction such as staging file chunks (ADR-0044).
+    pub(crate) fn storage(&self) -> interlaken_storage::FjallStorage {
+        self.engine.inner.storage.clone()
     }
 
     /// Return the privileges the session's principal holds.

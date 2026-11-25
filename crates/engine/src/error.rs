@@ -114,6 +114,28 @@ pub enum EngineError {
         /// Why it failed.
         source: Box<EngineError>,
     },
+    /// No file or directory is at the path, or the principal may not read
+    /// it or a directory above it (ADR-0044).
+    #[error("no such file or directory: {0}")]
+    FileNotFound(String),
+    /// A file or directory is at the path already (ADR-0044).
+    #[error("file exists: {0}")]
+    FileExists(String),
+    /// A directory to remove holds entries (ADR-0044).
+    #[error("directory not empty: {0}")]
+    DirectoryNotEmpty(String),
+    /// A file was given where a directory is needed, or the reverse (ADR-0044).
+    #[error("wrong kind of file: {0}")]
+    WrongFileKind(String),
+    /// A path that can't name a file (ADR-0044).
+    #[error("invalid path: {0}")]
+    InvalidPath(String),
+    /// A write would pass a namespace's file quota (ADR-0044).
+    #[error("file quota exceeded: {0}")]
+    QuotaExceeded(String),
+    /// A file's content is missing or doesn't match its hash (ADR-0044).
+    #[error("file content is corrupt: {0}")]
+    FileCorrupt(String),
     /// A wait for a commit to become visible on this node timed out (ADR-0040).
     #[error("commit {0} is not visible on this node yet")]
     NotVisible(interlaken_storage::Timestamp),
@@ -178,6 +200,13 @@ impl EngineError {
             Self::NoTransaction => "25P01",
             Self::NotVisible(_) => "57014",
             Self::NotSupported(_) => "0A000",
+            Self::FileNotFound(_) => "58P01",
+            Self::FileExists(_) => "58P02",
+            Self::DirectoryNotEmpty(_) => "2BP01",
+            Self::WrongFileKind(_) => "42809",
+            Self::InvalidPath(_) => "22023",
+            Self::FileCorrupt(_) => "XX001",
+            Self::QuotaExceeded(_) => "53400",
             Self::Script { source, .. } => source.sqlstate(),
             Self::TableDropped(_) => "42P01",
             Self::ProposalNotFound(_)

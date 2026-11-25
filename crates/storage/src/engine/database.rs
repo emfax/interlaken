@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use bytes::Bytes;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, KvSeparationOptions, PersistMode};
 
 use super::meta::{
     FORMAT_VERSION, FORMAT_VERSION_KEY, GC_WATERMARK_KEY, LAST_APPLIED_INDEX_KEY,
@@ -96,6 +96,22 @@ struct DataKeyspace {
     generation: u64,
     /// The keyspace.
     keyspace: Keyspace,
+}
+
+/// Values at least this large are kept apart from the keys in the `data`
+/// keyspace, so compactions don't rewrite them: file chunks are up to
+/// 1 MiB (ADR-0044).
+const SEPARATION_THRESHOLD: u32 = 64 * 1024;
+
+/// Return the options of a `data` keyspace: large values are separated.
+/// The options are fixed when a keyspace is created, so a database made
+/// before this keeps its layout until a snapshot install makes a new one.
+fn data_options(memtable_bytes: u64) -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default()
+        .max_memtable_size(memtable_bytes)
+        .with_kv_separation(Some(
+            KvSeparationOptions::default().separation_threshold(SEPARATION_THRESHOLD),
+        ))
 }
 
 /// Return the name of data keyspace generation `generation`: `data` for the
@@ -205,7 +221,7 @@ impl Engine {
                 db.delete_keyspace(handle)?;
             }
         }
-        let data = db.keyspace(&data_name(generation), create)?;
+        let data = db.keyspace(&data_name(generation), || data_options(memtable_bytes))?;
         let log = db.keyspace(LOG_KEYSPACE, create)?;
         let replica_log = db.keyspace(REPLICA_LOG_KEYSPACE, create)?;
         let changes = db.keyspace(CHANGES_KEYSPACE, create)?;
@@ -782,7 +798,7 @@ impl Engine {
             .generation
             + 1;
         let name = data_name(generation);
-        let create = || KeyspaceCreateOptions::default().max_memtable_size(self.memtable_bytes);
+        let create = || data_options(self.memtable_bytes);
         if self.db.keyspace_exists(&name) {
             let stale = self.db.keyspace(&name, create)?;
             self.db.delete_keyspace(stale)?;

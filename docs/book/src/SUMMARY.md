@@ -32,6 +32,7 @@
 - [Foreign keys](ddl/foreign-keys.md)
 - [Namespaces](ddl/namespaces.md)
 - [Schema scripts](ddl/scripts.md)
+- [Files](ddl/files.md)
 
 # Security
 
