@@ -161,8 +161,10 @@ pub(crate) fn decode_primary_key(bytes: &[u8]) -> Result<Vec<usize>, CatalogErro
         return Err(CatalogError::Corrupt("primary key column list"));
     }
     Ok(bytes
-        .chunks_exact(2)
-        .map(|c| usize::from(u16::from_le_bytes([c[0], c[1]])))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| usize::from(u16::from_le_bytes(c)))
         .collect())
 }
 
@@ -189,7 +191,9 @@ pub(crate) fn decode_index_columns(bytes: &[u8]) -> Result<Vec<IndexColumn>, Cat
         return Err(CatalogError::Corrupt("index column list"));
     }
     bytes
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| {
             if c[2] & !3 != 0 {
                 return Err(CatalogError::Corrupt("index column flags"));

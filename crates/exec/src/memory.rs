@@ -56,14 +56,20 @@ impl std::fmt::Display for MemoryScope {
 
 /// Add `bytes` to `used` unless the total would exceed `limit`, raising `peak` to the new total.
 fn try_add_tracked(used: &AtomicUsize, peak: &AtomicUsize, limit: usize, bytes: usize) -> bool {
-    match used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-        current.checked_add(bytes).filter(|&total| total <= limit)
-    }) {
-        Ok(before) => {
-            peak.fetch_max(before + bytes, Ordering::AcqRel);
-            true
+    // A compare-exchange loop rather than `fetch_update`, which is deprecated
+    // in favour of `try_update`, which is newer than the MSRV.
+    let mut current = used.load(Ordering::Acquire);
+    loop {
+        let Some(total) = current.checked_add(bytes).filter(|&total| total <= limit) else {
+            return false;
+        };
+        match used.compare_exchange_weak(current, total, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                peak.fetch_max(total, Ordering::AcqRel);
+                return true;
+            }
+            Err(actual) => current = actual,
         }
-        Err(_) => false,
     }
 }
 

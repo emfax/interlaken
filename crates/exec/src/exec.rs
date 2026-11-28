@@ -160,7 +160,6 @@ impl ExecContext {
 /// Execution is pull-based and lazy: nothing reads storage until the stream
 /// is polled, and dropping the stream cancels the query. With a deadline
 /// (`statement_timeout`), the query fails once it passes.
-#[must_use]
 pub fn execute(node: &Physical, ctx: &ExecContext) -> BatchStream {
     let mut stream = start(node, ctx);
     if let Some(deadline) = ctx.deadline {
