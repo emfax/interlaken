@@ -102,8 +102,10 @@ fn encode(list: &[i64]) -> Bytes {
 /// Decode a stored list.
 fn decode(bytes: &[u8]) -> Vec<i64> {
     bytes
-        .chunks_exact(8)
-        .map(|c| i64::from_be_bytes(c.try_into().unwrap()))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| i64::from_be_bytes(c))
         .collect()
 }
 

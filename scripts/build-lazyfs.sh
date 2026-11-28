@@ -53,6 +53,11 @@ if ! pkg-config --exists fuse3 && [ ! -f /usr/include/fuse3/fuse.h ]; then
     export LIBRARY_PATH="$headers/usr/lib/$multiarch${LIBRARY_PATH:+:$LIBRARY_PATH}"
 fi
 
+# CMake 4 refuses projects declaring compatibility with CMake < 3.5, as
+# LazyFS's FetchContent dependency toml11 does; this lets them configure.
+# Older CMake ignores it.
+export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
+
 jobs="${JOBS:-4}"
 (cd "$dir/libs/libpcache" && mkdir -p build && cd build && cmake .. >/dev/null && cmake --build . -j "$jobs")
 (cd "$dir/lazyfs" && mkdir -p build && cd build && cmake -DLAZYFS_BUILD_TESTS=OFF .. >/dev/null && cmake --build . -j "$jobs")
